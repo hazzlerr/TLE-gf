@@ -49,6 +49,8 @@ class Starboard(commands.Cog):
         entry = cf_common.user_db.get_starboard_entry(payload.guild_id, emoji_str)
         if entry is None:
             return
+        if entry.channel_id is None:
+            return  # Emoji configured but no starboard channel set yet
         channel_id, threshold, color = int(entry.channel_id), entry.threshold, entry.color
         logger.debug(f'Reaction add: emoji={emoji_str} guild={payload.guild_id} '
                      f'msg={payload.message_id} user={payload.user_id} '
@@ -57,6 +59,9 @@ class Starboard(commands.Cog):
             await self.check_and_add_to_starboard(channel_id, threshold, color, emoji_str, payload)
         except StarboardCogError as e:
             logger.info(f'Failed to starboard msg={payload.message_id} emoji={emoji_str}: {e!r}')
+        except Exception as e:
+            logger.error(f'Unexpected error in starboard processing msg={payload.message_id} '
+                         f'emoji={emoji_str} guild={payload.guild_id}: {e}', exc_info=True)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload):
@@ -122,7 +127,7 @@ class Starboard(commands.Cog):
             else:
                 embed.add_field(name='Attachment', value=f'[{file.filename}]({file.url})', inline=False)
 
-        embed.set_footer(text=str(message.author), icon_url=message.author.avatar)
+        embed.set_footer(text=str(message.author), icon_url=message.author.display_avatar.url)
         return embed
 
     async def check_and_add_to_starboard(self, starboard_channel_id, threshold, color, emoji_str, payload):
@@ -180,21 +185,28 @@ class Starboard(commands.Cog):
         logger.info('=== BACKFILL START ===')
 
         try:
-            # Phase 1: count total messages to process
-            for guild in self.bot.guilds:
-                messages = cf_common.user_db.get_all_starboard_messages_for_guild(str(guild.id))
-                self.backfill_total += len(messages)
-                logger.info(f'Backfill: guild={guild.name} ({guild.id}) has {len(messages)} starboard messages')
+            guilds = list(self.bot.guilds)  # Snapshot to avoid mutation during iteration
+
+            # Phase 1: collect all work, skipping already-backfilled entries
+            guild_work = {}
+            for guild in guilds:
+                all_messages = cf_common.user_db.get_all_starboard_messages_for_guild(str(guild.id))
+                # Skip entries that already have author_id set (already backfilled)
+                pending = [m for m in all_messages if m.author_id is None]
+                if pending:
+                    guild_work[guild] = pending
+                self.backfill_total += len(pending)
+                logger.info(f'Backfill: guild={guild.name} ({guild.id}) has {len(pending)} '
+                            f'pending messages (of {len(all_messages)} total)')
 
             if self.backfill_total == 0:
                 logger.info('Backfill: no starboard messages to backfill')
                 return
 
-            logger.info(f'Backfill: {self.backfill_total} total messages across {len(self.bot.guilds)} guild(s)')
+            logger.info(f'Backfill: {self.backfill_total} total messages across {len(guilds)} guild(s)')
 
             # Phase 2: process each message
-            for guild in self.bot.guilds:
-                messages = cf_common.user_db.get_all_starboard_messages_for_guild(str(guild.id))
+            for guild, messages in guild_work.items():
                 emojis = cf_common.user_db.get_starboard_emojis_for_guild(str(guild.id))
                 emoji_set = {e.emoji for e in emojis}
                 logger.info(f'Backfill: processing guild={guild.name} ({guild.id}), '
@@ -366,25 +378,22 @@ class Starboard(commands.Cog):
 
     @starboard.command(brief='Set starboard to current channel')
     @commands.has_role(constants.TLE_ADMIN)
-    async def here(self, ctx, emoji: str):
-        """Set the current channel as the starboard channel for an emoji."""
-        existing = cf_common.user_db.get_starboard_entry(ctx.guild.id, emoji)
-        if existing is None:
-            raise StarboardCogError(f'Emoji {emoji} is not configured. Use `starboard add {emoji}` first.')
-        cf_common.user_db.set_starboard_channel(ctx.guild.id, emoji, ctx.channel.id)
-        logger.info(f'CMD starboard here: guild={ctx.guild.id} emoji={emoji} '
+    async def here(self, ctx):
+        """Set the current channel as the starboard channel (shared by all emojis)."""
+        cf_common.user_db.set_starboard_channel(ctx.guild.id, ctx.channel.id)
+        logger.info(f'CMD starboard here: guild={ctx.guild.id} '
                     f'channel={ctx.channel.id} by user={ctx.author.id}')
         await ctx.send(embed=discord_common.embed_success(
-            f'Starboard channel for {emoji} set to {ctx.channel.mention}'
+            f'Starboard channel set to {ctx.channel.mention}'
         ))
 
     @starboard.command(brief='Clear starboard channel')
     @commands.has_role(constants.TLE_ADMIN)
-    async def clear(self, ctx, emoji: str):
-        """Clear the starboard channel setting for an emoji."""
-        cf_common.user_db.clear_starboard_channel(ctx.guild.id, emoji)
-        logger.info(f'CMD starboard clear: guild={ctx.guild.id} emoji={emoji} by user={ctx.author.id}')
-        await ctx.send(embed=discord_common.embed_success(f'Starboard channel cleared for {emoji}'))
+    async def clear(self, ctx):
+        """Clear the starboard channel setting (affects all emojis)."""
+        cf_common.user_db.clear_starboard_channel(ctx.guild.id)
+        logger.info(f'CMD starboard clear: guild={ctx.guild.id} by user={ctx.author.id}')
+        await ctx.send(embed=discord_common.embed_success('Starboard channel cleared'))
 
     @starboard.command(brief='Remove a message from starboard')
     @commands.has_role(constants.TLE_ADMIN)
