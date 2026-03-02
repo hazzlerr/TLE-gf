@@ -91,9 +91,21 @@ class UserDbConn:
         registry.ensure_version_table(self.conn)
         current = registry.get_current_version(self.conn)
         if current is None:
-            # Fresh DB — tables already latest schema, stamp version
-            logger.info(f'Fresh database detected, stamping version to {registry.latest_version}')
-            registry.set_version(self.conn, registry.latest_version)
+            # No version stamped yet. Check if this is a truly fresh DB or a
+            # pre-upgrade existing DB by looking for legacy table data.
+            has_legacy = self.conn.execute(
+                'SELECT 1 FROM starboard LIMIT 1'
+            ).fetchone() is not None
+            if has_legacy:
+                # Pre-upgrade DB with existing data — start from baseline so migrations run
+                logger.info('Pre-upgrade database detected (has legacy starboard data), '
+                            'starting from 1.0.0 so migrations run')
+                registry.set_version(self.conn, '1.0.0')
+                registry.run(self.conn)
+            else:
+                # Truly fresh DB — tables already latest schema, stamp version
+                logger.info(f'Fresh database detected, stamping version to {registry.latest_version}')
+                registry.set_version(self.conn, registry.latest_version)
         else:
             # Existing DB — run pending upgrades
             logger.info(f'Existing database at version {current}, checking for upgrades...')
@@ -381,15 +393,17 @@ class UserDbConn:
         return rc
 
     def _fetchone(self, query: str, params=None, row_factory=None):
+        original = self.conn.row_factory
         self.conn.row_factory = row_factory
         res = self.conn.execute(query, params).fetchone()
-        self.conn.row_factory = None
+        self.conn.row_factory = original
         return res
 
     def _fetchall(self, query: str, params=None, row_factory=None):
+        original = self.conn.row_factory
         self.conn.row_factory = row_factory
         res = self.conn.execute(query, params).fetchall()
-        self.conn.row_factory = None
+        self.conn.row_factory = original
         return res
 
     def new_challenge(self, user_id, issue_time, prob, delta):
@@ -646,27 +660,32 @@ class UserDbConn:
         return rc
 
     # --- New multi-emoji starboard methods (v1 tables) ---
+    # All IDs are cast to str() at the boundary to avoid SQLite int-vs-TEXT mismatch.
 
     def get_starboard_entry(self, guild_id, emoji):
-        """Get starboard config for a guild+emoji. Returns (channel_id, threshold, color) or None."""
+        """Get starboard config for a guild+emoji. Returns (channel_id, threshold, color) or None.
+        Uses LEFT JOIN so the emoji config is found even if no channel is set yet."""
+        guild_id = str(guild_id)
         query = '''
             SELECT c.channel_id, e.threshold, e.color
-            FROM starboard_config_v1 c
-            JOIN starboard_emoji_v1 e ON c.guild_id = e.guild_id
-            WHERE c.guild_id = ? AND e.emoji = ?
+            FROM starboard_emoji_v1 e
+            LEFT JOIN starboard_config_v1 c ON c.guild_id = e.guild_id
+            WHERE e.guild_id = ? AND e.emoji = ?
         '''
         return self.conn.execute(query, (guild_id, emoji)).fetchone()
 
-    def set_starboard_channel(self, guild_id, emoji, channel_id):
-        """Set the starboard channel for a guild and ensure the emoji config exists."""
+    def set_starboard_channel(self, guild_id, channel_id):
+        """Set the starboard channel for a guild (one channel per guild, shared by all emojis)."""
+        guild_id = str(guild_id)
         self.conn.execute(
             'INSERT OR REPLACE INTO starboard_config_v1 (guild_id, channel_id) VALUES (?, ?)',
-            (guild_id, channel_id)
+            (guild_id, str(channel_id))
         )
         self.conn.commit()
 
-    def clear_starboard_channel(self, guild_id, emoji):
+    def clear_starboard_channel(self, guild_id):
         """Clear the starboard channel for a guild."""
+        guild_id = str(guild_id)
         self.conn.execute(
             'DELETE FROM starboard_config_v1 WHERE guild_id = ?',
             (guild_id,)
@@ -674,7 +693,13 @@ class UserDbConn:
         self.conn.commit()
 
     def add_starboard_emoji(self, guild_id, emoji, threshold, color):
-        """Add or update an emoji configuration for a guild's starboard."""
+        """Add or update an emoji configuration for a guild's starboard.
+        Also ensures a starboard_config_v1 row exists (with NULL channel if not yet set)."""
+        guild_id = str(guild_id)
+        self.conn.execute(
+            'INSERT OR IGNORE INTO starboard_config_v1 (guild_id, channel_id) VALUES (?, NULL)',
+            (guild_id,)
+        )
         self.conn.execute(
             'INSERT OR REPLACE INTO starboard_emoji_v1 (guild_id, emoji, threshold, color) VALUES (?, ?, ?, ?)',
             (guild_id, emoji, threshold, color)
@@ -683,6 +708,7 @@ class UserDbConn:
 
     def remove_starboard_emoji(self, guild_id, emoji):
         """Remove an emoji from a guild's starboard config and its tracked messages."""
+        guild_id = str(guild_id)
         self.conn.execute(
             'DELETE FROM starboard_emoji_v1 WHERE guild_id = ? AND emoji = ?',
             (guild_id, emoji)
@@ -695,6 +721,7 @@ class UserDbConn:
 
     def update_starboard_threshold(self, guild_id, emoji, threshold):
         """Update the reaction threshold for an emoji."""
+        guild_id = str(guild_id)
         rc = self.conn.execute(
             'UPDATE starboard_emoji_v1 SET threshold = ? WHERE guild_id = ? AND emoji = ?',
             (threshold, guild_id, emoji)
@@ -704,6 +731,7 @@ class UserDbConn:
 
     def update_starboard_color(self, guild_id, emoji, color):
         """Update the embed color for an emoji."""
+        guild_id = str(guild_id)
         rc = self.conn.execute(
             'UPDATE starboard_emoji_v1 SET color = ? WHERE guild_id = ? AND emoji = ?',
             (color, guild_id, emoji)
@@ -715,35 +743,37 @@ class UserDbConn:
                                  author_id=None, channel_id=None):
         """Track a new starboard message in v1 table."""
         self.conn.execute(
-            'INSERT OR REPLACE INTO starboard_message_v1 '
+            'INSERT OR IGNORE INTO starboard_message_v1 '
             '(original_msg_id, starboard_msg_id, guild_id, emoji, author_id, channel_id) '
             'VALUES (?, ?, ?, ?, ?, ?)',
-            (original_msg_id, starboard_msg_id, guild_id, emoji, author_id, channel_id)
+            (str(original_msg_id), str(starboard_msg_id), str(guild_id), emoji,
+             str(author_id) if author_id else None,
+             str(channel_id) if channel_id else None)
         )
         self.conn.commit()
 
     def check_exists_starboard_message_v1(self, original_msg_id, emoji):
         """Check if a message is already tracked in v1 table for this emoji."""
         query = 'SELECT 1 FROM starboard_message_v1 WHERE original_msg_id = ? AND emoji = ?'
-        res = self.conn.execute(query, (original_msg_id, emoji)).fetchone()
+        res = self.conn.execute(query, (str(original_msg_id), emoji)).fetchone()
         return res is not None
 
     def get_starboard_message_v1(self, original_msg_id, emoji):
         """Get a starboard message entry."""
         query = 'SELECT * FROM starboard_message_v1 WHERE original_msg_id = ? AND emoji = ?'
-        return self.conn.execute(query, (original_msg_id, emoji)).fetchone()
+        return self.conn.execute(query, (str(original_msg_id), emoji)).fetchone()
 
     def remove_starboard_message(self, *, original_msg_id=None, emoji=None, starboard_msg_id=None):
         """Remove starboard message(s). Use original_msg_id+emoji or starboard_msg_id."""
         if starboard_msg_id is not None:
             query = 'DELETE FROM starboard_message_v1 WHERE starboard_msg_id = ?'
-            rc = self.conn.execute(query, (starboard_msg_id,)).rowcount
+            rc = self.conn.execute(query, (str(starboard_msg_id),)).rowcount
         elif original_msg_id is not None and emoji is not None:
             query = 'DELETE FROM starboard_message_v1 WHERE original_msg_id = ? AND emoji = ?'
-            rc = self.conn.execute(query, (original_msg_id, emoji)).rowcount
+            rc = self.conn.execute(query, (str(original_msg_id), emoji)).rowcount
         elif original_msg_id is not None:
             query = 'DELETE FROM starboard_message_v1 WHERE original_msg_id = ?'
-            rc = self.conn.execute(query, (original_msg_id,)).rowcount
+            rc = self.conn.execute(query, (str(original_msg_id),)).rowcount
         else:
             return 0
         self.conn.commit()
@@ -755,7 +785,7 @@ class UserDbConn:
         """Update the star count for a starboard message."""
         self.conn.execute(
             'UPDATE starboard_message_v1 SET star_count = ? WHERE original_msg_id = ? AND emoji = ?',
-            (count, original_msg_id, emoji)
+            (count, str(original_msg_id), emoji)
         )
         self.conn.commit()
 
@@ -763,12 +793,13 @@ class UserDbConn:
         """Update both author_id and star_count (used during backfill)."""
         self.conn.execute(
             'UPDATE starboard_message_v1 SET author_id = ?, star_count = ? WHERE original_msg_id = ? AND emoji = ?',
-            (author_id, count, original_msg_id, emoji)
+            (str(author_id), count, str(original_msg_id), emoji)
         )
         self.conn.commit()
 
     def get_starboard_leaderboard(self, guild_id, emoji):
         """Get leaderboard by number of starboarded messages per author."""
+        guild_id = str(guild_id)
         query = '''
             SELECT author_id, COUNT(*) as message_count
             FROM starboard_message_v1
@@ -780,6 +811,7 @@ class UserDbConn:
 
     def get_starboard_star_leaderboard(self, guild_id, emoji):
         """Get leaderboard by total star count per author."""
+        guild_id = str(guild_id)
         query = '''
             SELECT author_id, SUM(star_count) as total_stars
             FROM starboard_message_v1
@@ -791,11 +823,13 @@ class UserDbConn:
 
     def get_all_starboard_messages_for_guild(self, guild_id):
         """Get all starboard messages for a guild (used by backfill)."""
+        guild_id = str(guild_id)
         query = 'SELECT * FROM starboard_message_v1 WHERE guild_id = ?'
         return self.conn.execute(query, (guild_id,)).fetchall()
 
     def get_starboard_emojis_for_guild(self, guild_id):
         """Get all configured emojis for a guild's starboard."""
+        guild_id = str(guild_id)
         query = 'SELECT emoji, threshold, color FROM starboard_emoji_v1 WHERE guild_id = ?'
         return self.conn.execute(query, (guild_id,)).fetchall()
 
@@ -803,12 +837,14 @@ class UserDbConn:
 
     def get_guild_config(self, guild_id, key):
         """Get a guild config value. Returns the value string or None."""
+        guild_id = str(guild_id)
         query = 'SELECT value FROM guild_config WHERE guild_id = ? AND key = ?'
         res = self.conn.execute(query, (guild_id, key)).fetchone()
         return res.value if res else None
 
     def set_guild_config(self, guild_id, key, value):
         """Set a guild config value."""
+        guild_id = str(guild_id)
         self.conn.execute(
             'INSERT OR REPLACE INTO guild_config (guild_id, key, value) VALUES (?, ?, ?)',
             (guild_id, key, value)
@@ -817,6 +853,7 @@ class UserDbConn:
 
     def delete_guild_config(self, guild_id, key):
         """Delete a guild config value."""
+        guild_id = str(guild_id)
         self.conn.execute(
             'DELETE FROM guild_config WHERE guild_id = ? AND key = ?',
             (guild_id, key)
@@ -825,6 +862,7 @@ class UserDbConn:
 
     def get_all_guild_configs(self, guild_id):
         """Get all config entries for a guild."""
+        guild_id = str(guild_id)
         query = 'SELECT key, value FROM guild_config WHERE guild_id = ?'
         return self.conn.execute(query, (guild_id,)).fetchall()
 
