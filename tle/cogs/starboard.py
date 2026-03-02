@@ -376,24 +376,34 @@ class Starboard(commands.Cog):
             f'Updated {emoji} color to #{color_val:06x}'
         ))
 
-    @starboard.command(brief='Set starboard to current channel')
+    @starboard.command(brief='Set starboard channel for an emoji')
     @commands.has_role(constants.TLE_ADMIN)
-    async def here(self, ctx):
-        """Set the current channel as the starboard channel (shared by all emojis)."""
-        cf_common.user_db.set_starboard_channel(ctx.guild.id, ctx.channel.id)
-        logger.info(f'CMD starboard here: guild={ctx.guild.id} '
+    async def here(self, ctx, emoji: str):
+        """Set the current channel as the starboard channel for a specific emoji.
+        Example: ;starboard here ⭐"""
+        existing = cf_common.user_db.get_starboard_entry(ctx.guild.id, emoji)
+        if existing is None:
+            raise StarboardCogError(f'Emoji {emoji} is not configured. Add it first with `;starboard add {emoji}`.')
+        rc = cf_common.user_db.set_starboard_channel(ctx.guild.id, emoji, ctx.channel.id)
+        if not rc:
+            raise StarboardCogError(f'Failed to set channel for {emoji}.')
+        logger.info(f'CMD starboard here: guild={ctx.guild.id} emoji={emoji} '
                     f'channel={ctx.channel.id} by user={ctx.author.id}')
         await ctx.send(embed=discord_common.embed_success(
-            f'Starboard channel set to {ctx.channel.mention}'
+            f'Starboard channel for {emoji} set to {ctx.channel.mention}'
         ))
 
-    @starboard.command(brief='Clear starboard channel')
+    @starboard.command(brief='Clear starboard channel for an emoji')
     @commands.has_role(constants.TLE_ADMIN)
-    async def clear(self, ctx):
-        """Clear the starboard channel setting (affects all emojis)."""
-        cf_common.user_db.clear_starboard_channel(ctx.guild.id)
-        logger.info(f'CMD starboard clear: guild={ctx.guild.id} by user={ctx.author.id}')
-        await ctx.send(embed=discord_common.embed_success('Starboard channel cleared'))
+    async def clear(self, ctx, emoji: str):
+        """Clear the starboard channel for a specific emoji.
+        Example: ;starboard clear ⭐"""
+        existing = cf_common.user_db.get_starboard_entry(ctx.guild.id, emoji)
+        if existing is None:
+            raise StarboardCogError(f'Emoji {emoji} is not configured.')
+        cf_common.user_db.clear_starboard_channel(ctx.guild.id, emoji)
+        logger.info(f'CMD starboard clear: guild={ctx.guild.id} emoji={emoji} by user={ctx.author.id}')
+        await ctx.send(embed=discord_common.embed_success(f'Starboard channel for {emoji} cleared'))
 
     @starboard.command(brief='Remove a message from starboard')
     @commands.has_role(constants.TLE_ADMIN)

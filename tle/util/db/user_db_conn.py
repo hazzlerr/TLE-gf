@@ -230,6 +230,7 @@ class UserDbConn:
                 emoji       TEXT,
                 threshold   INTEGER NOT NULL DEFAULT 3,
                 color       INTEGER NOT NULL DEFAULT 16755216,
+                channel_id  TEXT,
                 PRIMARY KEY (guild_id, emoji)
             )
         ''')
@@ -661,45 +662,41 @@ class UserDbConn:
 
     # --- New multi-emoji starboard methods (v1 tables) ---
     # All IDs are cast to str() at the boundary to avoid SQLite int-vs-TEXT mismatch.
+    # Each emoji has its own channel_id in starboard_emoji_v1 (per-emoji channels).
 
     def get_starboard_entry(self, guild_id, emoji):
-        """Get starboard config for a guild+emoji. Returns (channel_id, threshold, color) or None.
-        Uses LEFT JOIN so the emoji config is found even if no channel is set yet."""
+        """Get starboard config for a guild+emoji. Returns (channel_id, threshold, color) or None."""
         guild_id = str(guild_id)
         query = '''
-            SELECT c.channel_id, e.threshold, e.color
-            FROM starboard_emoji_v1 e
-            LEFT JOIN starboard_config_v1 c ON c.guild_id = e.guild_id
-            WHERE e.guild_id = ? AND e.emoji = ?
+            SELECT channel_id, threshold, color
+            FROM starboard_emoji_v1
+            WHERE guild_id = ? AND emoji = ?
         '''
         return self.conn.execute(query, (guild_id, emoji)).fetchone()
 
-    def set_starboard_channel(self, guild_id, channel_id):
-        """Set the starboard channel for a guild (one channel per guild, shared by all emojis)."""
+    def set_starboard_channel(self, guild_id, emoji, channel_id):
+        """Set the starboard channel for a specific emoji in a guild."""
         guild_id = str(guild_id)
-        self.conn.execute(
-            'INSERT OR REPLACE INTO starboard_config_v1 (guild_id, channel_id) VALUES (?, ?)',
-            (guild_id, str(channel_id))
-        )
+        rc = self.conn.execute(
+            'UPDATE starboard_emoji_v1 SET channel_id = ? WHERE guild_id = ? AND emoji = ?',
+            (str(channel_id), guild_id, emoji)
+        ).rowcount
         self.conn.commit()
+        return rc
 
-    def clear_starboard_channel(self, guild_id):
-        """Clear the starboard channel for a guild."""
+    def clear_starboard_channel(self, guild_id, emoji):
+        """Clear the starboard channel for a specific emoji."""
         guild_id = str(guild_id)
-        self.conn.execute(
-            'DELETE FROM starboard_config_v1 WHERE guild_id = ?',
-            (guild_id,)
-        )
+        rc = self.conn.execute(
+            'UPDATE starboard_emoji_v1 SET channel_id = NULL WHERE guild_id = ? AND emoji = ?',
+            (guild_id, emoji)
+        ).rowcount
         self.conn.commit()
+        return rc
 
     def add_starboard_emoji(self, guild_id, emoji, threshold, color):
-        """Add or update an emoji configuration for a guild's starboard.
-        Also ensures a starboard_config_v1 row exists (with NULL channel if not yet set)."""
+        """Add or update an emoji configuration for a guild's starboard."""
         guild_id = str(guild_id)
-        self.conn.execute(
-            'INSERT OR IGNORE INTO starboard_config_v1 (guild_id, channel_id) VALUES (?, NULL)',
-            (guild_id,)
-        )
         self.conn.execute(
             'INSERT OR REPLACE INTO starboard_emoji_v1 (guild_id, emoji, threshold, color) VALUES (?, ?, ?, ?)',
             (guild_id, emoji, threshold, color)

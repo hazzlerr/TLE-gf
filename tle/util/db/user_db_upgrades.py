@@ -131,3 +131,37 @@ def upgrade_1_3_0(db):
 
     db.commit()
     logger.info('1.3.0: Upgrade complete')
+
+
+@registry.register('1.4.0', 'Per-emoji starboard channels')
+def upgrade_1_4_0(db):
+    logger.info('1.4.0: Migrating channel_id from starboard_config_v1 into starboard_emoji_v1')
+
+    # Add channel_id column to starboard_emoji_v1
+    try:
+        db.execute('ALTER TABLE starboard_emoji_v1 ADD COLUMN channel_id TEXT')
+        logger.info('1.4.0: Added channel_id column to starboard_emoji_v1')
+    except Exception as e:
+        logger.debug(f'1.4.0: channel_id column already exists or error: {e}')
+
+    # Copy channel_id from starboard_config_v1 into each emoji row
+    try:
+        rows = db.execute('SELECT guild_id, channel_id FROM starboard_config_v1').fetchall()
+        logger.info(f'1.4.0: Found {len(rows)} guilds in starboard_config_v1 to migrate')
+        migrated = 0
+        for row in rows:
+            if row.channel_id:
+                rc = db.execute(
+                    'UPDATE starboard_emoji_v1 SET channel_id = ? WHERE guild_id = ? AND channel_id IS NULL',
+                    (row.channel_id, row.guild_id)
+                ).rowcount
+                migrated += rc
+                logger.debug(f'1.4.0: Guild {row.guild_id}: set channel_id={row.channel_id} '
+                             f'on {rc} emoji rows')
+        logger.info(f'1.4.0: Migrated channel_id for {migrated} emoji rows across {len(rows)} guilds')
+    except Exception as e:
+        logger.warning(f'1.4.0: Could not migrate channel_id from starboard_config_v1: {e}',
+                       exc_info=True)
+
+    db.commit()
+    logger.info('1.4.0: Upgrade complete')
