@@ -116,6 +116,8 @@ class Starboard(BackfillMixin, commands.Cog):
     async def on_raw_reaction_add(self, payload):
         if payload.guild_id is None:
             return
+        if cf_common.user_db is None:
+            return
         emoji_str = _emoji_str(payload.emoji)
         entry = cf_common.user_db.get_starboard_entry(payload.guild_id, emoji_str)
         if entry is None:
@@ -137,6 +139,8 @@ class Starboard(BackfillMixin, commands.Cog):
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload):
         if payload.guild_id is None:
+            return
+        if cf_common.user_db is None:
             return
         emoji_str = _emoji_str(payload.emoji)
         entry = cf_common.user_db.get_starboard_entry(payload.guild_id, emoji_str)
@@ -170,6 +174,8 @@ class Starboard(BackfillMixin, commands.Cog):
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload):
         if payload.guild_id is None:
+            return
+        if cf_common.user_db is None:
             return
         rc = cf_common.user_db.remove_starboard_message(starboard_msg_id=payload.message_id)
         if rc:
