@@ -412,9 +412,6 @@ class Starboard(BackfillMixin, commands.Cog):
         pages = self._make_leaderboard_pages(ctx, rows, emoji, 'Starboard Leaderboard', 'messages')
         paginator.paginate(self.bot, ctx.channel, pages, wait_time=300, set_pagenum_footers=True, author_id=ctx.author.id)
 
-        # Send personal rank
-        await self._send_personal_rank(ctx, rows, 'messages')
-
     @starboard.command(name='star-leaderboard', brief='Show starboard leaderboard by star count',
                        usage='[emoji] [week|month|year] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
     async def star_leaderboard(self, ctx, *args):
@@ -439,9 +436,6 @@ class Starboard(BackfillMixin, commands.Cog):
         pages = self._make_leaderboard_pages(ctx, rows, emoji, 'Star Leaderboard', 'stars')
         paginator.paginate(self.bot, ctx.channel, pages, wait_time=300, set_pagenum_footers=True, author_id=ctx.author.id)
 
-        # Send personal rank
-        await self._send_personal_rank(ctx, rows, 'stars')
-
     @starboard.command(name='star-givers', brief='Show top star givers',
                        usage='[emoji] [week|month|year] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
     async def star_givers(self, ctx, *args):
@@ -465,8 +459,6 @@ class Starboard(BackfillMixin, commands.Cog):
         pages = self._make_leaderboard_pages(ctx, rows, emoji, 'Star Givers', 'stars given')
         paginator.paginate(self.bot, ctx.channel, pages, wait_time=300, set_pagenum_footers=True, author_id=ctx.author.id)
 
-        await self._send_personal_rank(ctx, rows, 'stars given')
-
     @starboard.command(brief='Show who stars their own messages the most',
                        usage='[emoji] [week|month|year] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
     async def narcissus(self, ctx, *args):
@@ -489,8 +481,6 @@ class Starboard(BackfillMixin, commands.Cog):
                     f'dlo={dlo} dhi={dhi} {len(rows)} users by user={ctx.author.id}')
         pages = self._make_leaderboard_pages(ctx, rows, emoji, 'Narcissus Leaderboard', 'self-stars')
         paginator.paginate(self.bot, ctx.channel, pages, wait_time=300, set_pagenum_footers=True, author_id=ctx.author.id)
-
-        await self._send_personal_rank(ctx, rows, 'self-stars')
 
     @starboard.command(brief='Show top starred messages',
                        usage='[emoji] [week|month|year] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
@@ -546,8 +536,19 @@ class Starboard(BackfillMixin, commands.Cog):
                 return val
         return 0
 
+    def _get_personal_rank_line(self, ctx, rows, unit):
+        """Get the invoking user's rank as a string for embedding."""
+        user_id_str = str(ctx.author.id)
+        for i, row in enumerate(rows):
+            if self._get_user_id(row) == user_id_str:
+                rank = i + 1
+                count = self._get_count(row)
+                return f'\nYour rank: **#{rank}** with **{count}** {unit}'
+        return '\nYou are not on this leaderboard yet.'
+
     def _make_leaderboard_pages(self, ctx, rows, emoji, title, unit):
         """Build paginated embed pages from leaderboard rows."""
+        personal = self._get_personal_rank_line(ctx, rows, unit)
         per_page = 10
         chunks = paginator.chunkify(rows, per_page)
         pages = []
@@ -560,6 +561,7 @@ class Starboard(BackfillMixin, commands.Cog):
                 member = ctx.guild.get_member(int(user_id))
                 name = member.mention if member else f'<@{user_id}>'
                 lines.append(f'**#{rank}** {name} — {count} {unit}')
+            lines.append(personal)
             embed = discord.Embed(
                 title=f'{emoji} {title}',
                 description='\n'.join(lines),
@@ -567,17 +569,6 @@ class Starboard(BackfillMixin, commands.Cog):
             )
             pages.append((None, embed))
         return pages
-
-    async def _send_personal_rank(self, ctx, rows, unit):
-        """Send a separate message with the invoking user's rank."""
-        user_id_str = str(ctx.author.id)
-        for i, row in enumerate(rows):
-            if self._get_user_id(row) == user_id_str:
-                rank = i + 1
-                count = self._get_count(row)
-                await ctx.send(f'You are ranked **#{rank}** with **{count}** {unit}.')
-                return
-        await ctx.send('You are not on this leaderboard yet.')
 
     # --- Backfill status ---
 
