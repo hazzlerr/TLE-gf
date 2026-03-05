@@ -52,6 +52,10 @@ python3 -m pytest tests/ -v
 
 Tests stub out discord.py, aiohttp, and other heavy deps in `conftest.py` so they run against in-memory SQLite without the full bot environment.
 
+## Workflow rules
+
+**Always commit after completing a task.** Every discrete unit of work (feature, bugfix, refactor, test addition) must be committed immediately after tests pass. Do not wait for the user to ask — just commit. If multiple tasks are requested in sequence, commit after each one.
+
 ## Commits convention
 
-Use imperative mood, short first line. `Co-Authored-By` trailer when AI-assisted. Always stage files and commit without being asked. Do not use `$()` command substitution in commit messages — use a plain string with `-m`.
+Use imperative mood, short first line. `Co-Authored-By` trailer when AI-assisted. Do not use `$()` command substitution in commit messages — use a plain string with `-m`.
