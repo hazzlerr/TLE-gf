@@ -445,6 +445,42 @@ class TestBuildPollEmbed:
         embed = _build_poll_embed('Q?', options, totals, 2)
         assert '%' not in embed.description
 
+    def test_leader_shown(self):
+        options = [(0, 'BFS'), (1, 'DFS')]
+        totals = {0: 3000, 1: 1000}
+        embed = _build_poll_embed('Q?', options, totals, 2)
+        assert 'Leader: **BFS** (+2000)' in embed.description
+
+    def test_tied_shown(self):
+        options = [(0, 'BFS'), (1, 'DFS')]
+        totals = {0: 1500, 1: 1500}
+        embed = _build_poll_embed('Q?', options, totals, 2)
+        assert 'Tied:' in embed.description
+        assert '**BFS**' in embed.description
+        assert '**DFS**' in embed.description
+
+    def test_three_way_tie(self):
+        options = [(0, 'A'), (1, 'B'), (2, 'C')]
+        totals = {0: 1000, 1: 1000, 2: 1000}
+        embed = _build_poll_embed('Q?', options, totals, 3)
+        assert 'Tied:' in embed.description
+        assert '**A**' in embed.description
+        assert '**B**' in embed.description
+        assert '**C**' in embed.description
+
+    def test_no_leader_when_all_zero(self):
+        options = [(0, 'A'), (1, 'B')]
+        embed = _build_poll_embed('Q?', options, {}, 0)
+        assert 'Leader' not in embed.description
+        assert 'Tied' not in embed.description
+
+    def test_leader_with_zero_second(self):
+        """One option has votes, others have zero."""
+        options = [(0, 'A'), (1, 'B')]
+        totals = {0: 2000}
+        embed = _build_poll_embed('Q?', options, totals, 1)
+        assert 'Leader: **A** (+2000)' in embed.description
+
 
 # =====================================================================
 # Poll isolation

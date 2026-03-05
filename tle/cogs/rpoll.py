@@ -47,6 +47,17 @@ def _build_poll_embed(question, options, totals_map, vote_count):
         else:
             lines.append(f'{emoji} {label} — **{total}**')
 
+    # Winner / tied line
+    if grand_total > 0:
+        max_total = max(totals_map.get(idx, 0) for idx, _ in options)
+        leaders = [label for idx, label in options if totals_map.get(idx, 0) == max_total]
+        if len(leaders) == 1:
+            second = sorted((totals_map.get(idx, 0) for idx, _ in options), reverse=True)
+            lead = max_total - (second[1] if len(second) > 1 else 0)
+            lines.append(f'\nLeader: **{leaders[0]}** (+{lead})')
+        else:
+            lines.append(f'\nTied: {", ".join(f"**{l}**" for l in leaders)}')
+
     embed = discord.Embed(
         title=question,
         description='\n'.join(lines),
