@@ -915,6 +915,20 @@ class UserDbConn:
         '''
         return self.conn.execute(query, (guild_id, emoji)).fetchall()
 
+    def get_star_givers_leaderboard(self, guild_id, emoji):
+        """Get leaderboard of users by number of stars given (reactions) on starboarded messages."""
+        guild_id = str(guild_id)
+        query = '''
+            SELECT r.user_id, COUNT(*) as stars_given
+            FROM starboard_reactors r
+            JOIN starboard_message_v1 m
+                ON r.original_msg_id = m.original_msg_id AND r.emoji = m.emoji
+            WHERE m.guild_id = ? AND r.emoji = ?
+            GROUP BY r.user_id
+            ORDER BY stars_given DESC
+        '''
+        return self.conn.execute(query, (guild_id, emoji)).fetchall()
+
     def get_top_starboard_messages(self, guild_id, emoji):
         """Get top starboarded messages sorted by star_count DESC, original_msg_id DESC."""
         guild_id = str(guild_id)

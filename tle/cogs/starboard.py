@@ -563,6 +563,28 @@ class Starboard(commands.Cog):
         # Send personal rank
         await self._send_personal_rank(ctx, rows, 'stars')
 
+    @starboard.command(name='star-givers', brief='Show top star givers')
+    async def star_givers(self, ctx, emoji: str):
+        """Show top users by number of stars given (reactions) for an emoji.
+        Requires the `starboard_leaderboard` feature to be enabled."""
+        if cf_common.user_db.get_guild_config(ctx.guild.id, 'starboard_leaderboard') != '1':
+            raise StarboardCogError('Starboard leaderboard is not enabled. '
+                                    'An admin can enable it with `;meta config enable starboard_leaderboard`.')
+        entry = cf_common.user_db.get_starboard_entry(ctx.guild.id, emoji)
+        if entry is None:
+            raise StarboardCogError(f'Emoji {emoji} is not configured for this starboard.')
+
+        rows = cf_common.user_db.get_star_givers_leaderboard(ctx.guild.id, emoji)
+        if not rows:
+            raise StarboardCogError(f'No reactor data found for {emoji}.')
+
+        logger.info(f'CMD starboard star-givers: guild={ctx.guild.id} emoji={emoji} '
+                    f'{len(rows)} users by user={ctx.author.id}')
+        pages = self._make_leaderboard_pages(ctx, rows, emoji, 'Star Givers', 'stars given')
+        paginator.paginate(self.bot, ctx.channel, pages, wait_time=300, set_pagenum_footers=True)
+
+        await self._send_personal_rank(ctx, rows, 'stars given')
+
     @starboard.command(brief='Show top starred messages')
     async def top(self, ctx, emoji: str):
         """Show top starboarded messages sorted by star count for an emoji.
@@ -600,6 +622,20 @@ class Starboard(commands.Cog):
             pages.append((None, embed))
         paginator.paginate(self.bot, ctx.channel, pages, wait_time=300, set_pagenum_footers=True)
 
+    @staticmethod
+    def _get_user_id(row):
+        """Extract user ID from a leaderboard row (author_id or user_id)."""
+        return getattr(row, 'author_id', None) or row.user_id
+
+    @staticmethod
+    def _get_count(row):
+        """Extract count from a leaderboard row."""
+        for attr in ('message_count', 'total_stars', 'stars_given'):
+            val = getattr(row, attr, None)
+            if val is not None:
+                return val
+        return 0
+
     def _make_leaderboard_pages(self, ctx, rows, emoji, title, unit):
         """Build paginated embed pages from leaderboard rows."""
         per_page = 10
@@ -609,8 +645,8 @@ class Starboard(commands.Cog):
             lines = []
             for i, row in enumerate(chunk):
                 rank = page_idx * per_page + i + 1
-                user_id = row.author_id
-                count = row.message_count if unit == 'messages' else row.total_stars
+                user_id = self._get_user_id(row)
+                count = self._get_count(row)
                 member = ctx.guild.get_member(int(user_id))
                 name = member.mention if member else f'<@{user_id}>'
                 lines.append(f'**#{rank}** {name} — {count} {unit}')
@@ -626,9 +662,9 @@ class Starboard(commands.Cog):
         """Send a separate message with the invoking user's rank."""
         user_id_str = str(ctx.author.id)
         for i, row in enumerate(rows):
-            if row.author_id == user_id_str:
+            if self._get_user_id(row) == user_id_str:
                 rank = i + 1
-                count = row.message_count if unit == 'messages' else row.total_stars
+                count = self._get_count(row)
                 await ctx.send(f'You are ranked **#{rank}** with **{count}** {unit}.')
                 return
         await ctx.send('You are not on this leaderboard yet.')
