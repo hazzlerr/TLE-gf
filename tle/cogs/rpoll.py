@@ -161,7 +161,6 @@ class Rpoll(commands.Cog):
             logger.error(f'rpoll: Failed to re-register poll views: {e}', exc_info=True)
 
     @commands.command(brief='Create a rating-weighted poll')
-    @commands.has_role(constants.TLE_ADMIN)
     async def rpoll(self, ctx, question: str, *, options_str: str):
         """Create a poll where votes are weighted by Codeforces rating.
 
