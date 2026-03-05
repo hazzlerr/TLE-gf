@@ -3,6 +3,7 @@ import asyncio
 import distutils.util
 import logging
 import os
+import sys
 import discord
 from logging.handlers import TimedRotatingFileHandler
 from os import environ
@@ -26,9 +27,10 @@ def setup():
     # logging to console and file on daily interval
     logging.basicConfig(format='{asctime}:{levelname}:{name}:{message}', style='{',
                         datefmt='%d-%m-%Y %H:%M:%S', level=logging.INFO,
-                        handlers=[logging.StreamHandler(),
+                        handlers=[logging.StreamHandler(
+                                      open(sys.stdout.fileno(), 'w', encoding='utf-8', closefd=False)),
                                   TimedRotatingFileHandler(constants.LOG_FILE_PATH, when='D',
-                                                           backupCount=3, utc=True)])
+                                                           backupCount=3, utc=True, encoding='utf-8')])
 
     # matplotlib and seaborn
     plt.rcParams['figure.figsize'] = 7.0, 3.5
