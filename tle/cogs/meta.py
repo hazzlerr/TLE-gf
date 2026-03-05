@@ -85,7 +85,7 @@ class Meta(commands.Cog):
                 channel = await self.bot.fetch_channel(int(channel_id))
             msg = await channel.fetch_message(int(message_id))
             now = datetime.datetime.now().strftime('%H:%M:%S')
-            await msg.edit(content=f'`{now}`: Restart complete.')
+            await msg.edit(content=f'{msg.content}\n`{now}`: Restart complete.')
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
             logger.warning(f'meta: Could not edit restart message: {e}')
         finally:
