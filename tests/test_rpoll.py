@@ -412,6 +412,39 @@ class TestBuildPollEmbed:
         assert '2\N{COMBINING ENCLOSING KEYCAP}' in embed.description
         assert '3\N{COMBINING ENCLOSING KEYCAP}' in embed.description
 
+    def test_percentages_shown_when_totals_nonzero(self):
+        options = [(0, 'A'), (1, 'B')]
+        totals = {0: 3000, 1: 7000}
+        embed = _build_poll_embed('Q?', options, totals, 2)
+        assert '(30%)' in embed.description
+        assert '(70%)' in embed.description
+
+    def test_no_percentages_when_all_zero(self):
+        options = [(0, 'A'), (1, 'B')]
+        embed = _build_poll_embed('Q?', options, {}, 0)
+        assert '%' not in embed.description
+
+    def test_one_option_has_all_rating(self):
+        options = [(0, 'A'), (1, 'B')]
+        totals = {0: 2000}
+        embed = _build_poll_embed('Q?', options, totals, 1)
+        assert '(100%)' in embed.description
+        assert '(0%)' in embed.description
+
+    def test_percentages_round(self):
+        """3 equal votes: 33% + 33% + 33% (rounding)."""
+        options = [(0, 'A'), (1, 'B'), (2, 'C')]
+        totals = {0: 1000, 1: 1000, 2: 1000}
+        embed = _build_poll_embed('Q?', options, totals, 3)
+        assert '(33%)' in embed.description
+
+    def test_zero_rating_votes_no_percentages(self):
+        """All voters have 0 rating — no percentages shown."""
+        options = [(0, 'A'), (1, 'B')]
+        totals = {0: 0, 1: 0}
+        embed = _build_poll_embed('Q?', options, totals, 2)
+        assert '%' not in embed.description
+
 
 # =====================================================================
 # Poll isolation

@@ -33,11 +33,18 @@ def _build_poll_embed(question, options, totals_map, vote_count):
         totals_map: Dict of option_index -> total_rating.
         vote_count: Total number of distinct voters.
     """
+    grand_total = sum(totals_map.get(idx, 0) for idx, _ in options)
+    show_pct = grand_total > 0
+
     lines = []
     for idx, label in options:
         total = totals_map.get(idx, 0)
         emoji = _NUMBER_EMOJIS[idx] if idx < len(_NUMBER_EMOJIS) else f'{idx + 1}.'
-        lines.append(f'{emoji} {label} — **{total}**')
+        if show_pct:
+            pct = round(total / grand_total * 100)
+            lines.append(f'{emoji} {label} — **{total}** ({pct}%)')
+        else:
+            lines.append(f'{emoji} {label} — **{total}**')
 
     embed = discord.Embed(
         title=question,
