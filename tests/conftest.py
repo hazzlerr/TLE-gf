@@ -47,6 +47,7 @@ class _StubGroupResult:
     def __init__(self, func):
         self.__name__ = getattr(func, '__name__', 'stub')
         self.__doc__ = getattr(func, '__doc__', None)
+        self.__wrapped__ = func
     def command(self, **kw):
         return lambda f: _StubGroupResult(f)
     def group(self, **kw):

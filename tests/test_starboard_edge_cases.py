@@ -774,3 +774,56 @@ class TestPrepareEmbedNoTitle:
         embed = Starboard.prepare_embed(msg, 0xffaa10)
         assert embed.footer is not None
         assert embed.footer['text'] == 'TestUser#1234'
+
+
+# =====================================================================
+# Default emoji parameter on all starboard commands
+# =====================================================================
+
+import inspect
+from tle.constants import _DEFAULT_STAR
+
+
+def _unwrap(attr):
+    """Get the original function from a stubbed command decorator."""
+    while hasattr(attr, '__wrapped__'):
+        attr = attr.__wrapped__
+    return attr
+
+
+class TestDefaultEmojiParameter:
+    """All starboard commands should default the emoji parameter to the star emoji."""
+
+    _COMMANDS_WITH_EMOJI = [
+        'add', 'delete', 'edit_threshold', 'edit_color',
+        'here', 'clear', 'remove',
+        'leaderboard', 'star_leaderboard', 'star_givers', 'top',
+    ]
+
+    @pytest.mark.parametrize('method_name', _COMMANDS_WITH_EMOJI)
+    def test_emoji_defaults_to_star(self, method_name):
+        method = _unwrap(getattr(Starboard, method_name))
+        sig = inspect.signature(method)
+        assert 'emoji' in sig.parameters, f'{method_name} missing emoji parameter'
+        param = sig.parameters['emoji']
+        assert param.default == _DEFAULT_STAR, (
+            f'{method_name}: emoji default is {param.default!r}, expected {_DEFAULT_STAR!r}'
+        )
+
+    def test_edit_threshold_required_arg_before_emoji(self):
+        """threshold should come before the optional emoji."""
+        sig = inspect.signature(_unwrap(Starboard.edit_threshold))
+        params = list(sig.parameters.keys())
+        assert params.index('threshold') < params.index('emoji')
+
+    def test_edit_color_required_arg_before_emoji(self):
+        """color should come before the optional emoji."""
+        sig = inspect.signature(_unwrap(Starboard.edit_color))
+        params = list(sig.parameters.keys())
+        assert params.index('color') < params.index('emoji')
+
+    def test_remove_required_arg_before_emoji(self):
+        """original_message_id should come before the optional emoji."""
+        sig = inspect.signature(_unwrap(Starboard.remove))
+        params = list(sig.parameters.keys())
+        assert params.index('original_message_id') < params.index('emoji')
