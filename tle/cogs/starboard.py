@@ -522,7 +522,7 @@ class Starboard(commands.Cog):
         Requires the `starboard_leaderboard` feature to be enabled."""
         if cf_common.user_db.get_guild_config(ctx.guild.id, 'starboard_leaderboard') != '1':
             raise StarboardCogError('Starboard leaderboard is not enabled. '
-                                    'An admin can enable it with `;meta config starboard_leaderboard enable`.')
+                                    'An admin can enable it with `;meta config enable starboard_leaderboard`.')
         entry = cf_common.user_db.get_starboard_entry(ctx.guild.id, emoji)
         if entry is None:
             raise StarboardCogError(f'Emoji {emoji} is not configured for this starboard.')
@@ -545,7 +545,7 @@ class Starboard(commands.Cog):
         Requires the `starboard_leaderboard` feature to be enabled."""
         if cf_common.user_db.get_guild_config(ctx.guild.id, 'starboard_leaderboard') != '1':
             raise StarboardCogError('Starboard leaderboard is not enabled. '
-                                    'An admin can enable it with `;meta config starboard_leaderboard enable`.')
+                                    'An admin can enable it with `;meta config enable starboard_leaderboard`.')
         entry = cf_common.user_db.get_starboard_entry(ctx.guild.id, emoji)
         if entry is None:
             raise StarboardCogError(f'Emoji {emoji} is not configured for this starboard.')
@@ -569,7 +569,7 @@ class Starboard(commands.Cog):
         Requires the `starboard_leaderboard` feature to be enabled."""
         if cf_common.user_db.get_guild_config(ctx.guild.id, 'starboard_leaderboard') != '1':
             raise StarboardCogError('Starboard leaderboard is not enabled. '
-                                    'An admin can enable it with `;meta config starboard_leaderboard enable`.')
+                                    'An admin can enable it with `;meta config enable starboard_leaderboard`.')
         entry = cf_common.user_db.get_starboard_entry(ctx.guild.id, emoji)
         if entry is None:
             raise StarboardCogError(f'Emoji {emoji} is not configured for this starboard.')

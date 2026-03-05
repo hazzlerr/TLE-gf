@@ -14,7 +14,7 @@ The original starboard was hardcoded to a single star emoji. We rewrote it to su
 
 ### Starboard Leaderboards
 
-Added `;starboard leaderboard <emoji>` (by message count) and `;starboard star-leaderboard <emoji>` (by total stars). Gated behind a `starboard_leaderboard` guild config flag enabled via `;meta config starboard_leaderboard enable`.
+Added `;starboard leaderboard <emoji>` (by message count) and `;starboard star-leaderboard <emoji>` (by total stars). Gated behind a `starboard_leaderboard` guild config flag enabled via `;meta config enable starboard_leaderboard`.
 
 ### Background Backfill
 
