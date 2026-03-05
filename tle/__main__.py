@@ -64,7 +64,8 @@ async def main():
 
     bot = commands.Bot(command_prefix=commands.when_mentioned_or(discord_common._BOT_PREFIX), intents=intents)
     bot.help_command = discord_common.TleHelp()
-    cogs = [file.stem for file in Path('tle', 'cogs').glob('*.py')]
+    cogs = [file.stem for file in Path('tle', 'cogs').glob('*.py')
+            if not file.stem.startswith('_')]
     for extension in cogs:
         await bot.load_extension(f'tle.cogs.{extension}')
     logging.info(f'Cogs loaded: {", ".join(bot.cogs)}')

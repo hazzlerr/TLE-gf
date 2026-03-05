@@ -10,8 +10,8 @@ from tle import constants
 from tle.util import codeforces_common as cf_common
 from tle.util import discord_common
 from tle.util import paginator
-from tle.cogs.starboard_helpers import _emoji_str, _parse_jump_url
-from tle.cogs.starboard_backfill import BackfillMixin, _BACKFILL_UNKNOWN
+from tle.cogs._starboard_helpers import _emoji_str, _parse_jump_url
+from tle.cogs._starboard_backfill import BackfillMixin, _BACKFILL_UNKNOWN
 
 logger = logging.getLogger(__name__)
 

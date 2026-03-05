@@ -197,6 +197,6 @@ if 'tle.cogs' not in sys.modules:
     _cogs_mod.__package__ = 'tle.cogs'
     sys.modules['tle.cogs'] = _cogs_mod
 _cogs_path = os.path.join(_root, 'tle', 'cogs')
-_load_module('tle.cogs.starboard_helpers', os.path.join(_cogs_path, 'starboard_helpers.py'))
-_load_module('tle.cogs.starboard_backfill', os.path.join(_cogs_path, 'starboard_backfill.py'))
+_load_module('tle.cogs._starboard_helpers', os.path.join(_cogs_path, '_starboard_helpers.py'))
+_load_module('tle.cogs._starboard_backfill', os.path.join(_cogs_path, '_starboard_backfill.py'))
 _load_module('tle.cogs.starboard', os.path.join(_cogs_path, 'starboard.py'))
