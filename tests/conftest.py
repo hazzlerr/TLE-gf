@@ -58,7 +58,26 @@ _commands_mod.group = lambda **kw: (lambda f: _StubGroupResult(f))
 
 # Stub discord module attributes used by starboard.py
 _discord_mod = sys.modules['discord']
-_discord_mod.Embed = type('Embed', (), {'__init__': lambda self, **kw: None})
+class _StubEmbed:
+    """Minimal Embed stub that tracks fields, title, footer, and image."""
+    def __init__(self, **kw):
+        self.color = kw.get('color')
+        self.timestamp = kw.get('timestamp')
+        self.title = None
+        self.fields = []
+        self.footer = None
+        self.image_url = None
+
+    def add_field(self, *, name=None, value=None, inline=True):
+        self.fields.append({'name': name, 'value': value, 'inline': inline})
+
+    def set_image(self, *, url=None):
+        self.image_url = url
+
+    def set_footer(self, *, text=None, icon_url=None):
+        self.footer = {'text': text, 'icon_url': icon_url}
+
+_discord_mod.Embed = _StubEmbed
 _discord_mod.MessageType = type('MessageType', (), {'default': 0, 'reply': 1})
 _discord_mod.NotFound = type('NotFound', (Exception,), {})
 _discord_mod.Forbidden = type('Forbidden', (Exception,), {})

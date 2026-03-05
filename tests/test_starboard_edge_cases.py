@@ -695,3 +695,82 @@ class TestGetEmojisIncludesChannelId:
         by_emoji = {e.emoji: e for e in emojis}
         assert by_emoji[STAR].channel_id == '100'
         assert by_emoji[FIRE].channel_id == '200'
+
+
+# =====================================================================
+# prepare_embed has no title (emoji+count removed)
+# =====================================================================
+
+from tle.cogs.starboard import Starboard
+from datetime import datetime
+
+
+class _FakeDisplayAvatar:
+    url = 'https://cdn.example.com/avatar.png'
+
+
+class _FakeAuthor:
+    display_avatar = _FakeDisplayAvatar()
+    def __str__(self):
+        return 'TestUser#1234'
+
+
+class _FakeChannel:
+    mention = '#general'
+
+
+class _FakeMessage:
+    """Minimal message mock for prepare_embed tests."""
+    def __init__(self, content='Hello world', embeds=None, attachments=None):
+        self.content = content
+        self.embeds = embeds or []
+        self.attachments = attachments or []
+        self.created_at = datetime(2025, 1, 1)
+        self.channel = _FakeChannel()
+        self.jump_url = 'https://discord.com/channels/111/222/333'
+        self.author = _FakeAuthor()
+
+
+class TestPrepareEmbedNoTitle:
+    """prepare_embed should never set a title (emoji+count was removed)."""
+
+    def test_no_title_set(self):
+        msg = _FakeMessage()
+        embed = Starboard.prepare_embed(msg, 0xffaa10)
+        assert embed.title is None
+
+    def test_no_title_with_empty_content(self):
+        msg = _FakeMessage(content='')
+        embed = Starboard.prepare_embed(msg, 0xffaa10)
+        assert embed.title is None
+
+    def test_color_is_passed_through(self):
+        msg = _FakeMessage()
+        embed = Starboard.prepare_embed(msg, 0x00ff00)
+        assert embed.color == 0x00ff00
+
+    def test_has_channel_and_jump_fields(self):
+        msg = _FakeMessage()
+        embed = Starboard.prepare_embed(msg, 0xffaa10)
+        field_names = [f['name'] for f in embed.fields]
+        assert 'Channel' in field_names
+        assert 'Jump to' in field_names
+
+    def test_content_field_present(self):
+        msg = _FakeMessage(content='Some text')
+        embed = Starboard.prepare_embed(msg, 0xffaa10)
+        content_fields = [f for f in embed.fields if f['name'] == 'Content']
+        assert len(content_fields) == 1
+        assert content_fields[0]['value'] == 'Some text'
+
+    def test_no_content_field_when_empty(self):
+        msg = _FakeMessage(content='')
+        embed = Starboard.prepare_embed(msg, 0xffaa10)
+        field_names = [f['name'] for f in embed.fields]
+        assert 'Content' not in field_names
+
+    def test_footer_set(self):
+        msg = _FakeMessage()
+        embed = Starboard.prepare_embed(msg, 0xffaa10)
+        assert embed.footer is not None
+        assert embed.footer['text'] == 'TestUser#1234'
