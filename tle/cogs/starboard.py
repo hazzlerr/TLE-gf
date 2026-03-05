@@ -229,8 +229,10 @@ class Starboard(commands.Cog):
             guild_work = {}
             for guild in guilds:
                 all_messages = cf_common.user_db.get_all_starboard_messages_for_guild(str(guild.id))
-                # Skip entries that already have author_id set (already backfilled)
-                pending = [m for m in all_messages if m.author_id is None]
+                # Skip entries that are fully backfilled (have both author_id and channel_id)
+                pending = [m for m in all_messages
+                           if m.author_id is None or
+                           (m.channel_id is None and m.author_id != _BACKFILL_UNKNOWN)]
                 if pending:
                     guild_work[guild] = pending
                 self.backfill_total += len(pending)
@@ -351,7 +353,8 @@ class Starboard(commands.Cog):
                                     if _emoji_str(r) == msg.emoji)
                         cf_common.user_db.update_starboard_author_and_count(
                             msg.original_msg_id, msg.emoji,
-                            str(original_msg.author.id), count
+                            str(original_msg.author.id), count,
+                            channel_id=original_msg.channel.id
                         )
                         # Collect all reactors for this emoji
                         for r in original_msg.reactions:

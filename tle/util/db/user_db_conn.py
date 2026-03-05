@@ -827,13 +827,21 @@ class UserDbConn:
         )
         self.conn.commit()
 
-    def update_starboard_author_and_count(self, original_msg_id, emoji, author_id, count):
-        """Update both author_id and star_count (used by live reactions and backfill)."""
-        self.conn.execute(
-            'UPDATE starboard_message_v1 SET author_id = ?, star_count = ? '
-            'WHERE original_msg_id = ? AND emoji = ?',
-            (str(author_id), count, str(original_msg_id), emoji)
-        )
+    def update_starboard_author_and_count(self, original_msg_id, emoji, author_id, count,
+                                          channel_id=None):
+        """Update author_id, star_count, and optionally channel_id (used by live reactions and backfill)."""
+        if channel_id is not None:
+            self.conn.execute(
+                'UPDATE starboard_message_v1 SET author_id = ?, star_count = ?, channel_id = ? '
+                'WHERE original_msg_id = ? AND emoji = ?',
+                (str(author_id), count, str(channel_id), str(original_msg_id), emoji)
+            )
+        else:
+            self.conn.execute(
+                'UPDATE starboard_message_v1 SET author_id = ?, star_count = ? '
+                'WHERE original_msg_id = ? AND emoji = ?',
+                (str(author_id), count, str(original_msg_id), emoji)
+            )
         self.conn.commit()
 
     # --- Reactor tracking ---
