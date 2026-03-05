@@ -336,15 +336,25 @@ class Starboard(commands.Cog):
                                     )
 
                         if original_msg is None:
-                            logger.warning(
-                                f'Backfill: unresolved msg={msg.original_msg_id} in guild={guild.id} '
-                                f'after stored-channel and jump-url lookup; marking as unknown'
-                            )
-                            # Mark with sentinel so we don't retry on next restart
-                            cf_common.user_db.update_starboard_author_and_count(
-                                msg.original_msg_id, msg.emoji, _BACKFILL_UNKNOWN, 0
-                            )
-                            self.backfill_failed += 1
+                            if msg.author_id is not None:
+                                # Already has author_id from a previous backfill, just
+                                # can't fetch the message to get channel_id. Don't
+                                # overwrite good data with __UNKNOWN__.
+                                logger.debug(
+                                    f'Backfill: msg={msg.original_msg_id} already has '
+                                    f'author_id={msg.author_id} but channel_id is NULL '
+                                    f'and message is unfetchable; skipping'
+                                )
+                            else:
+                                logger.warning(
+                                    f'Backfill: unresolved msg={msg.original_msg_id} in guild={guild.id} '
+                                    f'after stored-channel and jump-url lookup; marking as unknown'
+                                )
+                                # Mark with sentinel so we don't retry on next restart
+                                cf_common.user_db.update_starboard_author_and_count(
+                                    msg.original_msg_id, msg.emoji, _BACKFILL_UNKNOWN, 0
+                                )
+                                self.backfill_failed += 1
                             self.backfill_done += 1
                             await asyncio.sleep(0.5)
                             continue
@@ -374,13 +384,15 @@ class Starboard(commands.Cog):
                     except Exception as e:
                         logger.error(f'Backfill: EXCEPTION for msg={msg.original_msg_id} '
                                      f'emoji={msg.emoji}: {e}', exc_info=True)
-                        # Mark with sentinel so a persistent crash doesn't retry forever
-                        try:
-                            cf_common.user_db.update_starboard_author_and_count(
-                                msg.original_msg_id, msg.emoji, _BACKFILL_UNKNOWN, 0
-                            )
-                        except Exception:
-                            logger.debug(f'Backfill: could not set sentinel for msg={msg.original_msg_id}')
+                        # Mark with sentinel so a persistent crash doesn't retry forever,
+                        # but only if we don't already have good data
+                        if msg.author_id is None:
+                            try:
+                                cf_common.user_db.update_starboard_author_and_count(
+                                    msg.original_msg_id, msg.emoji, _BACKFILL_UNKNOWN, 0
+                                )
+                            except Exception:
+                                logger.debug(f'Backfill: could not set sentinel for msg={msg.original_msg_id}')
                         self.backfill_failed += 1
                         self.backfill_done += 1
                         await asyncio.sleep(1)
