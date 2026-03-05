@@ -176,3 +176,40 @@ def upgrade_1_4_0(db):
 
     db.commit()
     logger.info('1.4.0: Upgrade complete')
+
+
+@registry.register('1.5.0', 'Rating-weighted polls')
+def upgrade_1_5_0(db):
+    logger.info('1.5.0: Creating rpoll tables')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS rpoll (
+            poll_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id    TEXT NOT NULL,
+            channel_id  TEXT NOT NULL,
+            message_id  TEXT,
+            question    TEXT NOT NULL,
+            created_by  TEXT NOT NULL,
+            created_at  REAL NOT NULL
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS rpoll_option (
+            poll_id       INTEGER NOT NULL,
+            option_index  INTEGER NOT NULL,
+            label         TEXT NOT NULL,
+            PRIMARY KEY (poll_id, option_index),
+            FOREIGN KEY (poll_id) REFERENCES rpoll(poll_id)
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS rpoll_vote (
+            poll_id       INTEGER NOT NULL,
+            user_id       TEXT NOT NULL,
+            option_index  INTEGER NOT NULL,
+            rating        INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (poll_id, user_id, option_index),
+            FOREIGN KEY (poll_id) REFERENCES rpoll(poll_id)
+        )
+    ''')
+    db.commit()
+    logger.info('1.5.0: rpoll tables created')

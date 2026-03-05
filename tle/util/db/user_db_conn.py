@@ -388,6 +388,38 @@ class UserDbConn(StarboardDbMixin):
             )
             ''')
 
+        # Rating-weighted polls
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS rpoll (
+                poll_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    TEXT NOT NULL,
+                channel_id  TEXT NOT NULL,
+                message_id  TEXT,
+                question    TEXT NOT NULL,
+                created_by  TEXT NOT NULL,
+                created_at  REAL NOT NULL
+            )
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS rpoll_option (
+                poll_id       INTEGER NOT NULL,
+                option_index  INTEGER NOT NULL,
+                label         TEXT NOT NULL,
+                PRIMARY KEY (poll_id, option_index),
+                FOREIGN KEY (poll_id) REFERENCES rpoll(poll_id)
+            )
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS rpoll_vote (
+                poll_id       INTEGER NOT NULL,
+                user_id       TEXT NOT NULL,
+                option_index  INTEGER NOT NULL,
+                rating        INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (poll_id, user_id, option_index),
+                FOREIGN KEY (poll_id) REFERENCES rpoll(poll_id)
+            )
+        ''')
+
     # Helper functions.
 
     def _insert_one(self, table: str, columns, values: tuple):
@@ -1334,6 +1366,111 @@ class UserDbConn(StarboardDbMixin):
         cur.close()
         Round = namedtuple('Round', 'guild users rating points time problems status duration repeat times end_time')
         return [Round(data[1], data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11]) for data in res]
+
+    # --- Rating-weighted polls ---
+
+    def create_rpoll(self, guild_id, channel_id, question, options, created_by, created_at):
+        """Create a poll and its options. Returns the poll_id."""
+        query = ('INSERT INTO rpoll (guild_id, channel_id, question, created_by, created_at) '
+                 'VALUES (?, ?, ?, ?, ?)')
+        cur = self.conn.execute(query, (str(guild_id), str(channel_id), question,
+                                        str(created_by), created_at))
+        poll_id = cur.lastrowid
+        for i, label in enumerate(options):
+            self.conn.execute(
+                'INSERT INTO rpoll_option (poll_id, option_index, label) VALUES (?, ?, ?)',
+                (poll_id, i, label)
+            )
+        self.conn.commit()
+        return poll_id
+
+    def set_rpoll_message_id(self, poll_id, message_id):
+        """Set the Discord message_id after the poll message is sent."""
+        with self.conn:
+            self.conn.execute(
+                'UPDATE rpoll SET message_id = ? WHERE poll_id = ?',
+                (str(message_id), poll_id)
+            )
+
+    def get_rpoll(self, poll_id):
+        """Get a poll by ID. Returns namedtuple or None."""
+        return self._fetchone(
+            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at '
+            'FROM rpoll WHERE poll_id = ?',
+            params=(poll_id,), row_factory=namedtuple_factory
+        )
+
+    def get_rpoll_by_message_id(self, message_id):
+        """Get a poll by its Discord message_id."""
+        return self._fetchone(
+            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at '
+            'FROM rpoll WHERE message_id = ?',
+            params=(str(message_id),), row_factory=namedtuple_factory
+        )
+
+    def get_rpoll_options(self, poll_id):
+        """Get all options for a poll, ordered by index."""
+        return self._fetchall(
+            'SELECT poll_id, option_index, label FROM rpoll_option '
+            'WHERE poll_id = ? ORDER BY option_index',
+            params=(poll_id,), row_factory=namedtuple_factory
+        )
+
+    def toggle_rpoll_vote(self, poll_id, user_id, option_index, rating):
+        """Toggle a vote. Returns True if vote was added, False if removed."""
+        user_id = str(user_id)
+        existing = self.conn.execute(
+            'SELECT 1 FROM rpoll_vote WHERE poll_id = ? AND user_id = ? AND option_index = ?',
+            (poll_id, user_id, option_index)
+        ).fetchone()
+        if existing:
+            self.conn.execute(
+                'DELETE FROM rpoll_vote WHERE poll_id = ? AND user_id = ? AND option_index = ?',
+                (poll_id, user_id, option_index)
+            )
+            self.conn.commit()
+            return False
+        else:
+            self.conn.execute(
+                'INSERT INTO rpoll_vote (poll_id, user_id, option_index, rating) VALUES (?, ?, ?, ?)',
+                (poll_id, user_id, option_index, rating)
+            )
+            self.conn.commit()
+            return True
+
+    def get_rpoll_totals(self, poll_id):
+        """Get the sum of ratings per option. Returns list of (option_index, total_rating)."""
+        return self._fetchall(
+            'SELECT option_index, COALESCE(SUM(rating), 0) AS total_rating '
+            'FROM rpoll_vote WHERE poll_id = ? GROUP BY option_index',
+            params=(poll_id,), row_factory=namedtuple_factory
+        )
+
+    def get_rpoll_vote_count(self, poll_id):
+        """Get total number of distinct voters for a poll."""
+        row = self._fetchone(
+            'SELECT COUNT(DISTINCT user_id) AS cnt FROM rpoll_vote WHERE poll_id = ?',
+            params=(poll_id,)
+        )
+        return row[0] if row else 0
+
+    def get_rpoll_user_rating(self, user_id, guild_id):
+        """Get a user's Codeforces rating for poll voting. Returns 0 if not linked."""
+        handle = self.get_handle(user_id, guild_id)
+        if handle is None:
+            return 0
+        user = self.fetch_cf_user(handle)
+        if user is None or user.rating is None:
+            return 0
+        return user.rating
+
+    def get_all_active_rpolls(self):
+        """Get all polls that have a message_id (i.e., were successfully posted)."""
+        return self._fetchall(
+            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at '
+            'FROM rpoll WHERE message_id IS NOT NULL',
+            row_factory=namedtuple_factory
+        )
 
     def close(self):
         self.conn.close()

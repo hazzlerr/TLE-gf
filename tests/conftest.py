@@ -64,7 +64,8 @@ class _StubEmbed:
     def __init__(self, **kw):
         self.color = kw.get('color')
         self.timestamp = kw.get('timestamp')
-        self.title = None
+        self.title = kw.get('title')
+        self.description = kw.get('description')
         self.fields = []
         self.footer = None
         self.image_url = None
@@ -83,6 +84,28 @@ _discord_mod.MessageType = type('MessageType', (), {'default': 0, 'reply': 1})
 _discord_mod.NotFound = type('NotFound', (Exception,), {})
 _discord_mod.Forbidden = type('Forbidden', (Exception,), {})
 _discord_mod.HTTPException = type('HTTPException', (Exception,), {})
+_discord_mod.ButtonStyle = type('ButtonStyle', (), {'secondary': 2, 'primary': 1})
+_discord_mod.Interaction = type('Interaction', (), {})
+
+# discord.ui stubs for rpoll
+_discord_ui = types.ModuleType('discord.ui')
+_discord_ui.__path__ = []
+class _StubView:
+    def __init__(self, *, timeout=None):
+        self.timeout = timeout
+        self.children = []
+    def add_item(self, item):
+        self.children.append(item)
+class _StubButton:
+    def __init__(self, *, style=None, emoji=None, custom_id=None, label=None):
+        self.style = style
+        self.emoji = emoji
+        self.custom_id = custom_id
+        self.label = label
+_discord_ui.View = _StubView
+_discord_ui.Button = _StubButton
+sys.modules['discord.ui'] = _discord_ui
+_discord_mod.ui = _discord_ui
 
 sys.modules['aiocache'].cached = lambda *a, **kw: (lambda f: f)  # no-op decorator
 
@@ -128,6 +151,14 @@ import time as _time
 import datetime as _datetime
 cf_common = sys.modules['tle.util.codeforces_common']
 cf_common.user_db = None
+cf_common.fix_urls = lambda user: user  # no-op in tests
+
+# Stub cf.User (codeforces_api) as a namedtuple so _make() works
+from collections import namedtuple as _nt
+_cf_api = sys.modules['tle.util.codeforces_api']
+_cf_api.User = _nt('User', 'handle first_name last_name country city organization '
+                    'contribution rating maxRating last_online_time '
+                    'registration_time friend_of_count title_photo')
 
 class _ParamParseError(_commands_mod.CommandError):
     pass
@@ -200,3 +231,4 @@ _cogs_path = os.path.join(_root, 'tle', 'cogs')
 _load_module('tle.cogs._starboard_helpers', os.path.join(_cogs_path, '_starboard_helpers.py'))
 _load_module('tle.cogs._starboard_backfill', os.path.join(_cogs_path, '_starboard_backfill.py'))
 _load_module('tle.cogs.starboard', os.path.join(_cogs_path, 'starboard.py'))
+_load_module('tle.cogs.rpoll', os.path.join(_cogs_path, 'rpoll.py'))
