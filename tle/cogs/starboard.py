@@ -33,6 +33,11 @@ _VIDEO_EXTENSIONS = ('mp4', 'mov', 'webm')
 # Flip to False and redeploy once the migration is done.
 REFORMAT_ON_STARTUP = True
 
+# TODO(remove after migration): Set to True to fully re-render starboard
+# messages on every reaction (useful for testing the new format). When False,
+# only the count in the content line is updated for new-format messages.
+FULL_RE_RENDER = True
+
 
 def _starboard_content(emoji_str, count, jump_url):
     """Build the header line for a starboard message.
@@ -306,12 +311,11 @@ class Starboard(BackfillMixin, commands.Cog):
 
     # --- Core logic ---
 
-    # TODO(remove after migration): _is_old_format and the old-format rebuild
-    # codepath in _update_starboard_message were added in commit 8bafdf3 to
-    # migrate old starboard messages on-the-fly when they receive new reactions.
-    # Once all old messages have been migrated (or are no longer relevant),
-    # delete _is_old_format and the `if self._is_old_format(sb_msg):` branch,
-    # keeping only the `else` (new-format) path.
+    # TODO(remove after migration): _is_old_format, FULL_RE_RENDER, and the
+    # full-rebuild codepath in _update_starboard_message were added to migrate
+    # old starboard messages on-the-fly. Once migration is done, delete
+    # _is_old_format, remove the FULL_RE_RENDER flag, and keep only the
+    # count-update path. Search for TODO(remove after migration).
 
     @staticmethod
     def _is_old_format(sb_msg):
@@ -331,8 +335,9 @@ class Starboard(BackfillMixin, commands.Cog):
                                         original_message=None):
         """Edit the starboard message to reflect an updated reaction count.
 
-        If the starboard message uses the old embed format, it is fully
-        rebuilt from the original message instead of just updating the count.
+        If FULL_RE_RENDER is True or the message uses the old embed format,
+        the entire starboard post is rebuilt from the original message.
+        Otherwise only the count in the content line is updated.
         """
         sb_entry = cf_common.user_db.get_starboard_message_v1(original_msg_id, emoji_str)
         if sb_entry is None or sb_entry.starboard_msg_id is None:
@@ -346,8 +351,8 @@ class Starboard(BackfillMixin, commands.Cog):
         try:
             sb_msg = await sb_channel.fetch_message(int(sb_entry.starboard_msg_id))
 
-            # TODO(remove after migration): old-format rebuild branch
-            if self._is_old_format(sb_msg):
+            # TODO(remove after migration): full re-render branch
+            if FULL_RE_RENDER or self._is_old_format(sb_msg):
                 if original_message is None:
                     source_ch = self.bot.get_channel(int(sb_entry.channel_id)) if sb_entry.channel_id else None
                     if source_ch is None:
@@ -357,11 +362,11 @@ class Starboard(BackfillMixin, commands.Cog):
                     original_message, emoji_str, count, entry.color
                 )
                 await sb_msg.edit(content=content, embeds=embeds, attachments=files)
-                logger.info(f'Rebuilt old-format starboard message: msg={original_msg_id} '
+                logger.info(f'Full re-render starboard message: msg={original_msg_id} '
                             f'emoji={emoji_str} count={count}')
             # END TODO(remove after migration)
             else:
-                # New format — just update the content line with new count
+                # Just update the content line with new count
                 source_channel_id = sb_entry.channel_id or '0'
                 jump_url = f'https://discord.com/channels/{guild_id}/{source_channel_id}/{original_msg_id}'
                 new_content = _starboard_content(emoji_str, count, jump_url)
