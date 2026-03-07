@@ -198,7 +198,8 @@ class Starboard(BackfillMixin, commands.Cog):
                     name='Attachment', value=f'[{att.filename}]({att.url})', inline=False
                 )
 
-            # Handle embeds from original message (link previews, etc.)
+            # Pull an image from the original message's embeds if we don't
+            # already have one from attachments.
             if not image_url and message.embeds:
                 for e in message.embeds:
                     if e.type == 'image' and e.url:
@@ -212,6 +213,12 @@ class Starboard(BackfillMixin, commands.Cog):
                         break
 
             embeds.append(embed)
+
+        # Carry over rich embeds from the original message (e.g. bot embeds
+        # like Codeforces problem cards). Skip auto-generated URL previews.
+        for e in message.embeds:
+            if e.type == 'rich':
+                embeds.append(e)
 
         content = '\n'.join(content_lines)
         return content, embeds

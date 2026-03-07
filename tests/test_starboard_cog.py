@@ -297,6 +297,31 @@ class TestBuildStarboardMessage:
         field_names = [f['name'] for f in main_embed.fields]
         assert 'Attachment' in field_names
 
+    def test_rich_embeds_carried_over(self):
+        """Rich embeds from the original message (e.g. bot embeds) should be included."""
+        class FakeRichEmbed:
+            type = 'rich'
+            title = 'B. Count Pairs'
+            image = None
+            thumbnail = None
+            url = None
+        msg = _FakeMessage(content='Challenge problem for kindmango', embeds=[FakeRichEmbed()])
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
+        # Main embed + the carried-over rich embed
+        assert len(embeds) == 2
+        assert embeds[1].title == 'B. Count Pairs'
+
+    def test_non_rich_embeds_not_carried_over(self):
+        """Auto-generated embeds (image, link, video) should not be carried over."""
+        class FakeImageEmbed:
+            type = 'image'
+            url = 'https://example.com/image.png'
+            image = None
+            thumbnail = None
+        msg = _FakeMessage(content='Some text', embeds=[FakeImageEmbed()])
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
+        assert len(embeds) == 1  # Only main embed, image embed not carried over
+
     def test_no_reply_embed_without_reference(self):
         msg = _FakeMessage()
         content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
