@@ -297,33 +297,35 @@ class Starboard(BackfillMixin, commands.Cog):
                      f'guild={payload.guild_id} msg={payload.message_id} user={payload.user_id}')
         # Update star count, author, and reactors if the message is tracked
         if cf_common.user_db.check_exists_starboard_message_v1(payload.message_id, main_emoji):
-            # Remove the reactor under the raw emoji they used
-            cf_common.user_db.remove_reactor(payload.message_id, raw_emoji, payload.user_id)
-            try:
-                channel = self.bot.get_channel(payload.channel_id)
-                if channel is None:
-                    logger.warning(f'Reaction remove: channel {payload.channel_id} not found in cache')
-                    return
-                # Use union count across main + aliases
-                emoji_family = cf_common.user_db.get_emoji_family(payload.guild_id, main_emoji)
-                count = cf_common.user_db.get_merged_reactor_count(payload.message_id, emoji_family)
-                message = await channel.fetch_message(payload.message_id)
-                cf_common.user_db.update_starboard_author_and_count(
-                    payload.message_id, main_emoji, str(message.author.id), count
-                )
-                logger.info(f'Updated star count for msg={payload.message_id} emoji={main_emoji} '
-                            f'author={message.author.id} new_count={count}')
-                # Live-update the starboard message (full rebuild if old format)
-                await self._update_starboard_message(
-                    payload.guild_id, payload.message_id, main_emoji, count,
-                    original_message=message,
-                )
-            except discord.NotFound:
-                logger.warning(f'Reaction remove: message {payload.message_id} not found '
-                               f'(may have been deleted)')
-            except Exception as e:
-                logger.warning(f'Failed to update star count on reaction remove for '
-                               f'msg={payload.message_id}: {e}', exc_info=True)
+            lock = self.locks.get(payload.guild_id)
+            if lock is None:
+                self.locks[payload.guild_id] = lock = asyncio.Lock()
+            async with lock:
+                try:
+                    channel = self.bot.get_channel(payload.channel_id)
+                    if channel is None:
+                        logger.warning(f'Reaction remove: channel {payload.channel_id} not found in cache')
+                        return
+                    # Remove reactor and recount inside the lock so adds can't interleave
+                    cf_common.user_db.remove_reactor(payload.message_id, raw_emoji, payload.user_id)
+                    emoji_family = cf_common.user_db.get_emoji_family(payload.guild_id, main_emoji)
+                    count = cf_common.user_db.get_merged_reactor_count(payload.message_id, emoji_family)
+                    message = await channel.fetch_message(payload.message_id)
+                    cf_common.user_db.update_starboard_author_and_count(
+                        payload.message_id, main_emoji, str(message.author.id), count
+                    )
+                    logger.info(f'Updated star count for msg={payload.message_id} emoji={main_emoji} '
+                                f'author={message.author.id} new_count={count}')
+                    await self._update_starboard_message(
+                        payload.guild_id, payload.message_id, main_emoji, count,
+                        original_message=message,
+                    )
+                except discord.NotFound:
+                    logger.warning(f'Reaction remove: message {payload.message_id} not found '
+                                   f'(may have been deleted)')
+                except Exception as e:
+                    logger.warning(f'Failed to update star count on reaction remove for '
+                                   f'msg={payload.message_id}: {e}', exc_info=True)
 
     @commands.Cog.listener()
     async def on_raw_message_delete(self, payload):
