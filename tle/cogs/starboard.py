@@ -230,6 +230,9 @@ class Starboard(BackfillMixin, commands.Cog):
             if e.type in ('rich', 'link', 'article'):
                 embeds.append(e)
 
+        # Discord allows a maximum of 10 embeds per message
+        embeds = embeds[:10]
+
         return content, embeds, files
 
     # --- Event listeners ---

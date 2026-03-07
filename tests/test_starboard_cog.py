@@ -372,6 +372,19 @@ class TestBuildStarboardMessage:
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
         assert len(embeds) == 1  # Only main embed
 
+    def test_embeds_capped_at_10(self):
+        """Discord allows max 10 embeds per message."""
+        class FakeRichEmbed:
+            type = 'rich'
+            title = 'embed'
+            image = None
+            thumbnail = None
+            url = None
+        # 15 rich embeds + main embed would be 16 without the cap
+        msg = _FakeMessage(content='text', embeds=[FakeRichEmbed() for _ in range(15)])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
+        assert len(embeds) <= 10
+
     def test_no_reply_embed_without_reference(self):
         msg = _FakeMessage()
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
