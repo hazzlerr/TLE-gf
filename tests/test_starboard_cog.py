@@ -383,7 +383,38 @@ class TestBuildStarboardMessage:
         # 15 rich embeds + main embed would be 16 without the cap
         msg = _FakeMessage(content='text', embeds=[FakeRichEmbed() for _ in range(15)])
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
-        assert len(embeds) <= 10
+        assert len(embeds) == 10
+
+    def test_embeds_exactly_10_not_truncated(self):
+        """Exactly 10 embeds should not be truncated."""
+        class FakeRichEmbed:
+            type = 'rich'
+            title = 'embed'
+            image = None
+            thumbnail = None
+            url = None
+        # 9 rich embeds + 1 main embed = exactly 10
+        msg = _FakeMessage(content='text', embeds=[FakeRichEmbed() for _ in range(9)])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
+        assert len(embeds) == 10
+
+    def test_embeds_cap_with_reply(self):
+        """Reply embed + main embed + carried-over should still respect the 10-embed cap."""
+        class FakeRichEmbed:
+            type = 'rich'
+            title = 'embed'
+            image = None
+            thumbnail = None
+            url = None
+        ref_msg = _FakeMessage(content='Parent')
+        ref = _FakeReference(message_id=444, resolved=ref_msg)
+        # reply(1) + main(1) + 12 carried-over = 14 without cap -> should be 10
+        msg = _FakeMessage(content='Child', reference=ref,
+                           embeds=[FakeRichEmbed() for _ in range(12)])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
+        assert len(embeds) == 10
+        # Reply embed should be first (not truncated)
+        assert embeds[0].author_data['name'] == 'Replying to TestUser'
 
     def test_no_reply_embed_without_reference(self):
         msg = _FakeMessage()

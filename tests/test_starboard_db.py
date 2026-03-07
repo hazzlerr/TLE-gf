@@ -412,6 +412,17 @@ class TestStarGiversWithAliases:
         rows = db.get_star_givers_leaderboard(GUILD, STAR)  # no family
         assert len(rows) == 0  # alias reactor missed
 
+    def test_without_family_still_counts_main_reactors(self, db):
+        """Without emoji_family, main-emoji reactors still work correctly."""
+        db.add_starboard_emoji(GUILD, STAR, 1, 0xffaa10)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_starboard_message_v1('msg1', 'sb1', GUILD, STAR, author_id='author1')
+        db.add_reactor('msg1', STAR, 'reactor1')
+        db.add_reactor('msg1', STAR, 'reactor2')
+
+        rows = db.get_star_givers_leaderboard(GUILD, STAR)  # no family
+        assert len(rows) == 2
+
 
 class TestNarcissusWithAliases:
     def test_self_star_via_alias_counted(self, db):
