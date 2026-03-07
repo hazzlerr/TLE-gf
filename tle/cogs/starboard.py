@@ -34,12 +34,12 @@ _VIDEO_EXTENSIONS = ('mp4', 'mov', 'webm')
 REFORMAT_ON_STARTUP = True
 
 
-def _starboard_content(emoji_str, count, channel_id, jump_url):
+def _starboard_content(emoji_str, count, channel_id):
     """Build the header line for a starboard message.
 
-    Format: ⭐ **5** | <#channel_id> › [💬](jump_url)
+    Format: ⭐ **5** | <#channel_id>
     """
-    return f'{emoji_str} **{count}** | <#{channel_id}> \u203a [\U0001f4ac]({jump_url})'
+    return f'{emoji_str} **{count}** | <#{channel_id}>'
 
 
 def _parse_starboard_args(args, default_emoji=constants._DEFAULT_STAR):
@@ -111,7 +111,7 @@ class Starboard(BackfillMixin, commands.Cog):
           - embeds: list of Embed objects (reply context + main)
           - files: list of discord.File for videos/non-image attachments
         """
-        content = _starboard_content(emoji_str, count, message.channel.id, message.jump_url)
+        content = _starboard_content(emoji_str, count, message.channel.id)
         embeds = []
         files = []
 
@@ -143,6 +143,7 @@ class Starboard(BackfillMixin, commands.Cog):
         embed.set_author(
             name=message.author.display_name,
             icon_url=message.author.display_avatar.url,
+            url=message.jump_url,
         )
 
         if message.content:
@@ -244,7 +245,7 @@ class Starboard(BackfillMixin, commands.Cog):
                 # Live-update the starboard message content
                 await self._update_starboard_content(
                     payload.guild_id, payload.message_id, emoji_str, count,
-                    message.channel.id, message.jump_url,
+                    message.channel.id,
                 )
             except discord.NotFound:
                 logger.warning(f'Reaction remove: message {payload.message_id} not found '
@@ -267,7 +268,7 @@ class Starboard(BackfillMixin, commands.Cog):
     # --- Core logic ---
 
     async def _update_starboard_content(self, guild_id, original_msg_id, emoji_str, count,
-                                        source_channel_id, jump_url):
+                                        source_channel_id):
         """Edit the starboard message to reflect an updated reaction count."""
         sb_entry = cf_common.user_db.get_starboard_message_v1(original_msg_id, emoji_str)
         if sb_entry is None or sb_entry.starboard_msg_id is None:
@@ -280,7 +281,7 @@ class Starboard(BackfillMixin, commands.Cog):
             return
         try:
             sb_msg = await sb_channel.fetch_message(int(sb_entry.starboard_msg_id))
-            new_content = _starboard_content(emoji_str, count, source_channel_id, jump_url)
+            new_content = _starboard_content(emoji_str, count, source_channel_id)
             await sb_msg.edit(content=new_content)
             logger.debug(f'Live-updated starboard content: msg={original_msg_id} '
                          f'emoji={emoji_str} count={count}')
@@ -328,7 +329,7 @@ class Starboard(BackfillMixin, commands.Cog):
                 # Live-update the starboard message content with new count
                 await self._update_starboard_content(
                     payload.guild_id, message.id, emoji_str, reaction_count,
-                    channel.id, message.jump_url,
+                    channel.id,
                 )
                 return
 

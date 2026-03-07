@@ -124,15 +124,19 @@ class TestGetEmojisIncludesChannelId:
 
 class TestStarboardContent:
     def test_format(self):
-        result = _starboard_content('\N{WHITE MEDIUM STAR}', 5, 222, 'https://discord.com/channels/1/2/3')
+        result = _starboard_content('\N{WHITE MEDIUM STAR}', 5, 222)
         assert '\N{WHITE MEDIUM STAR}' in result
         assert '**5**' in result
         assert '<#222>' in result
-        assert '[\U0001f4ac](https://discord.com/channels/1/2/3)' in result
 
     def test_pipe_separator(self):
-        result = _starboard_content('\N{FIRE}', 3, 999, 'https://example.com')
+        result = _starboard_content('\N{FIRE}', 3, 999)
         assert '|' in result
+
+    def test_no_markdown_link_in_content(self):
+        """Discord doesn't support markdown links in message content."""
+        result = _starboard_content('\N{WHITE MEDIUM STAR}', 5, 222)
+        assert '](http' not in result
 
 
 # =====================================================================
@@ -211,13 +215,14 @@ class TestBuildStarboardMessage:
         assert '**7**' in content
         assert '<#222>' in content
 
-    def test_main_embed_uses_set_author(self):
+    def test_main_embed_uses_set_author_with_jump_url(self):
         msg = _FakeMessage()
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         assert main_embed.author_data is not None
         assert main_embed.author_data['name'] == 'TestUser'
         assert main_embed.author_data['icon_url'] == 'https://cdn.example.com/avatar.png'
+        assert main_embed.author_data['url'] == 'https://discord.com/channels/111/222/333'
 
     def test_main_embed_has_description_not_fields(self):
         msg = _FakeMessage(content='Some text')
