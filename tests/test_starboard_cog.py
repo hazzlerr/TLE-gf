@@ -209,22 +209,21 @@ def _run(coro):
 class TestBuildStarboardMessage:
     """Tests for the new build_starboard_message method."""
 
-    def test_returns_content_embeds_files(self):
+    def test_returns_content_and_embeds(self):
         msg = _FakeMessage()
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         assert isinstance(content, str)
         assert isinstance(embeds, list)
-        assert isinstance(files, list)
 
     def test_content_has_count_and_jump_url(self):
         msg = _FakeMessage()
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 7, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 7, 0xffaa10))
         assert '**7**' in content
         assert 'https://discord.com/channels/111/222/333' in content
 
     def test_main_embed_uses_set_author_with_jump_url(self):
         msg = _FakeMessage()
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         assert main_embed.author_data is not None
         assert main_embed.author_data['name'] == 'TestUser'
@@ -233,7 +232,7 @@ class TestBuildStarboardMessage:
 
     def test_main_embed_has_description_not_fields(self):
         msg = _FakeMessage(content='Some text')
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         assert main_embed.description == 'Some text'
         # No Channel/Jump to/Content fields like the old format
@@ -244,43 +243,40 @@ class TestBuildStarboardMessage:
 
     def test_no_description_when_empty_content(self):
         msg = _FakeMessage(content='')
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         assert main_embed.description is None
 
     def test_color_passed_through(self):
         msg = _FakeMessage()
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0x00ff00))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0x00ff00))
         main_embed = embeds[-1]
         assert main_embed.color == 0x00ff00
 
     def test_image_attachment_set_on_embed(self):
         att = _FakeAttachment('photo.png')
         msg = _FakeMessage(attachments=[att])
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         assert main_embed.image_url == 'https://cdn.example.com/file'
-        assert len(files) == 0
 
-    def test_video_attachment_added_as_file(self):
-        att = _FakeAttachment('clip.mp4')
+    def test_video_url_in_content(self):
+        att = _FakeAttachment('clip.mp4', url='https://cdn.example.com/clip.mp4')
         msg = _FakeMessage(attachments=[att])
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
-        assert len(files) == 1
-        assert files[0] == 'File:clip.mp4'
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert 'https://cdn.example.com/clip.mp4' in content
 
     def test_other_attachment_as_field_link(self):
         att = _FakeAttachment('document.pdf')
         msg = _FakeMessage(attachments=[att])
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         field_names = [f['name'] for f in main_embed.fields]
         assert 'Attachment' in field_names
-        assert len(files) == 0
 
     def test_no_reply_embed_without_reference(self):
         msg = _FakeMessage()
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         assert len(embeds) == 1  # Only main embed
 
     def test_reply_embed_present_with_resolved_reference(self):
@@ -292,7 +288,7 @@ class TestBuildStarboardMessage:
 
         ref = _FakeReference(message_id=444, resolved=ref_msg)
         msg = _FakeMessage(content='My reply', reference=ref)
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         assert len(embeds) == 2  # Reply embed + main embed
         reply_embed = embeds[0]
         assert reply_embed.author_data['name'] == 'Replying to ReplyTarget'
@@ -303,14 +299,14 @@ class TestBuildStarboardMessage:
         ref_msg = _FakeMessage(content='Parent msg')
         ref = _FakeReference(message_id=444, resolved=ref_msg)
         msg = _FakeMessage(content='Child msg', reference=ref)
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         # Reply embed first, main embed second
         assert embeds[0].description == 'Parent msg'
         assert embeds[1].description == 'Child msg'
 
     def test_long_content_truncated(self):
         msg = _FakeMessage(content='x' * 5000)
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         assert len(main_embed.description) == 4096
         assert main_embed.description.endswith('...')
@@ -318,13 +314,13 @@ class TestBuildStarboardMessage:
     def test_no_footer_set(self):
         """New format uses set_author, not footer."""
         msg = _FakeMessage()
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         assert main_embed.footer is None
 
     def test_timestamp_set(self):
         msg = _FakeMessage()
-        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[-1]
         assert main_embed.timestamp == datetime(2025, 1, 1)
 

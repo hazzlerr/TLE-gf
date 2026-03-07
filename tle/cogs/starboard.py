@@ -105,16 +105,15 @@ class Starboard(BackfillMixin, commands.Cog):
 
     @staticmethod
     async def build_starboard_message(message, emoji_str, count, color):
-        """Build content, embeds, and files for a starboard message.
+        """Build content and embeds for a starboard message.
 
-        Returns (content, embeds, files) where:
-          - content: the header line with emoji count and channel link
+        Returns (content, embeds) where:
+          - content: the header line with emoji count and jump URL,
+                     plus any video URLs on separate lines for auto-embed
           - embeds: list of Embed objects (reply context + main)
-          - files: list of discord.File for videos/non-image attachments
         """
-        content = _starboard_content(emoji_str, count, message.jump_url)
+        content_lines = [_starboard_content(emoji_str, count, message.jump_url)]
         embeds = []
-        files = []
 
         # --- Reply context embed (goes first / above main embed) ---
         if message.reference and message.reference.message_id:
@@ -162,12 +161,9 @@ class Starboard(BackfillMixin, commands.Cog):
                     embed.set_image(url=att.url)
                     image_set = True
             elif ext in _VIDEO_EXTENSIONS:
-                try:
-                    files.append(await att.to_file())
-                except Exception:
-                    embed.add_field(
-                        name='Video', value=f'[{att.filename}]({att.url})', inline=False
-                    )
+                # Videos can't render inside embeds. Put the URL in the
+                # message content so Discord auto-embeds it as a player.
+                content_lines.append(att.url)
             else:
                 embed.add_field(
                     name='Attachment', value=f'[{att.filename}]({att.url})', inline=False
@@ -187,7 +183,8 @@ class Starboard(BackfillMixin, commands.Cog):
                     break
 
         embeds.append(embed)
-        return content, embeds, files
+        content = '\n'.join(content_lines)
+        return content, embeds
 
     # --- Event listeners ---
 
@@ -333,11 +330,11 @@ class Starboard(BackfillMixin, commands.Cog):
                 )
                 return
 
-            content, embeds, files = await self.build_starboard_message(
+            content, embeds = await self.build_starboard_message(
                 message, emoji_str, reaction_count, color
             )
             starboard_message = await starboard_channel.send(
-                content=content, embeds=embeds, files=files,
+                content=content, embeds=embeds,
             )
             cf_common.user_db.add_starboard_message_v1(
                 message.id, starboard_message.id, guild.id, emoji_str,
@@ -390,15 +387,12 @@ class Starboard(BackfillMixin, commands.Cog):
                         original_msg = await source_channel.fetch_message(int(msg.original_msg_id))
                         count = msg.star_count or 0
 
-                        content, embeds, files = await self.build_starboard_message(
+                        content, embeds = await self.build_starboard_message(
                             original_msg, msg.emoji, count, emoji_cfg.color
                         )
 
                         sb_msg = await sb_channel.fetch_message(int(msg.starboard_msg_id))
-                        if files:
-                            await sb_msg.edit(content=content, embeds=embeds, attachments=files)
-                        else:
-                            await sb_msg.edit(content=content, embeds=embeds)
+                        await sb_msg.edit(content=content, embeds=embeds)
                         logger.info(f'Reformatted starboard msg={msg.starboard_msg_id} '
                                     f'(original={msg.original_msg_id})')
                         await asyncio.sleep(1)  # Rate limit courtesy
