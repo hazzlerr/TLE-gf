@@ -218,10 +218,11 @@ class Starboard(BackfillMixin, commands.Cog):
 
             embeds.append(embed)
 
-        # Carry over rich embeds from the original message (e.g. bot embeds
-        # like Codeforces problem cards). Skip auto-generated URL previews.
+        # Carry over rich and link embeds from the original message (bot
+        # embeds like Codeforces problem cards, and URL previews like blog
+        # post link previews). Skip image/video/gifv auto-embeds.
         for e in message.embeds:
-            if e.type == 'rich':
+            if e.type in ('rich', 'link', 'article'):
                 embeds.append(e)
 
         return content, embeds, files

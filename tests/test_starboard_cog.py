@@ -347,8 +347,21 @@ class TestBuildStarboardMessage:
         assert len(embeds) == 2
         assert embeds[1].title == 'B. Count Pairs'
 
-    def test_non_rich_embeds_not_carried_over(self):
-        """Auto-generated embeds (image, link, video) should not be carried over."""
+    def test_link_embeds_carried_over(self):
+        """Link preview embeds (e.g. Codeforces blog posts) should be included."""
+        class FakeLinkEmbed:
+            type = 'link'
+            title = 'Codeforces Round 1084 (Div. 3)'
+            image = None
+            thumbnail = None
+            url = 'https://codeforces.com/blog/entry/151519'
+        msg = _FakeMessage(content='https://codeforces.com/blog/entry/151519', embeds=[FakeLinkEmbed()])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 9, 0xffaa10))
+        assert len(embeds) == 2  # Main embed + link embed
+        assert embeds[1].title == 'Codeforces Round 1084 (Div. 3)'
+
+    def test_image_embeds_not_carried_over(self):
+        """Auto-generated image embeds should not be carried over."""
         class FakeImageEmbed:
             type = 'image'
             url = 'https://example.com/image.png'
@@ -356,7 +369,7 @@ class TestBuildStarboardMessage:
             thumbnail = None
         msg = _FakeMessage(content='Some text', embeds=[FakeImageEmbed()])
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
-        assert len(embeds) == 1  # Only main embed, image embed not carried over
+        assert len(embeds) == 1  # Only main embed
 
     def test_no_reply_embed_without_reference(self):
         msg = _FakeMessage()
