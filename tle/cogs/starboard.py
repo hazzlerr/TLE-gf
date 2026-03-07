@@ -234,6 +234,23 @@ class Starboard(BackfillMixin, commands.Cog):
 
     # --- Event listeners ---
 
+    @staticmethod
+    def _resolve_emoji(guild_id, emoji_str):
+        """Resolve an emoji to its main emoji (if alias) and return (main_emoji, entry).
+
+        Returns (main_emoji, entry) where entry is the starboard config for the main emoji,
+        or (emoji_str, None) if the emoji is not configured and not an alias.
+        """
+        entry = cf_common.user_db.get_starboard_entry(guild_id, emoji_str)
+        if entry is not None:
+            return emoji_str, entry
+        # Check if it's an alias
+        main_emoji = cf_common.user_db.resolve_alias(guild_id, emoji_str)
+        if main_emoji is not None:
+            entry = cf_common.user_db.get_starboard_entry(guild_id, main_emoji)
+            return main_emoji, entry
+        return emoji_str, None
+
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload):
         if payload.guild_id is None:
@@ -243,23 +260,25 @@ class Starboard(BackfillMixin, commands.Cog):
         channel = self.bot.get_channel(payload.channel_id)
         if channel is not None and getattr(channel, 'nsfw', False):
             return
-        emoji_str = _emoji_str(payload.emoji)
-        entry = cf_common.user_db.get_starboard_entry(payload.guild_id, emoji_str)
+        raw_emoji = _emoji_str(payload.emoji)
+        main_emoji, entry = self._resolve_emoji(payload.guild_id, raw_emoji)
         if entry is None:
             return
         if entry.channel_id is None:
             return  # Emoji configured but no starboard channel set yet
         channel_id, threshold, color = int(entry.channel_id), entry.threshold, entry.color
-        logger.debug(f'Reaction add: emoji={emoji_str} guild={payload.guild_id} '
-                     f'msg={payload.message_id} user={payload.user_id} '
+        logger.debug(f'Reaction add: raw_emoji={raw_emoji} main_emoji={main_emoji} '
+                     f'guild={payload.guild_id} msg={payload.message_id} user={payload.user_id} '
                      f'threshold={threshold} starboard_channel={channel_id}')
         try:
-            await self.check_and_add_to_starboard(channel_id, threshold, color, emoji_str, payload)
+            await self.check_and_add_to_starboard(
+                channel_id, threshold, color, main_emoji, payload, raw_emoji=raw_emoji,
+            )
         except StarboardCogError as e:
-            logger.info(f'Failed to starboard msg={payload.message_id} emoji={emoji_str}: {e!r}')
+            logger.info(f'Failed to starboard msg={payload.message_id} emoji={main_emoji}: {e!r}')
         except Exception as e:
             logger.error(f'Unexpected error in starboard processing msg={payload.message_id} '
-                         f'emoji={emoji_str} guild={payload.guild_id}: {e}', exc_info=True)
+                         f'emoji={main_emoji} guild={payload.guild_id}: {e}', exc_info=True)
 
     @commands.Cog.listener()
     async def on_raw_reaction_remove(self, payload):
@@ -270,31 +289,33 @@ class Starboard(BackfillMixin, commands.Cog):
         channel = self.bot.get_channel(payload.channel_id)
         if channel is not None and getattr(channel, 'nsfw', False):
             return
-        emoji_str = _emoji_str(payload.emoji)
-        entry = cf_common.user_db.get_starboard_entry(payload.guild_id, emoji_str)
+        raw_emoji = _emoji_str(payload.emoji)
+        main_emoji, entry = self._resolve_emoji(payload.guild_id, raw_emoji)
         if entry is None:
             return
-        logger.debug(f'Reaction remove: emoji={emoji_str} guild={payload.guild_id} '
-                     f'msg={payload.message_id} user={payload.user_id}')
+        logger.debug(f'Reaction remove: raw_emoji={raw_emoji} main_emoji={main_emoji} '
+                     f'guild={payload.guild_id} msg={payload.message_id} user={payload.user_id}')
         # Update star count, author, and reactors if the message is tracked
-        if cf_common.user_db.check_exists_starboard_message_v1(payload.message_id, emoji_str):
-            # Remove the reactor immediately (doesn't need API call)
-            cf_common.user_db.remove_reactor(payload.message_id, emoji_str, payload.user_id)
+        if cf_common.user_db.check_exists_starboard_message_v1(payload.message_id, main_emoji):
+            # Remove the reactor under the raw emoji they used
+            cf_common.user_db.remove_reactor(payload.message_id, raw_emoji, payload.user_id)
             try:
                 channel = self.bot.get_channel(payload.channel_id)
                 if channel is None:
                     logger.warning(f'Reaction remove: channel {payload.channel_id} not found in cache')
                     return
+                # Use union count across main + aliases
+                emoji_family = cf_common.user_db.get_emoji_family(payload.guild_id, main_emoji)
+                count = cf_common.user_db.get_merged_reactor_count(payload.message_id, emoji_family)
                 message = await channel.fetch_message(payload.message_id)
-                count = sum(r.count for r in message.reactions if _emoji_str(r) == emoji_str)
                 cf_common.user_db.update_starboard_author_and_count(
-                    payload.message_id, emoji_str, str(message.author.id), count
+                    payload.message_id, main_emoji, str(message.author.id), count
                 )
-                logger.info(f'Updated star count for msg={payload.message_id} emoji={emoji_str} '
+                logger.info(f'Updated star count for msg={payload.message_id} emoji={main_emoji} '
                             f'author={message.author.id} new_count={count}')
                 # Live-update the starboard message (full rebuild if old format)
                 await self._update_starboard_message(
-                    payload.guild_id, payload.message_id, emoji_str, count,
+                    payload.guild_id, payload.message_id, main_emoji, count,
                     original_message=message,
                 )
             except discord.NotFound:
@@ -383,7 +404,15 @@ class Starboard(BackfillMixin, commands.Cog):
             logger.warning(f'Failed to live-update starboard message for '
                            f'original={original_msg_id}: {e}')
 
-    async def check_and_add_to_starboard(self, starboard_channel_id, threshold, color, emoji_str, payload):
+    async def check_and_add_to_starboard(self, starboard_channel_id, threshold, color,
+                                          emoji_str, payload, raw_emoji=None):
+        """Check if a message meets the starboard threshold and post/update it.
+
+        emoji_str is the main emoji. raw_emoji is the actual emoji the user reacted with
+        (may be an alias). If raw_emoji is None, it defaults to emoji_str.
+        """
+        if raw_emoji is None:
+            raw_emoji = emoji_str
         guild = self.bot.get_guild(payload.guild_id)
         if guild is None:
             raise StarboardCogError(f'Guild {payload.guild_id} not found in bot cache')
@@ -400,8 +429,15 @@ class Starboard(BackfillMixin, commands.Cog):
                     and len(message.embeds) == 0)):
             raise StarboardCogError(f'Cannot starboard message {message.id}: invalid type or empty content')
 
-        reaction_count = sum(r.count for r in message.reactions if _emoji_str(r) == emoji_str)
-        logger.debug(f'Message {message.id}: {emoji_str} reaction_count={reaction_count} threshold={threshold}')
+        # Track the reactor under the raw emoji they actually used
+        cf_common.user_db.add_reactor(message.id, raw_emoji, payload.user_id)
+
+        # Count = union of unique reactors across main + all aliases
+        emoji_family = cf_common.user_db.get_emoji_family(payload.guild_id, emoji_str)
+        reaction_count = cf_common.user_db.get_merged_reactor_count(message.id, emoji_family)
+
+        logger.debug(f'Message {message.id}: {emoji_str} (family={emoji_family}) '
+                     f'union_count={reaction_count} threshold={threshold}')
         if reaction_count < threshold:
             return
 
@@ -412,15 +448,11 @@ class Starboard(BackfillMixin, commands.Cog):
         async with lock:
             already_exists = cf_common.user_db.check_exists_starboard_message_v1(message.id, emoji_str)
             if already_exists:
-                # Update star count AND author_id for existing entry.
                 cf_common.user_db.update_starboard_author_and_count(
                     message.id, emoji_str, str(message.author.id), reaction_count
                 )
-                # Track the individual reactor
-                cf_common.user_db.add_reactor(message.id, emoji_str, payload.user_id)
                 logger.debug(f'Updated existing starboard entry: msg={message.id} emoji={emoji_str} '
                              f'author={message.author.id} count={reaction_count}')
-                # Live-update the starboard message (full rebuild if old format)
                 await self._update_starboard_message(
                     payload.guild_id, message.id, emoji_str, reaction_count,
                     original_message=message,
@@ -439,12 +471,12 @@ class Starboard(BackfillMixin, commands.Cog):
                 channel_id=str(channel.id)
             )
             cf_common.user_db.update_starboard_star_count(message.id, emoji_str, reaction_count)
-            # Collect all current reactors for this emoji
+            # Collect all current reactors for each emoji in the family
             for r in message.reactions:
-                if _emoji_str(r) == emoji_str:
+                r_emoji = _emoji_str(r)
+                if r_emoji in emoji_family:
                     user_ids = [str(user.id) async for user in r.users()]
-                    cf_common.user_db.bulk_add_reactors(message.id, emoji_str, user_ids)
-                    break
+                    cf_common.user_db.bulk_add_reactors(message.id, r_emoji, user_ids)
             logger.info(f'NEW starboard entry: original_msg={message.id} starboard_msg={starboard_message.id} '
                         f'guild={guild.id} emoji={emoji_str} author={message.author} ({message.author.id}) '
                         f'channel={channel.id} count={reaction_count} '
@@ -617,6 +649,60 @@ class Starboard(BackfillMixin, commands.Cog):
             logger.info(f'CMD starboard remove: NOT FOUND guild={ctx.guild.id} emoji={emoji} '
                         f'original_msg={original_message_id} by user={ctx.author.id}')
             await ctx.send(embed=discord_common.embed_alert('Not found in database'))
+
+    # --- Alias commands ---
+
+    @starboard.group(brief='Manage emoji aliases', invoke_without_command=True)
+    async def alias(self, ctx):
+        """Manage emoji aliases. Aliases count toward the main emoji's starboard."""
+        await ctx.send_help(ctx.command)
+
+    @alias.command(name='add', brief='Add an alias for a main emoji')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def alias_add(self, ctx, alias_emoji: str, main_emoji: str = constants._DEFAULT_STAR):
+        """Add an alias emoji that counts toward a main emoji's starboard.
+        Example: ;starboard alias add 👍 ⭐"""
+        # Validate main emoji is configured
+        entry = cf_common.user_db.get_starboard_entry(ctx.guild.id, main_emoji)
+        if entry is None:
+            raise StarboardCogError(f'Main emoji {main_emoji} is not configured for this starboard.')
+        # Can't alias a main emoji
+        if cf_common.user_db.get_starboard_entry(ctx.guild.id, alias_emoji) is not None:
+            raise StarboardCogError(f'{alias_emoji} is already a main starboard emoji. '
+                                    f'Remove it first before using it as an alias.')
+        # Can't alias an alias
+        existing = cf_common.user_db.resolve_alias(ctx.guild.id, alias_emoji)
+        if existing is not None:
+            raise StarboardCogError(f'{alias_emoji} is already an alias for {existing}. '
+                                    f'Remove it first with `;starboard alias remove {alias_emoji}`.')
+        cf_common.user_db.add_starboard_alias(ctx.guild.id, alias_emoji, main_emoji)
+        logger.info(f'CMD starboard alias add: guild={ctx.guild.id} alias={alias_emoji} '
+                    f'main={main_emoji} by user={ctx.author.id}')
+        await ctx.send(embed=discord_common.embed_success(
+            f'Added {alias_emoji} as alias for {main_emoji}'
+        ))
+
+    @alias.command(name='remove', brief='Remove an emoji alias')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def alias_remove(self, ctx, alias_emoji: str):
+        """Remove an alias emoji.
+        Example: ;starboard alias remove 👍"""
+        rc = cf_common.user_db.remove_starboard_alias(ctx.guild.id, alias_emoji)
+        if not rc:
+            raise StarboardCogError(f'{alias_emoji} is not an alias.')
+        logger.info(f'CMD starboard alias remove: guild={ctx.guild.id} alias={alias_emoji} '
+                    f'by user={ctx.author.id}')
+        await ctx.send(embed=discord_common.embed_success(f'Removed alias {alias_emoji}'))
+
+    @alias.command(name='list', brief='List all emoji aliases')
+    async def alias_list(self, ctx):
+        """Show all emoji aliases configured for this server."""
+        rows = cf_common.user_db.get_all_aliases_for_guild(ctx.guild.id)
+        if not rows:
+            await ctx.send(embed=discord_common.embed_neutral('No aliases configured.'))
+            return
+        lines = [f'{r.alias_emoji} \u2192 {r.main_emoji}' for r in rows]
+        await ctx.send(embed=discord_common.embed_success('\n'.join(lines)))
 
     # --- Leaderboard commands ---
 

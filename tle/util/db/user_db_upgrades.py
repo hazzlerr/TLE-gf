@@ -226,3 +226,18 @@ def upgrade_1_6_0(db):
     ''')
     db.commit()
     logger.info('1.6.0: kvs table created')
+
+
+@registry.register('1.7.0', 'Starboard emoji aliases')
+def upgrade_1_7_0(db):
+    logger.info('1.7.0: Creating starboard_alias table')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_alias (
+            guild_id    TEXT,
+            alias_emoji TEXT,
+            main_emoji  TEXT,
+            PRIMARY KEY (guild_id, alias_emoji)
+        )
+    ''')
+    db.commit()
+    logger.info('1.7.0: starboard_alias table created')

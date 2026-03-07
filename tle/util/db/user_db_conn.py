@@ -261,6 +261,15 @@ class UserDbConn(StarboardDbMixin):
                 PRIMARY KEY (original_msg_id, emoji, user_id)
             )
         ''')
+        # Starboard emoji aliases — alias emojis that count toward the main emoji
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS starboard_alias (
+                guild_id    TEXT,
+                alias_emoji TEXT,
+                main_emoji  TEXT,
+                PRIMARY KEY (guild_id, alias_emoji)
+            )
+        ''')
         # Guild config table
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS guild_config (

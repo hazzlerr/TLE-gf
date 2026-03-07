@@ -24,6 +24,7 @@ from tle.util.db.starboard_db import snowflake_to_unix_sql, DISCORD_EPOCH_MS, SN
 GUILD_A = 111111111111111111
 STAR = '\N{WHITE MEDIUM STAR}'
 FIRE = '\N{FIRE}'
+THUMBS_UP = '\N{THUMBS UP SIGN}'
 
 
 @pytest.fixture
@@ -850,6 +851,68 @@ class TestSnowflakeTimeFiltering:
         db.update_starboard_star_count(_make_snowflake(2024, 6, 15), STAR, 5)
         rows = db.get_top_starboard_messages(GUILD_A, STAR, dhi=exact_ts)
         assert len(rows) == 0
+
+
+# =====================================================================
+# _resolve_emoji
+# =====================================================================
+
+
+class _FakeUserDbForResolve:
+    """Minimal stub providing get_starboard_entry and resolve_alias for _resolve_emoji tests."""
+    def __init__(self, entries=None, aliases=None):
+        self._entries = entries or {}
+        self._aliases = aliases or {}
+
+    def get_starboard_entry(self, guild_id, emoji):
+        return self._entries.get((str(guild_id), emoji))
+
+    def resolve_alias(self, guild_id, emoji):
+        return self._aliases.get((str(guild_id), emoji))
+
+
+class _FakeEntry:
+    def __init__(self, channel_id='123', threshold=3, color=0xffaa10):
+        self.channel_id = channel_id
+        self.threshold = threshold
+        self.color = color
+
+
+class TestResolveEmoji:
+    def _patch_db(self, monkeypatch, entries=None, aliases=None):
+        from tle.util import codeforces_common as cf
+        fake = _FakeUserDbForResolve(entries, aliases)
+        monkeypatch.setattr(cf, 'user_db', fake)
+
+    def test_main_emoji_resolves_directly(self, monkeypatch):
+        entry = _FakeEntry()
+        self._patch_db(monkeypatch, entries={(str(GUILD_A), STAR): entry})
+        main, resolved = Starboard._resolve_emoji(GUILD_A, STAR)
+        assert main == STAR
+        assert resolved is entry
+
+    def test_alias_resolves_to_main(self, monkeypatch):
+        entry = _FakeEntry()
+        self._patch_db(monkeypatch,
+                       entries={(str(GUILD_A), STAR): entry},
+                       aliases={(str(GUILD_A), THUMBS_UP): STAR})
+        main, resolved = Starboard._resolve_emoji(GUILD_A, THUMBS_UP)
+        assert main == STAR
+        assert resolved is entry
+
+    def test_unknown_emoji_returns_none(self, monkeypatch):
+        self._patch_db(monkeypatch)
+        main, resolved = Starboard._resolve_emoji(GUILD_A, FIRE)
+        assert main == FIRE
+        assert resolved is None
+
+    def test_alias_to_unconfigured_main(self, monkeypatch):
+        """Alias points to a main emoji that isn't configured -> None."""
+        self._patch_db(monkeypatch,
+                       aliases={(str(GUILD_A), THUMBS_UP): STAR})
+        main, resolved = Starboard._resolve_emoji(GUILD_A, THUMBS_UP)
+        assert main == STAR
+        assert resolved is None
 
 
 # =====================================================================

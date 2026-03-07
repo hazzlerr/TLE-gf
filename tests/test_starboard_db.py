@@ -55,6 +55,14 @@ class FakeUserDb(StarboardDbMixin):
             )
         ''')
         self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS starboard_alias (
+                guild_id    TEXT,
+                alias_emoji TEXT,
+                main_emoji  TEXT,
+                PRIMARY KEY (guild_id, alias_emoji)
+            )
+        ''')
+        self.conn.execute('''
             CREATE TABLE IF NOT EXISTS guild_config (
                 guild_id    TEXT,
                 key         TEXT,
@@ -369,6 +377,146 @@ class TestGuildConfig:
         db.set_guild_config(222222, 'key', 'val2')
         assert db.get_guild_config(GUILD, 'key') == 'val1'
         assert db.get_guild_config(222222, 'key') == 'val2'
+
+
+# =====================================================================
+# Int vs str type handling
+# =====================================================================
+
+# =====================================================================
+# Emoji alias CRUD
+# =====================================================================
+
+THUMBS_UP = '\N{THUMBS UP SIGN}'
+
+class TestAliasAdd:
+    def test_add_alias(self, db):
+        db.add_starboard_emoji(GUILD, STAR, 3, 0xffaa10)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        aliases = db.get_aliases_for_emoji(GUILD, STAR)
+        assert aliases == [THUMBS_UP]
+
+    def test_add_multiple_aliases(self, db):
+        db.add_starboard_emoji(GUILD, STAR, 3, 0xffaa10)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_starboard_alias(GUILD, FIRE, STAR)
+        aliases = db.get_aliases_for_emoji(GUILD, STAR)
+        assert set(aliases) == {THUMBS_UP, FIRE}
+
+    def test_replace_alias(self, db):
+        """Adding same alias again should update the main emoji."""
+        db.add_starboard_emoji(GUILD, STAR, 3, 0xffaa10)
+        db.add_starboard_emoji(GUILD, FIRE, 3, 0xff0000)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_starboard_alias(GUILD, THUMBS_UP, FIRE)
+        assert db.resolve_alias(GUILD, THUMBS_UP) == FIRE
+
+    def test_int_guild_id(self, db):
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        assert db.resolve_alias(GUILD, THUMBS_UP) == STAR
+
+
+class TestAliasRemove:
+    def test_remove_alias(self, db):
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        rc = db.remove_starboard_alias(GUILD, THUMBS_UP)
+        assert rc == 1
+        assert db.resolve_alias(GUILD, THUMBS_UP) is None
+
+    def test_remove_nonexistent(self, db):
+        rc = db.remove_starboard_alias(GUILD, THUMBS_UP)
+        assert rc == 0
+
+
+class TestAliasResolve:
+    def test_resolve_existing_alias(self, db):
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        assert db.resolve_alias(GUILD, THUMBS_UP) == STAR
+
+    def test_resolve_non_alias(self, db):
+        assert db.resolve_alias(GUILD, STAR) is None
+
+    def test_per_guild_isolation(self, db):
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        assert db.resolve_alias(222222, THUMBS_UP) is None
+
+
+class TestGetAllAliases:
+    def test_empty(self, db):
+        assert db.get_all_aliases_for_guild(GUILD) == []
+
+    def test_multiple_aliases(self, db):
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_starboard_alias(GUILD, FIRE, STAR)
+        rows = db.get_all_aliases_for_guild(GUILD)
+        aliases = {r.alias_emoji: r.main_emoji for r in rows}
+        assert aliases == {THUMBS_UP: STAR, FIRE: STAR}
+
+
+class TestEmojiFamily:
+    def test_no_aliases(self, db):
+        assert db.get_emoji_family(GUILD, STAR) == [STAR]
+
+    def test_with_aliases(self, db):
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_starboard_alias(GUILD, FIRE, STAR)
+        family = db.get_emoji_family(GUILD, STAR)
+        assert family[0] == STAR
+        assert set(family) == {STAR, THUMBS_UP, FIRE}
+
+
+class TestMergedCountWithAliases:
+    """Test that get_merged_reactor_count correctly deduplicates across aliases."""
+
+    def test_user_reacted_main_and_alias_counts_once(self, db):
+        db.add_starboard_emoji(GUILD, STAR, 3, 0xffaa10)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_reactor('msg1', STAR, 'user1')
+        db.add_reactor('msg1', THUMBS_UP, 'user1')
+        family = db.get_emoji_family(GUILD, STAR)
+        assert db.get_merged_reactor_count('msg1', family) == 1
+
+    def test_different_users_different_emojis(self, db):
+        db.add_starboard_emoji(GUILD, STAR, 3, 0xffaa10)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_reactor('msg1', STAR, 'user1')
+        db.add_reactor('msg1', THUMBS_UP, 'user2')
+        family = db.get_emoji_family(GUILD, STAR)
+        assert db.get_merged_reactor_count('msg1', family) == 2
+
+    def test_mixed_overlap(self, db):
+        """user1 uses both, user2 uses only alias, user3 uses only main -> 3."""
+        db.add_starboard_emoji(GUILD, STAR, 3, 0xffaa10)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_reactor('msg1', STAR, 'user1')
+        db.add_reactor('msg1', THUMBS_UP, 'user1')
+        db.add_reactor('msg1', THUMBS_UP, 'user2')
+        db.add_reactor('msg1', STAR, 'user3')
+        family = db.get_emoji_family(GUILD, STAR)
+        assert db.get_merged_reactor_count('msg1', family) == 3
+
+    def test_only_alias_reactions_count(self, db):
+        """Even if nobody used the main emoji, alias reactions still count."""
+        db.add_starboard_emoji(GUILD, STAR, 3, 0xffaa10)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_reactor('msg1', THUMBS_UP, 'user1')
+        db.add_reactor('msg1', THUMBS_UP, 'user2')
+        family = db.get_emoji_family(GUILD, STAR)
+        assert db.get_merged_reactor_count('msg1', family) == 2
+
+    def test_multiple_aliases(self, db):
+        """Three aliases plus main, various overlaps."""
+        db.add_starboard_emoji(GUILD, STAR, 3, 0xffaa10)
+        db.add_starboard_alias(GUILD, THUMBS_UP, STAR)
+        db.add_starboard_alias(GUILD, FIRE, STAR)
+        # user1 uses all three -> count 1
+        db.add_reactor('msg1', STAR, 'user1')
+        db.add_reactor('msg1', THUMBS_UP, 'user1')
+        db.add_reactor('msg1', FIRE, 'user1')
+        # user2 uses only fire -> count 1
+        db.add_reactor('msg1', FIRE, 'user2')
+        family = db.get_emoji_family(GUILD, STAR)
+        assert db.get_merged_reactor_count('msg1', family) == 2
 
 
 # =====================================================================

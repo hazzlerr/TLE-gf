@@ -406,6 +406,58 @@ class StarboardDbMixin:
         query = 'SELECT emoji, threshold, color, channel_id FROM starboard_emoji_v1 WHERE guild_id = ?'
         return self.conn.execute(query, (guild_id,)).fetchall()
 
+    # --- Emoji alias methods ---
+
+    def add_starboard_alias(self, guild_id, alias_emoji, main_emoji):
+        """Add an alias emoji that counts toward a main emoji's starboard."""
+        guild_id = str(guild_id)
+        self.conn.execute(
+            'INSERT OR REPLACE INTO starboard_alias (guild_id, alias_emoji, main_emoji) '
+            'VALUES (?, ?, ?)',
+            (guild_id, alias_emoji, main_emoji)
+        )
+        self.conn.commit()
+
+    def remove_starboard_alias(self, guild_id, alias_emoji):
+        """Remove an alias emoji. Returns rowcount (0 or 1)."""
+        guild_id = str(guild_id)
+        rc = self.conn.execute(
+            'DELETE FROM starboard_alias WHERE guild_id = ? AND alias_emoji = ?',
+            (guild_id, alias_emoji)
+        ).rowcount
+        self.conn.commit()
+        return rc
+
+    def get_aliases_for_emoji(self, guild_id, main_emoji):
+        """Get all alias emojis for a main emoji in a guild."""
+        guild_id = str(guild_id)
+        rows = self.conn.execute(
+            'SELECT alias_emoji FROM starboard_alias WHERE guild_id = ? AND main_emoji = ?',
+            (guild_id, main_emoji)
+        ).fetchall()
+        return [r.alias_emoji for r in rows]
+
+    def resolve_alias(self, guild_id, emoji):
+        """Resolve an alias emoji to its main emoji. Returns the main emoji or None if not an alias."""
+        guild_id = str(guild_id)
+        row = self.conn.execute(
+            'SELECT main_emoji FROM starboard_alias WHERE guild_id = ? AND alias_emoji = ?',
+            (guild_id, emoji)
+        ).fetchone()
+        return row.main_emoji if row else None
+
+    def get_all_aliases_for_guild(self, guild_id):
+        """Get all aliases for a guild. Returns list of (alias_emoji, main_emoji) rows."""
+        guild_id = str(guild_id)
+        return self.conn.execute(
+            'SELECT alias_emoji, main_emoji FROM starboard_alias WHERE guild_id = ?',
+            (guild_id,)
+        ).fetchall()
+
+    def get_emoji_family(self, guild_id, main_emoji):
+        """Get the main emoji plus all its aliases as a list. Used for union counting."""
+        return [main_emoji] + self.get_aliases_for_emoji(guild_id, main_emoji)
+
     # --- Guild config methods ---
 
     def get_guild_config(self, guild_id, key):
