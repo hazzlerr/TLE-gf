@@ -451,6 +451,8 @@ class Starboard(BackfillMixin, commands.Cog):
             self.locks[payload.guild_id] = lock = asyncio.Lock()
 
         async with lock:
+            # Recount inside the lock to avoid stale values from concurrent removes
+            reaction_count = cf_common.user_db.get_merged_reactor_count(message.id, emoji_family)
             already_exists = cf_common.user_db.check_exists_starboard_message_v1(message.id, emoji_str)
             if already_exists:
                 cf_common.user_db.update_starboard_author_and_count(
@@ -463,6 +465,9 @@ class Starboard(BackfillMixin, commands.Cog):
                     original_message=message,
                 )
                 return
+
+            if reaction_count < threshold:
+                return  # Concurrent remove dropped count below threshold
 
             content, embeds, files = await self.build_starboard_message(
                 message, emoji_str, reaction_count, color
