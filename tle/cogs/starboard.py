@@ -240,6 +240,9 @@ class Starboard(BackfillMixin, commands.Cog):
             return
         if cf_common.user_db is None:
             return
+        channel = self.bot.get_channel(payload.channel_id)
+        if channel is not None and getattr(channel, 'nsfw', False):
+            return
         emoji_str = _emoji_str(payload.emoji)
         entry = cf_common.user_db.get_starboard_entry(payload.guild_id, emoji_str)
         if entry is None:
@@ -263,6 +266,9 @@ class Starboard(BackfillMixin, commands.Cog):
         if payload.guild_id is None:
             return
         if cf_common.user_db is None:
+            return
+        channel = self.bot.get_channel(payload.channel_id)
+        if channel is not None and getattr(channel, 'nsfw', False):
             return
         emoji_str = _emoji_str(payload.emoji)
         entry = cf_common.user_db.get_starboard_entry(payload.guild_id, emoji_str)
