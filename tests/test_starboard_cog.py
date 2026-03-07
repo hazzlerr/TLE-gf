@@ -124,19 +124,26 @@ class TestGetEmojisIncludesChannelId:
 
 class TestStarboardContent:
     def test_format(self):
-        result = _starboard_content('\N{WHITE MEDIUM STAR}', 5, 222)
+        url = 'https://discord.com/channels/1/2/3'
+        result = _starboard_content('\N{WHITE MEDIUM STAR}', 5, url)
         assert '\N{WHITE MEDIUM STAR}' in result
         assert '**5**' in result
-        assert '<#222>' in result
+        assert url in result
 
     def test_pipe_separator(self):
-        result = _starboard_content('\N{FIRE}', 3, 999)
+        result = _starboard_content('\N{FIRE}', 3, 'https://discord.com/channels/1/2/3')
         assert '|' in result
 
-    def test_no_markdown_link_in_content(self):
-        """Discord doesn't support markdown links in message content."""
-        result = _starboard_content('\N{WHITE MEDIUM STAR}', 5, 222)
-        assert '](http' not in result
+    def test_no_channel_mention(self):
+        """Should not use <#channel_id> which links to the channel, not the message."""
+        result = _starboard_content('\N{WHITE MEDIUM STAR}', 5, 'https://discord.com/channels/1/2/3')
+        assert '<#' not in result
+
+    def test_jump_url_is_plain(self):
+        """Jump URL should be plain text (Discord auto-links it), not markdown."""
+        url = 'https://discord.com/channels/1/2/3'
+        result = _starboard_content('\N{WHITE MEDIUM STAR}', 5, url)
+        assert f'| {url}' in result
 
 
 # =====================================================================
@@ -209,11 +216,11 @@ class TestBuildStarboardMessage:
         assert isinstance(embeds, list)
         assert isinstance(files, list)
 
-    def test_content_has_count_and_channel(self):
+    def test_content_has_count_and_jump_url(self):
         msg = _FakeMessage()
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 7, 0xffaa10))
         assert '**7**' in content
-        assert '<#222>' in content
+        assert 'https://discord.com/channels/111/222/333' in content
 
     def test_main_embed_uses_set_author_with_jump_url(self):
         msg = _FakeMessage()
