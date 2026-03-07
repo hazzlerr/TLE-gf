@@ -111,9 +111,39 @@ class Starboard(BackfillMixin, commands.Cog):
           - content: the header line with emoji count and jump URL,
                      plus any video URLs on separate lines for auto-embed
           - embeds: list of Embed objects (reply context + main)
+
+        For videos: Discord renders URL auto-embeds above custom embeds,
+        so we put the author name in the content header instead of the embed
+        to keep it above the video player.
         """
         content_lines = [_starboard_content(emoji_str, count, message.jump_url)]
         embeds = []
+        video_urls = []
+
+        # Scan attachments first to know if there are videos
+        image_url = None
+        other_attachments = []
+        for att in message.attachments:
+            ext = att.filename.lower().rsplit('.', 1)[-1] if '.' in att.filename else ''
+            if ext in _IMAGE_EXTENSIONS:
+                if image_url is None:
+                    image_url = att.url
+            elif ext in _VIDEO_EXTENSIONS:
+                video_urls.append(att.url)
+            else:
+                other_attachments.append(att)
+
+        has_video = bool(video_urls)
+
+        # For video messages, put author in the content header so it's
+        # above the auto-embedded video player.
+        if has_video:
+            content_lines[0] = (
+                f'{emoji_str} **{count}** \u00b7 **{message.author.display_name}** '
+                f'| {message.jump_url}'
+            )
+            for url in video_urls:
+                content_lines.append(url)
 
         # --- Reply context embed (goes first / above main embed) ---
         if message.reference and message.reference.message_id:
@@ -139,50 +169,50 @@ class Starboard(BackfillMixin, commands.Cog):
                 logger.debug(f'Could not fetch referenced message {message.reference.message_id}')
 
         # --- Main embed ---
-        embed = discord.Embed(color=color, timestamp=message.created_at)
-        embed.set_author(
-            name=message.author.display_name,
-            icon_url=message.author.display_avatar.url,
-            url=message.jump_url,
-        )
+        # For video messages: only include embed if there's text content,
+        # a reply, or other attachments — skip the empty author-only embed.
+        has_text = bool(message.content)
+        has_other = bool(other_attachments)
+        need_embed = not has_video or has_text or has_other
 
-        if message.content:
-            text = message.content
-            if len(text) > 4096:
-                text = text[:4093] + '...'
-            embed.description = text
+        if need_embed:
+            embed = discord.Embed(color=color, timestamp=message.created_at)
+            if not has_video:
+                embed.set_author(
+                    name=message.author.display_name,
+                    icon_url=message.author.display_avatar.url,
+                    url=message.jump_url,
+                )
 
-        # Handle attachments
-        image_set = False
-        for att in message.attachments:
-            ext = att.filename.lower().rsplit('.', 1)[-1] if '.' in att.filename else ''
-            if ext in _IMAGE_EXTENSIONS:
-                if not image_set:
-                    embed.set_image(url=att.url)
-                    image_set = True
-            elif ext in _VIDEO_EXTENSIONS:
-                # Videos can't render inside embeds. Put the URL in the
-                # message content so Discord auto-embeds it as a player.
-                content_lines.append(att.url)
-            else:
+            if has_text:
+                text = message.content
+                if len(text) > 4096:
+                    text = text[:4093] + '...'
+                embed.description = text
+
+            if image_url:
+                embed.set_image(url=image_url)
+
+            for att in other_attachments:
                 embed.add_field(
                     name='Attachment', value=f'[{att.filename}]({att.url})', inline=False
                 )
 
-        # Handle embeds from original message (link previews, etc.)
-        if not image_set and message.embeds:
-            for e in message.embeds:
-                if e.type == 'image' and e.url:
-                    embed.set_image(url=e.url)
-                    break
-                if e.type == 'rich' and e.image and e.image.url:
-                    embed.set_image(url=e.image.url)
-                    break
-                if e.thumbnail and e.thumbnail.url:
-                    embed.set_image(url=e.thumbnail.url)
-                    break
+            # Handle embeds from original message (link previews, etc.)
+            if not image_url and message.embeds:
+                for e in message.embeds:
+                    if e.type == 'image' and e.url:
+                        embed.set_image(url=e.url)
+                        break
+                    if e.type == 'rich' and e.image and e.image.url:
+                        embed.set_image(url=e.image.url)
+                        break
+                    if e.thumbnail and e.thumbnail.url:
+                        embed.set_image(url=e.thumbnail.url)
+                        break
 
-        embeds.append(embed)
+            embeds.append(embed)
+
         content = '\n'.join(content_lines)
         return content, embeds
 

@@ -266,6 +266,29 @@ class TestBuildStarboardMessage:
         content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         assert 'https://cdn.example.com/clip.mp4' in content
 
+    def test_video_author_in_content_header(self):
+        """For video messages, author name goes in content (above auto-embed)."""
+        att = _FakeAttachment('clip.mp4', url='https://cdn.example.com/clip.mp4')
+        msg = _FakeMessage(attachments=[att])
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        first_line = content.split('\n')[0]
+        assert 'TestUser' in first_line
+
+    def test_video_only_no_empty_embed(self):
+        """Video-only messages (no text) should not have a main embed."""
+        att = _FakeAttachment('clip.mp4', url='https://cdn.example.com/clip.mp4')
+        msg = _FakeMessage(content='', attachments=[att])
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert len(embeds) == 0
+
+    def test_video_with_text_has_embed(self):
+        """Video + text content should still have a text embed."""
+        att = _FakeAttachment('clip.mp4', url='https://cdn.example.com/clip.mp4')
+        msg = _FakeMessage(content='Check this out', attachments=[att])
+        content, embeds = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert len(embeds) == 1
+        assert embeds[0].description == 'Check this out'
+
     def test_other_attachment_as_field_link(self):
         att = _FakeAttachment('document.pdf')
         msg = _FakeMessage(attachments=[att])
