@@ -179,22 +179,36 @@ class Rpoll(commands.Cog):
             logger.error(f'rpoll: Failed to re-register poll views: {e}', exc_info=True)
 
     @commands.command(brief='Create a rating-weighted poll')
-    async def rpoll(self, ctx, question: str, *, options_str: str):
+    async def rpoll(self, ctx, *, args: str):
         """Create a poll where votes are weighted by Codeforces rating.
 
         Usage: ;rpoll "What's the best approach?" BFS,DFS,Dijkstra
-               ;rpoll "What's the best approach?" +anon BFS,DFS,Dijkstra
+               ;rpoll +anon "What's the best approach?" BFS,DFS,Dijkstra
 
         Each voter's CF rating is added to their chosen option(s).
         Users without a linked CF handle count as 0.
         You can vote for multiple options. Click again to un-vote.
         Use +anon to hide who voted for what.
         """
+        args = args.strip()
         anonymous = False
-        stripped = options_str.strip()
-        if stripped.startswith('+anon'):
+        if args.startswith('+anon'):
             anonymous = True
-            options_str = stripped[5:].lstrip()
+            args = args[5:].lstrip()
+
+        # Extract quoted question, then comma-separated options
+        if args.startswith('"'):
+            end = args.find('"', 1)
+            if end == -1:
+                raise RpollError('Missing closing quote for question.')
+            question = args[1:end]
+            options_str = args[end + 1:].lstrip()
+        else:
+            # No quotes — first word is the question (legacy support)
+            parts = args.split(None, 1)
+            if len(parts) < 2:
+                raise RpollError('Usage: ;rpoll "Question" Option1,Option2')
+            question, options_str = parts
 
         options = [opt.strip() for opt in options_str.split(',')]
         options = [opt for opt in options if opt]  # Remove empty
