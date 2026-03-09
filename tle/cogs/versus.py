@@ -13,9 +13,12 @@ class VersusCogError(commands.CommandError):
     pass
 
 
-def _compute_versus_stats(handles, all_changes):
+def _compute_versus_stats(handles, all_changes, strict=False):
     """Given a list of handles and a dict {handle: [RatingChange, ...]},
     compute per-handle win counts and placement distributions across shared contests.
+
+    If strict=True, only contests where ALL handles participated are counted.
+    Otherwise, contests where at least 2 handles participated are counted.
 
     Returns (wins, placements, total_shared) where:
       wins: dict handle -> number of contests where handle had the best rank
@@ -28,9 +31,9 @@ def _compute_versus_stats(handles, all_changes):
         for rc in all_changes.get(handle, []):
             contest_ranks[rc.contestId][handle] = rc.rank
 
-    # Filter to contests with at least 2 of the requested handles
+    min_participants = len(handles) if strict else 2
     shared_contests = {cid: ranks for cid, ranks in contest_ranks.items()
-                       if len(ranks) >= 2}
+                       if len(ranks) >= min_participants}
 
     wins = {h: 0 for h in handles}
     placements = {h: collections.Counter() for h in handles}
@@ -76,10 +79,13 @@ class Versus(commands.Cog):
         self.converter = commands.MemberConverter()
 
     @commands.command(brief='Compare contest results between users',
-                      usage='handle1 handle2 [handle3 ...]')
-    async def versus(self, ctx, *handles: str):
+                      usage='[+all] handle1 handle2 [handle3 ...]')
+    async def versus(self, ctx, *args: str):
         """Show head-to-head contest win counts among the given users.
-        Use ! prefix for Discord users (e.g. !username), otherwise treated as CF handle."""
+        Use ! prefix for Discord users (e.g. !username), otherwise treated as CF handle.
+        Use +all to only count contests where every listed user participated."""
+        (strict,), handles = cf_common.filter_flags(args, ['+all'])
+
         if len(handles) < 2:
             raise VersusCogError('Please provide at least 2 handles.')
 
@@ -92,10 +98,13 @@ class Versus(commands.Cog):
         for handle in handles:
             all_changes[handle] = cache.get_rating_changes_for_handle(handle)
 
-        wins, placements, total_shared = _compute_versus_stats(handles, all_changes)
+        wins, placements, total_shared = _compute_versus_stats(handles, all_changes,
+                                                               strict=strict)
 
         if total_shared == 0:
-            raise VersusCogError('No shared contests found among the given users.')
+            msg = 'No contests found where all users participated.' if strict else \
+                  'No shared contests found among the given users.'
+            raise VersusCogError(msg)
 
         lines = []
         # Sort by wins descending
@@ -104,8 +113,9 @@ class Versus(commands.Cog):
             word = 'win' if w == 1 else 'wins'
             lines.append(f'**{handle}**: {w} {word}')
 
+        mode = 'all-participated' if strict else 'shared'
         desc = '\n'.join(lines)
-        desc += f'\n\n*Across {total_shared} shared contest{"s" if total_shared != 1 else ""}*'
+        desc += f'\n\n*Across {total_shared} {mode} contest{"s" if total_shared != 1 else ""}*'
 
         embed = discord_common.cf_color_embed(title='Versus — Head to Head', description=desc)
         discord_common.set_author_footer(embed, ctx.author)
@@ -113,10 +123,13 @@ class Versus(commands.Cog):
 
     @commands.command(brief='Plot placement distribution between users',
                       aliases=['plotvs'],
-                      usage='handle1 handle2 [handle3 ...]')
-    async def plotversus(self, ctx, *handles: str):
+                      usage='[+all] handle1 handle2 [handle3 ...]')
+    async def plotversus(self, ctx, *args: str):
         """Plot how often each user placed 1st, 2nd, 3rd, etc. among the group
-        across all shared contests. Use ! prefix for Discord users."""
+        across all shared contests. Use ! prefix for Discord users.
+        Use +all to only count contests where every listed user participated."""
+        (strict,), handles = cf_common.filter_flags(args, ['+all'])
+
         if len(handles) < 2:
             raise VersusCogError('Please provide at least 2 handles.')
 
@@ -129,10 +142,13 @@ class Versus(commands.Cog):
         for handle in handles:
             all_changes[handle] = cache.get_rating_changes_for_handle(handle)
 
-        wins, placements, total_shared = _compute_versus_stats(handles, all_changes)
+        wins, placements, total_shared = _compute_versus_stats(handles, all_changes,
+                                                               strict=strict)
 
         if total_shared == 0:
-            raise VersusCogError('No shared contests found among the given users.')
+            msg = 'No contests found where all users participated.' if strict else \
+                  'No shared contests found among the given users.'
+            raise VersusCogError(msg)
 
         num_users = len(handles)
         max_place = num_users  # Placements go from 1 to num_users
@@ -164,7 +180,8 @@ class Versus(commands.Cog):
         plt.xticks(x, place_labels)
         plt.xlabel('Placement (among group)')
         plt.ylabel('Number of contests')
-        plt.title(f'Placement Distribution ({total_shared} shared contests)')
+        mode = 'all-participated' if strict else 'shared'
+        plt.title(f'Placement Distribution ({total_shared} {mode} contests)')
         plt.legend()
 
         discord_file = gc.get_current_figure_as_file()

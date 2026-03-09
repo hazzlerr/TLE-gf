@@ -175,3 +175,53 @@ class TestNormalizeHandles:
         cache = self._make_cache(['Alice'])
         result = _normalize_handles(['alice', 'unknown_user'], cache)
         assert result == ['Alice', 'unknown_user']
+
+
+class TestStrictMode:
+    def test_strict_requires_all_handles(self):
+        """With strict=True, only contests where ALL handles participated count."""
+        handles = ['a', 'b', 'c']
+        all_changes = {
+            'a': [_make_rc(1, 'a', 5), _make_rc(2, 'a', 10)],
+            'b': [_make_rc(1, 'b', 10), _make_rc(2, 'b', 5)],
+            'c': [_make_rc(2, 'c', 20)],
+        }
+        # Non-strict: contest 1 (a,b) + contest 2 (a,b,c) = 2
+        wins, placements, total = _compute_versus_stats(handles, all_changes, strict=False)
+        assert total == 2
+
+        # Strict: only contest 2 has all 3
+        wins, placements, total = _compute_versus_stats(handles, all_changes, strict=True)
+        assert total == 1
+        # Contest 2: b=5 < a=10 < c=20 → b wins
+        assert wins['b'] == 1
+        assert wins['a'] == 0
+        assert wins['c'] == 0
+
+    def test_strict_no_shared_contests(self):
+        handles = ['a', 'b', 'c']
+        all_changes = {
+            'a': [_make_rc(1, 'a', 5)],
+            'b': [_make_rc(1, 'b', 10)],
+            'c': [_make_rc(2, 'c', 20)],
+        }
+        # Non-strict: contest 1 has a,b → 1
+        wins, _, total = _compute_versus_stats(handles, all_changes, strict=False)
+        assert total == 1
+
+        # Strict: no contest has all 3
+        wins, _, total = _compute_versus_stats(handles, all_changes, strict=True)
+        assert total == 0
+
+    def test_strict_two_users_same_as_default(self):
+        """With 2 users, strict and non-strict are equivalent."""
+        handles = ['a', 'b']
+        all_changes = {
+            'a': [_make_rc(1, 'a', 5), _make_rc(2, 'a', 10)],
+            'b': [_make_rc(1, 'b', 10)],
+        }
+        _, _, total_default = _compute_versus_stats(handles, all_changes, strict=False)
+        _, _, total_strict = _compute_versus_stats(handles, all_changes, strict=True)
+        # Contest 1 has both, contest 2 has only a → both modes give 1
+        assert total_default == 1
+        assert total_strict == 1
