@@ -22,7 +22,7 @@ _NUMBER_EMOJIS = ['1\N{COMBINING ENCLOSING KEYCAP}',
 
 MAX_OPTIONS = 5
 _DEFAULT_DURATION = 86400  # 24 hours in seconds
-_EXPIRY_CHECK_INTERVAL = 60  # Check every 60 seconds
+_SAFETY_NET_INTERVAL = 300  # Safety-net sweep every 5 minutes
 _DURATION_RE = re.compile(r'^\+(\d+)([mhd])$')
 
 
@@ -197,6 +197,7 @@ class RpollButton(discord.ui.Button):
 class Rpoll(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self._scheduled_timers = {}  # poll_id -> asyncio.Task
         logger.info('Rpoll cog initialized')
 
     @commands.Cog.listener()
@@ -213,7 +214,8 @@ class Rpoll(commands.Cog):
             logger.warning('rpoll: user_db still None after waiting, skipping view registration')
             return
         self._register_persistent_views()
-        self._expiry_task.start()
+        self._schedule_all_active_polls()
+        self._safety_net_task.start()
 
     def _register_persistent_views(self):
         """Register persistent views for all active polls so buttons work after restart."""
@@ -228,23 +230,62 @@ class Rpoll(commands.Cog):
         except Exception as e:
             logger.error(f'rpoll: Failed to re-register poll views: {e}', exc_info=True)
 
-    @tasks.task_spec(name='RpollExpiry',
-                     waiter=tasks.Waiter.fixed_delay(_EXPIRY_CHECK_INTERVAL))
-    async def _expiry_task(self, _):
-        """Check for expired polls and close them."""
+    def _schedule_all_active_polls(self):
+        """On startup, schedule a timer for every open poll."""
+        try:
+            polls = cf_common.user_db.get_all_active_rpolls()
+            for poll in polls:
+                self._schedule_expiry(poll.poll_id, poll.expires_at)
+            if polls:
+                logger.info(f'rpoll: Scheduled expiry timers for {len(polls)} active polls')
+        except Exception as e:
+            logger.error(f'rpoll: Failed to schedule poll timers: {e}', exc_info=True)
+
+    def _schedule_expiry(self, poll_id, expires_at):
+        """Schedule an asyncio task that sleeps until expires_at, then closes the poll."""
+        # Cancel existing timer for this poll if any
+        old = self._scheduled_timers.pop(poll_id, None)
+        if old and not old.done():
+            old.cancel()
+
+        delay = max(0, expires_at - time.time())
+        task = asyncio.create_task(self._expiry_timer(poll_id, delay))
+        self._scheduled_timers[poll_id] = task
+
+    async def _expiry_timer(self, poll_id, delay):
+        """Sleep then close a specific poll."""
+        try:
+            await asyncio.sleep(delay)
+            if cf_common.user_db is None:
+                return
+            poll = cf_common.user_db.get_rpoll(poll_id)
+            if poll is None or poll.closed:
+                return
+            await self._close_poll(poll)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f'rpoll: Timer failed for poll {poll_id}: {e}', exc_info=True)
+        finally:
+            self._scheduled_timers.pop(poll_id, None)
+
+    @tasks.task_spec(name='RpollSafetyNet',
+                     waiter=tasks.Waiter.fixed_delay(_SAFETY_NET_INTERVAL))
+    async def _safety_net_task(self, _):
+        """Safety-net sweep for polls that slipped through (e.g. bot restart race)."""
         if cf_common.user_db is None:
             return
         try:
             expired = cf_common.user_db.get_expired_unclosed_rpolls()
         except Exception as e:
-            logger.error(f'rpoll expiry: Failed to query expired polls: {e}', exc_info=True)
+            logger.error(f'rpoll safety net: Failed to query expired polls: {e}', exc_info=True)
             return
 
         for poll in expired:
             try:
                 await self._close_poll(poll)
             except Exception as e:
-                logger.error(f'rpoll expiry: Failed to close poll {poll.poll_id}: {e}',
+                logger.error(f'rpoll safety net: Failed to close poll {poll.poll_id}: {e}',
                              exc_info=True)
 
     async def _close_poll(self, poll):
@@ -369,6 +410,7 @@ class Rpoll(commands.Cog):
         msg = await ctx.send(embed=embed, view=view)
 
         cf_common.user_db.set_rpoll_message_id(poll_id, msg.id)
+        self._schedule_expiry(poll_id, expires_at)
         logger.info(f'rpoll: Created poll={poll_id} question={question!r} '
                     f'options={options} duration={duration}s by user={ctx.author.id} msg={msg.id}')
 
