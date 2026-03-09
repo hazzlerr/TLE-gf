@@ -15,7 +15,8 @@ _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _STUB_MODULES = [
     'aiohttp', 'aiohttp.web',
     'discord', 'discord.ext', 'discord.ext.commands',
-    'seaborn', 'matplotlib', 'matplotlib.pyplot',
+    'seaborn', 'matplotlib', 'matplotlib.pyplot', 'matplotlib.ticker',
+    'numpy', 'pandas', 'pandas.plotting',
     'lxml', 'lxml.html',
     'PIL', 'PIL.Image',
     'cairo', 'gi', 'gi.repository',
@@ -28,6 +29,21 @@ for mod_name in _STUB_MODULES:
         stub.__path__ = []
         stub.__all__ = []
         sys.modules[mod_name] = stub
+
+# numpy stubs for versus.py
+_np = sys.modules['numpy']
+_np.arange = lambda *a, **kw: []
+_np.linspace = lambda *a, **kw: []
+
+# pandas stubs
+_pd = sys.modules['pandas']
+_pd_plotting = sys.modules['pandas.plotting']
+_pd_plotting.register_matplotlib_converters = lambda: None
+_pd.plotting = _pd_plotting
+
+# matplotlib stubs
+_mpl_ticker = sys.modules['matplotlib.ticker']
+_mpl_ticker.MultipleLocator = type('MultipleLocator', (), {'__init__': lambda self, *a: None})
 
 # Add specific attributes that get imported at module level
 _commands_mod = sys.modules['discord.ext.commands']
@@ -137,6 +153,7 @@ _tle_stubs = [
     'tle.util.handledict',
     'tle.util.paginator',
     'tle.util.discord_common',
+    'tle.util.graph_common',
     'tle.constants',
 ]
 
@@ -245,3 +262,10 @@ _load_module('tle.cogs._starboard_helpers', os.path.join(_cogs_path, '_starboard
 _load_module('tle.cogs._starboard_backfill', os.path.join(_cogs_path, '_starboard_backfill.py'))
 _load_module('tle.cogs.starboard', os.path.join(_cogs_path, 'starboard.py'))
 _load_module('tle.cogs.rpoll', os.path.join(_cogs_path, 'rpoll.py'))
+
+# graph_common stubs for versus.py
+_gc = sys.modules['tle.util.graph_common']
+_gc.rating_color_cycler = None  # stub — not used in pure-function tests
+_gc.get_current_figure_as_file = lambda: None
+
+_load_module('tle.cogs.versus', os.path.join(_cogs_path, 'versus.py'))
