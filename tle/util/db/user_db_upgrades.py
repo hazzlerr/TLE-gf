@@ -241,3 +241,15 @@ def upgrade_1_7_0(db):
     ''')
     db.commit()
     logger.info('1.7.0: starboard_alias table created')
+
+
+@registry.register('1.8.0', 'Anonymous rpoll option')
+def upgrade_1_8_0(db):
+    logger.info('1.8.0: Adding anonymous column to rpoll table')
+    try:
+        db.execute('ALTER TABLE rpoll ADD COLUMN anonymous INTEGER NOT NULL DEFAULT 0')
+        logger.info('1.8.0: Added anonymous column')
+    except Exception as e:
+        logger.debug(f'1.8.0: anonymous column already exists or error: {e}')
+    db.commit()
+    logger.info('1.8.0: Upgrade complete')

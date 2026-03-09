@@ -414,7 +414,8 @@ class UserDbConn(StarboardDbMixin):
                 message_id  TEXT,
                 question    TEXT NOT NULL,
                 created_by  TEXT NOT NULL,
-                created_at  REAL NOT NULL
+                created_at  REAL NOT NULL,
+                anonymous   INTEGER NOT NULL DEFAULT 0
             )
         ''')
         self.conn.execute('''
@@ -1386,12 +1387,13 @@ class UserDbConn(StarboardDbMixin):
 
     # --- Rating-weighted polls ---
 
-    def create_rpoll(self, guild_id, channel_id, question, options, created_by, created_at):
+    def create_rpoll(self, guild_id, channel_id, question, options, created_by, created_at,
+                     anonymous=False):
         """Create a poll and its options. Returns the poll_id."""
-        query = ('INSERT INTO rpoll (guild_id, channel_id, question, created_by, created_at) '
-                 'VALUES (?, ?, ?, ?, ?)')
+        query = ('INSERT INTO rpoll (guild_id, channel_id, question, created_by, created_at, anonymous) '
+                 'VALUES (?, ?, ?, ?, ?, ?)')
         cur = self.conn.execute(query, (str(guild_id), str(channel_id), question,
-                                        str(created_by), created_at))
+                                        str(created_by), created_at, int(anonymous)))
         poll_id = cur.lastrowid
         for i, label in enumerate(options):
             self.conn.execute(
@@ -1412,7 +1414,7 @@ class UserDbConn(StarboardDbMixin):
     def get_rpoll(self, poll_id):
         """Get a poll by ID. Returns namedtuple or None."""
         return self._fetchone(
-            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at '
+            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at, anonymous '
             'FROM rpoll WHERE poll_id = ?',
             params=(poll_id,), row_factory=namedtuple_factory
         )
@@ -1420,7 +1422,7 @@ class UserDbConn(StarboardDbMixin):
     def get_rpoll_by_message_id(self, message_id):
         """Get a poll by its Discord message_id."""
         return self._fetchone(
-            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at '
+            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at, anonymous '
             'FROM rpoll WHERE message_id = ?',
             params=(str(message_id),), row_factory=namedtuple_factory
         )
@@ -1492,7 +1494,7 @@ class UserDbConn(StarboardDbMixin):
     def get_all_active_rpolls(self):
         """Get all polls that have a message_id (i.e., were successfully posted)."""
         return self._fetchall(
-            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at '
+            'SELECT poll_id, guild_id, channel_id, message_id, question, created_by, created_at, anonymous '
             'FROM rpoll WHERE message_id IS NOT NULL',
             row_factory=namedtuple_factory
         )

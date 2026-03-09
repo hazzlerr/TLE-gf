@@ -29,7 +29,8 @@ class FakeRpollDb:
                 message_id  TEXT,
                 question    TEXT NOT NULL,
                 created_by  TEXT NOT NULL,
-                created_at  REAL NOT NULL
+                created_at  REAL NOT NULL,
+                anonymous   INTEGER NOT NULL DEFAULT 0
             )
         ''')
         self.conn.execute('''
@@ -374,6 +375,51 @@ class TestUpgrade150:
         conn.close()
 
 
+class TestUpgrade180:
+    def test_adds_anonymous_column(self):
+        from tle.util.db.user_db_upgrades import registry
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = namedtuple_factory
+        registry.ensure_version_table(conn)
+        # Start from 1.4.0 so 1.5.0 creates rpoll tables, then 1.8.0 adds anonymous
+        registry.set_version(conn, '1.4.0')
+        registry.run(conn)
+        # Verify anonymous column exists with default 0
+        conn.execute(
+            'INSERT INTO rpoll (guild_id, channel_id, question, created_by, created_at) '
+            'VALUES (?, ?, ?, ?, ?)',
+            ('1', '2', 'Q?', 'u', 1.0)
+        )
+        conn.commit()
+        row = conn.execute('SELECT anonymous FROM rpoll WHERE poll_id = 1').fetchone()
+        assert row.anonymous == 0
+        conn.close()
+
+    def test_existing_polls_get_default_anonymous(self):
+        """Pre-existing polls should get anonymous=0 after upgrade."""
+        from tle.util.db.user_db_upgrades import registry
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = namedtuple_factory
+        registry.ensure_version_table(conn)
+        # Create rpoll tables at 1.5.0, then upgrade to 1.8.0
+        registry.set_version(conn, '1.4.0')
+        registry.run(conn)
+        # Reset to 1.7.0 to test the 1.8.0 upgrade path
+        conn.execute('UPDATE db_version SET version = ?', ('1.7.0',))
+        conn.commit()
+        # Insert a poll before the upgrade
+        conn.execute(
+            'INSERT INTO rpoll (guild_id, channel_id, question, created_by, created_at) '
+            'VALUES (?, ?, ?, ?, ?)',
+            ('1', '2', 'Old poll', 'u', 1.0)
+        )
+        conn.commit()
+        registry.run(conn)
+        row = conn.execute('SELECT anonymous FROM rpoll WHERE poll_id = 1').fetchone()
+        assert row.anonymous == 0
+        conn.close()
+
+
 # =====================================================================
 # Embed building
 # =====================================================================
@@ -578,3 +624,32 @@ class TestBuildPollEmbedVoters:
         lines = embed.description.split('\n')
         voter_lines = [l for l in lines if l.startswith('B:')]
         assert voter_lines == []
+
+
+# =====================================================================
+# Anonymous polls
+# =====================================================================
+
+class TestAnonymousPoll:
+    def test_create_anonymous_poll(self, db):
+        pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0, anonymous=True)
+        poll = db.get_rpoll(pid)
+        assert poll.anonymous == 1
+
+    def test_create_non_anonymous_poll_default(self, db):
+        pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0)
+        poll = db.get_rpoll(pid)
+        assert poll.anonymous == 0
+
+    def test_anonymous_flag_in_get_by_message_id(self, db):
+        pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0, anonymous=True)
+        db.set_rpoll_message_id(pid, 12345)
+        poll = db.get_rpoll_by_message_id(12345)
+        assert poll.anonymous == 1
+
+    def test_anonymous_flag_in_active_rpolls(self, db):
+        pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0, anonymous=True)
+        db.set_rpoll_message_id(pid, 12345)
+        active = db.get_all_active_rpolls()
+        assert len(active) == 1
+        assert active[0].anonymous == 1

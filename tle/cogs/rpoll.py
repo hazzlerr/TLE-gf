@@ -123,10 +123,12 @@ class RpollButton(discord.ui.Button):
         totals_map = {row.option_index: row.total_rating for row in totals}
         vote_count = cf_common.user_db.get_rpoll_vote_count(self.poll_id)
 
-        voters = cf_common.user_db.get_rpoll_voters(self.poll_id)
-        voters_map = {}
-        for row in voters:
-            voters_map.setdefault(row.option_index, []).append(int(row.user_id))
+        voters_map = None
+        if not poll.anonymous:
+            voters = cf_common.user_db.get_rpoll_voters(self.poll_id)
+            voters_map = {}
+            for row in voters:
+                voters_map.setdefault(row.option_index, []).append(int(row.user_id))
 
         embed = _build_poll_embed(
             poll.question,
@@ -181,11 +183,19 @@ class Rpoll(commands.Cog):
         """Create a poll where votes are weighted by Codeforces rating.
 
         Usage: ;rpoll "What's the best approach?" BFS,DFS,Dijkstra
+               ;rpoll "What's the best approach?" +anon BFS,DFS,Dijkstra
 
         Each voter's CF rating is added to their chosen option(s).
         Users without a linked CF handle count as 0.
         You can vote for multiple options. Click again to un-vote.
+        Use +anon to hide who voted for what.
         """
+        anonymous = False
+        stripped = options_str.strip()
+        if stripped.startswith('+anon'):
+            anonymous = True
+            options_str = stripped[5:].lstrip()
+
         options = [opt.strip() for opt in options_str.split(',')]
         options = [opt for opt in options if opt]  # Remove empty
 
@@ -196,7 +206,7 @@ class Rpoll(commands.Cog):
 
         poll_id = cf_common.user_db.create_rpoll(
             ctx.guild.id, ctx.channel.id, question, options,
-            ctx.author.id, time.time()
+            ctx.author.id, time.time(), anonymous=anonymous
         )
 
         embed = _build_poll_embed(
