@@ -299,6 +299,32 @@ class StarboardDbMixin:
         )
         self.conn.commit()
 
+    def replace_reactors(self, original_msg_id, emojis, new_reactors):
+        """Replace all reactors for a message across the given emojis.
+
+        Deletes existing reactor rows for (original_msg_id, emoji IN emojis),
+        then bulk-inserts new_reactors: list of (emoji, user_id) tuples.
+        """
+        original_msg_id = str(original_msg_id)
+        if emojis:
+            placeholders = ','.join('?' * len(emojis))
+            self.conn.execute(
+                f'DELETE FROM starboard_reactors WHERE original_msg_id = ? AND emoji IN ({placeholders})',
+                (original_msg_id, *emojis)
+            )
+        if new_reactors:
+            self.conn.executemany(
+                'INSERT OR IGNORE INTO starboard_reactors (original_msg_id, emoji, user_id) '
+                'VALUES (?, ?, ?)',
+                [(original_msg_id, emoji, str(uid)) for emoji, uid in new_reactors]
+            )
+        self.conn.commit()
+
+    def get_starboard_entries_for_message(self, original_msg_id):
+        """Get all starboard entries for an original message (across all emojis)."""
+        query = 'SELECT * FROM starboard_message_v1 WHERE original_msg_id = ?'
+        return self.conn.execute(query, (str(original_msg_id),)).fetchall()
+
     # --- Leaderboard queries with snowflake time filtering ---
 
     @staticmethod

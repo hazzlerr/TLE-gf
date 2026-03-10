@@ -298,7 +298,12 @@ class Starboard(BackfillMixin, commands.Cog):
             return
         logger.debug(f'Reaction remove: raw_emoji={raw_emoji} main_emoji={main_emoji} '
                      f'guild={payload.guild_id} msg={payload.message_id} user={payload.user_id}')
-        # Update star count, author, and reactors if the message is tracked
+        # Always remove the reactor from DB — even if the message isn't on the
+        # starboard yet.  This prevents ghost reactors from inflating counts
+        # when a user reacts then un-reacts before the threshold is reached.
+        cf_common.user_db.remove_reactor(payload.message_id, raw_emoji, payload.user_id)
+
+        # Update starboard display if the message is already tracked
         if cf_common.user_db.check_exists_starboard_message_v1(payload.message_id, main_emoji):
             lock = self.locks.get(payload.guild_id)
             if lock is None:
@@ -309,8 +314,6 @@ class Starboard(BackfillMixin, commands.Cog):
                     if channel is None:
                         logger.warning(f'Reaction remove: channel {payload.channel_id} not found in cache')
                         return
-                    # Remove reactor and recount inside the lock so adds can't interleave
-                    cf_common.user_db.remove_reactor(payload.message_id, raw_emoji, payload.user_id)
                     emoji_family = cf_common.user_db.get_emoji_family(payload.guild_id, main_emoji)
                     count = cf_common.user_db.get_merged_reactor_count(payload.message_id, emoji_family)
                     message = await channel.fetch_message(payload.message_id)
@@ -362,6 +365,22 @@ class Starboard(BackfillMixin, commands.Cog):
                 if name in ('Jump to', 'Channel'):
                     return True
         return False
+
+    async def _resync_reactors(self, message, emoji_family):
+        """Resync reactors for a message from Discord to the DB.
+
+        Fetches actual reactors via the Discord API and replaces the DB rows.
+        Returns the new merged reactor count.
+        """
+        emoji_family_set = set(emoji_family)
+        new_reactors = []
+        for r in message.reactions:
+            r_emoji = _emoji_str(r)
+            if r_emoji in emoji_family_set:
+                async for user in r.users():
+                    new_reactors.append((r_emoji, str(user.id)))
+        cf_common.user_db.replace_reactors(message.id, emoji_family, new_reactors)
+        return cf_common.user_db.get_merged_reactor_count(message.id, emoji_family)
 
     async def _update_starboard_message(self, guild_id, original_msg_id, emoji_str, count,
                                         original_message=None):
@@ -455,6 +474,15 @@ class Starboard(BackfillMixin, commands.Cog):
             reaction_count = cf_common.user_db.get_merged_reactor_count(message.id, emoji_family)
             already_exists = cf_common.user_db.check_exists_starboard_message_v1(message.id, emoji_str)
             if already_exists:
+                # Self-healing: if DB count exceeds visible Discord reactions,
+                # resync reactors from Discord to purge ghost entries.
+                emoji_family_set = set(emoji_family)
+                discord_count = sum(r.count for r in message.reactions
+                                    if _emoji_str(r) in emoji_family_set)
+                if reaction_count > discord_count:
+                    logger.info(f'Reactor drift detected for msg={message.id} emoji={emoji_str}: '
+                                f'db_count={reaction_count} discord_count={discord_count}, resyncing')
+                    reaction_count = await self._resync_reactors(message, emoji_family)
                 cf_common.user_db.update_starboard_author_and_count(
                     message.id, emoji_str, str(message.author.id), reaction_count
                 )
@@ -900,6 +928,82 @@ class Starboard(BackfillMixin, commands.Cog):
             )
             pages.append((None, embed))
         return pages
+
+    # --- Fix / resync commands ---
+
+    @starboard.command(brief='Resync star count for a message from Discord')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def fix(self, ctx, message_ref: str, emoji: str = None):
+        """Resync reactors for a starboarded message from Discord.
+
+        Accepts a message link or a bare message ID.  If no emoji is given,
+        all emoji entries for that message are resynced.
+
+        Examples:
+            ;starboard fix https://discord.com/channels/123/456/789
+            ;starboard fix 789 ⭐
+        """
+        from tle.cogs._starboard_helpers import _parse_jump_url
+
+        # Parse message reference — link or bare ID
+        parsed = _parse_jump_url(message_ref)
+        if parsed:
+            _, channel_id, message_id = parsed
+        else:
+            try:
+                message_id = int(message_ref)
+            except ValueError:
+                raise StarboardCogError('Provide a message link or a numeric message ID.')
+            channel_id = None
+
+        # Find starboard entries for this message
+        entries = cf_common.user_db.get_starboard_entries_for_message(message_id)
+        if not entries:
+            raise StarboardCogError(f'Message `{message_id}` is not on the starboard.')
+
+        if emoji is not None:
+            entries = [e for e in entries if e.emoji == emoji]
+            if not entries:
+                raise StarboardCogError(f'Message `{message_id}` has no starboard entry for {emoji}.')
+
+        # Resolve channel — from link, from DB, or from the current channel
+        if channel_id is None:
+            stored_ch = next((e.channel_id for e in entries if e.channel_id), None)
+            if stored_ch:
+                channel_id = int(stored_ch)
+            else:
+                raise StarboardCogError(
+                    'Cannot determine the source channel. Use a message link instead.')
+
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            raise StarboardCogError(f'Channel `{channel_id}` not found in bot cache.')
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            raise StarboardCogError(f'Message `{message_id}` not found in <#{channel_id}>.')
+
+        fixed = []
+        for entry in entries:
+            emoji_family = cf_common.user_db.get_emoji_family(ctx.guild.id, entry.emoji)
+            old_count = cf_common.user_db.get_merged_reactor_count(message_id, emoji_family)
+            new_count = await self._resync_reactors(message, emoji_family)
+            cf_common.user_db.update_starboard_author_and_count(
+                message_id, entry.emoji, str(message.author.id), new_count,
+                channel_id=channel_id,
+            )
+            await self._update_starboard_message(
+                ctx.guild.id, message_id, entry.emoji, new_count,
+                original_message=message,
+            )
+            fixed.append(f'{entry.emoji}: {old_count} → {new_count}')
+            logger.info(f'CMD starboard fix: msg={message_id} emoji={entry.emoji} '
+                        f'old={old_count} new={new_count} by user={ctx.author.id}')
+
+        await ctx.send(embed=discord_common.embed_success(
+            'Resynced reactors:\n' + '\n'.join(fixed)
+        ))
 
     # --- Backfill status ---
 

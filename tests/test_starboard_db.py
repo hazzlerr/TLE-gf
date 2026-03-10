@@ -857,3 +857,51 @@ class TestReactorCascadeDelete:
         db.remove_starboard_emoji(GUILD, STAR)
         assert db.get_reactor_count('msg1', STAR) == 0
         assert db.get_reactor_count('msg1', FIRE) == 1  # Preserved
+
+
+class TestReplaceReactors:
+    def test_replace_clears_old_and_inserts_new(self, db):
+        db.add_reactor('msg1', STAR, 'user1')
+        db.add_reactor('msg1', STAR, 'user2')
+        db.add_reactor('msg1', STAR, 'ghost')  # Will be purged
+
+        db.replace_reactors('msg1', [STAR], [(STAR, 'user1'), (STAR, 'user3')])
+        assert set(db.get_reactors('msg1', STAR)) == {'user1', 'user3'}
+        assert db.get_reactor_count('msg1', STAR) == 2
+
+    def test_replace_with_empty_clears_all(self, db):
+        db.add_reactor('msg1', STAR, 'user1')
+        db.add_reactor('msg1', STAR, 'user2')
+        db.replace_reactors('msg1', [STAR], [])
+        assert db.get_reactor_count('msg1', STAR) == 0
+
+    def test_replace_multiple_emojis(self, db):
+        db.add_reactor('msg1', STAR, 'user1')
+        db.add_reactor('msg1', FIRE, 'user2')
+        db.add_reactor('msg1', FIRE, 'ghost')
+
+        db.replace_reactors('msg1', [STAR, FIRE],
+                            [(STAR, 'user1'), (FIRE, 'user2'), (FIRE, 'user3')])
+        assert db.get_reactors('msg1', STAR) == ['user1']
+        assert set(db.get_reactors('msg1', FIRE)) == {'user2', 'user3'}
+
+    def test_replace_preserves_other_messages(self, db):
+        db.add_reactor('msg1', STAR, 'user1')
+        db.add_reactor('msg2', STAR, 'user2')
+
+        db.replace_reactors('msg1', [STAR], [])
+        assert db.get_reactor_count('msg1', STAR) == 0
+        assert db.get_reactor_count('msg2', STAR) == 1  # Untouched
+
+
+class TestGetStarboardEntriesForMessage:
+    def test_returns_all_emoji_entries(self, db):
+        db.add_starboard_message_v1('msg1', 'sb_s', GUILD, STAR, author_id='u')
+        db.add_starboard_message_v1('msg1', 'sb_f', GUILD, FIRE, author_id='u')
+
+        entries = db.get_starboard_entries_for_message('msg1')
+        emojis = {e.emoji for e in entries}
+        assert emojis == {STAR, FIRE}
+
+    def test_returns_empty_for_unknown(self, db):
+        assert db.get_starboard_entries_for_message('unknown') == []
