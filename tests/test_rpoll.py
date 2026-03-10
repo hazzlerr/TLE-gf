@@ -901,7 +901,7 @@ class TestBuildResultsSummary:
         options = [(0, 'BFS'), (1, 'DFS')]
         totals_map = {0: 3400, 1: 1600}
         result = _build_results_summary(options, totals_map, 5)
-        assert 'Poll ended' in result
+        assert 'Poll done!' in result
         assert '**BFS** 68%' in result
         assert '**DFS** 32%' in result
         assert '5 votes' in result

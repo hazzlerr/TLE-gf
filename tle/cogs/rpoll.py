@@ -119,7 +119,7 @@ def _build_results_summary(options, totals_map, vote_count):
         else:
             parts.append(f'**{label}** 0')
     votes_str = f'{vote_count} vote{"s" if vote_count != 1 else ""}'
-    return f'Poll ended — {" / ".join(parts)} ({votes_str})'
+    return f'Poll done! {" / ".join(parts)} ({votes_str})'
 
 
 def _build_disabled_view(poll_id, option_count):
