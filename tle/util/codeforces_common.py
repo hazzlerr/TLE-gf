@@ -386,10 +386,14 @@ class SubFilter:
             elif arg[0:3] in ['r<=', 'r>=']:
                 if len(arg) < 4:
                     raise ParamParseError(f'{arg} is an invalid rating argument')
-                elif arg[1] == '>':
-                    self.rlo = max(self.rlo, int(arg[3:]))
+                try:
+                    val = int(arg[3:])
+                except ValueError:
+                    raise ParamParseError(f'{arg} is an invalid rating argument')
+                if arg[1] == '>':
+                    self.rlo = max(self.rlo, val)
                 else:
-                    self.rhi = min(self.rhi, int(arg[3:]))
+                    self.rhi = min(self.rhi, val)
                 self.rated = True
             else:
                 rest.append(arg)

@@ -150,6 +150,27 @@ class TestParseFlagsBasic:
         f.parse(['+team'])
         assert f.team is True
 
+    def test_rating_range_non_numeric_raises(self):
+        f = SubFilter()
+        with pytest.raises(ParamParseError):
+            f.parse(['r>=abc'])
+
+    def test_rating_range_non_numeric_lower_raises(self):
+        f = SubFilter()
+        with pytest.raises(ParamParseError):
+            f.parse(['r<=xyz'])
+
+    def test_rating_range_float_raises(self):
+        f = SubFilter()
+        with pytest.raises(ParamParseError):
+            f.parse(['r>=12.5'])
+
+    def test_rating_range_empty_after_operator_raises(self):
+        """r>= with nothing after is already caught (len < 4), but verify."""
+        f = SubFilter()
+        with pytest.raises(ParamParseError):
+            f.parse(['r>='])
+
     def test_unknown_args_returned_as_rest(self):
         f = SubFilter()
         rest = f.parse(['somehandle', 'otherhandle'])

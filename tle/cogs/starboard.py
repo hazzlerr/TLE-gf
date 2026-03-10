@@ -29,13 +29,8 @@ _IMAGE_EXTENSIONS = ('png', 'jpeg', 'jpg', 'gif', 'webp')
 # Video extensions that need to be re-uploaded as files
 _VIDEO_EXTENSIONS = ('mp4', 'mov', 'webm')
 
-# Set to True to reformat the last 10 starboard messages on startup.
-# Flip to False and redeploy once the migration is done.
-REFORMAT_ON_STARTUP = True
-
-# TODO(remove after migration): Set to True to fully re-render starboard
-# messages on every reaction (useful for testing the new format). When False,
-# only the count in the content line is updated for new-format messages.
+# When True, every starboard update fully re-renders the embed from the
+# original message instead of just patching the count in the content line.
 FULL_RE_RENDER = True
 
 
@@ -84,6 +79,7 @@ def _parse_starboard_args(args, default_emoji=constants._DEFAULT_STAR):
 
     if emoji is None:
         emoji = default_emoji
+        logger.debug(f'No emoji specified, falling back to default: {default_emoji!r}')
     return emoji, dlo, dhi
 
 
@@ -103,8 +99,6 @@ class Starboard(BackfillMixin, commands.Cog):
     async def on_ready(self):
         logger.info('Starboard cog on_ready fired, launching backfill task')
         asyncio.create_task(self._backfill_star_counts())
-        if REFORMAT_ON_STARTUP:
-            asyncio.create_task(self._reformat_recent_starboard_messages())
 
     # --- Building starboard messages ---
 
@@ -346,18 +340,11 @@ class Starboard(BackfillMixin, commands.Cog):
 
     # --- Core logic ---
 
-    # TODO(remove after migration): _is_old_format, FULL_RE_RENDER, and the
-    # full-rebuild codepath in _update_starboard_message were added to migrate
-    # old starboard messages on-the-fly. Once migration is done, delete
-    # _is_old_format, remove the FULL_RE_RENDER flag, and keep only the
-    # count-update path. Search for TODO(remove after migration).
-
     @staticmethod
     def _is_old_format(sb_msg):
         """Check if a starboard message uses the old embed format.
 
         Old format has embed fields like 'Jump to' and 'Channel'.
-        TODO(remove after migration)
         """
         for embed in sb_msg.embeds:
             for f in getattr(embed, 'fields', []):
@@ -402,7 +389,6 @@ class Starboard(BackfillMixin, commands.Cog):
         try:
             sb_msg = await sb_channel.fetch_message(int(sb_entry.starboard_msg_id))
 
-            # TODO(remove after migration): full re-render branch
             if FULL_RE_RENDER or self._is_old_format(sb_msg):
                 if original_message is None:
                     source_ch = self.bot.get_channel(int(sb_entry.channel_id)) if sb_entry.channel_id else None
@@ -415,9 +401,7 @@ class Starboard(BackfillMixin, commands.Cog):
                 await sb_msg.edit(content=content, embeds=embeds, attachments=files)
                 logger.info(f'Full re-render starboard message: msg={original_msg_id} '
                             f'emoji={emoji_str} count={count}')
-            # END TODO(remove after migration)
             else:
-                # Just update the content line with new count
                 source_channel_id = sb_entry.channel_id or '0'
                 jump_url = f'https://discord.com/channels/{guild_id}/{source_channel_id}/{original_msg_id}'
                 new_content = _starboard_content(emoji_str, count, jump_url)
@@ -520,55 +504,6 @@ class Starboard(BackfillMixin, commands.Cog):
                         f'channel={channel.id} count={reaction_count} '
                         f'(triggered by user {payload.user_id})')
 
-    # --- One-time reformat of recent starboard messages ---
-
-    async def _reformat_recent_starboard_messages(self):
-        """Edit the last 10 starboard messages per guild with the new embed format.
-
-        Controlled by REFORMAT_ON_STARTUP flag at module level.
-        Set it to False after the migration is done.
-        """
-        await self.bot.wait_until_ready()
-        try:
-            for guild in self.bot.guilds:
-                all_msgs = cf_common.user_db.get_all_starboard_messages_for_guild(str(guild.id))
-                # Sort by starboard_msg_id descending (higher = newer)
-                all_msgs.sort(key=lambda m: int(m.starboard_msg_id), reverse=True)
-                emojis = cf_common.user_db.get_starboard_emojis_for_guild(str(guild.id))
-                emoji_map = {e.emoji: e for e in emojis}
-
-                for msg in all_msgs[:10]:
-                    emoji_cfg = emoji_map.get(msg.emoji)
-                    if not emoji_cfg or not emoji_cfg.channel_id:
-                        continue
-                    sb_channel = self.bot.get_channel(int(emoji_cfg.channel_id))
-                    if not sb_channel:
-                        continue
-
-                    try:
-                        # Fetch the original message to rebuild embeds
-                        source_channel = self.bot.get_channel(int(msg.channel_id)) if msg.channel_id else None
-                        if source_channel is None:
-                            logger.debug(f'Reformat: source channel not found for msg={msg.original_msg_id}')
-                            continue
-                        original_msg = await source_channel.fetch_message(int(msg.original_msg_id))
-                        count = msg.star_count or 0
-
-                        content, embeds, files = await self.build_starboard_message(
-                            original_msg, msg.emoji, count, emoji_cfg.color
-                        )
-
-                        sb_msg = await sb_channel.fetch_message(int(msg.starboard_msg_id))
-                        # Clear old attachments to avoid duplicates, attach new files
-                        await sb_msg.edit(content=content, embeds=embeds, attachments=files)
-                        logger.info(f'Reformatted starboard msg={msg.starboard_msg_id} '
-                                    f'(original={msg.original_msg_id})')
-                        await asyncio.sleep(1)  # Rate limit courtesy
-                    except Exception as e:
-                        logger.warning(f'Failed to reformat starboard msg={msg.starboard_msg_id}: {e}')
-        except Exception as e:
-            logger.error(f'Reformat task failed: {e}', exc_info=True)
-
     # --- Commands ---
 
     @commands.group(brief='Starboard commands', invoke_without_command=True)
@@ -584,6 +519,8 @@ class Starboard(BackfillMixin, commands.Cog):
         if threshold < 1:
             raise StarboardCogError('Threshold must be at least 1')
         color_val = constants._DEFAULT_STAR_COLOR
+        if color is None:
+            logger.debug(f'No color specified for starboard add, using default: #{color_val:06x}')
         if color is not None:
             try:
                 color_val = int(color.lstrip('#'), 16)
