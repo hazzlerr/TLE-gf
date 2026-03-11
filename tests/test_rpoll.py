@@ -943,7 +943,7 @@ class TestBuildResultsEmbed:
         options = [(0, 'BFS'), (1, 'DFS')]
         totals_map = {0: 3400, 1: 1600}
         result = _build_results_embed('Best algo?', options, totals_map, 5)
-        assert result.title == 'Poll Done!'
+        assert result.title is None
         assert '**Best algo?**' in result.description
         assert '**BFS** 68%' in result.description
         assert '**DFS** 32%' in result.description

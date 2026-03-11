@@ -120,7 +120,6 @@ def _build_results_embed(question, options, totals_map, vote_count):
             parts.append(f'**{label}** 0')
     votes_str = f'{vote_count} vote{"s" if vote_count != 1 else ""}'
     return discord.Embed(
-        title='Poll Done!',
         description=f'**{question}**\n{" / ".join(parts)} ({votes_str})',
         color=discord_common.random_cf_color(),
     )
@@ -355,7 +354,7 @@ class Rpoll(commands.Cog):
                 message_id=int(poll.message_id), channel_id=int(poll.channel_id),
                 fail_if_not_exists=False,
             )
-            await channel.send(embed=results_embed, reference=ref)
+            await channel.send('Poll Done!', embed=results_embed, reference=ref)
         except Exception as e:
             logger.warning(f'rpoll: Could not send results for poll {poll.poll_id}: {e}')
 
