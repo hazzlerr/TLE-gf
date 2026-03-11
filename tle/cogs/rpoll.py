@@ -354,7 +354,7 @@ class Rpoll(commands.Cog):
                 message_id=int(poll.message_id), channel_id=int(poll.channel_id),
                 fail_if_not_exists=False,
             )
-            await channel.send('Poll Done!', embed=results_embed, reference=ref)
+            await channel.send('Poll done!', embed=results_embed, reference=ref)
         except Exception as e:
             logger.warning(f'rpoll: Could not send results for poll {poll.poll_id}: {e}')
 
