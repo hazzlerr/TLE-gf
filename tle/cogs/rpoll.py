@@ -107,8 +107,8 @@ def _build_poll_embed(question, options, totals_map, vote_count, voters_map=None
     return embed
 
 
-def _build_results_summary(options, totals_map, vote_count):
-    """Build a compact plain-text results summary for the poll reply."""
+def _build_results_embed(question, options, totals_map, vote_count):
+    """Build a compact embed for the poll expiry reply."""
     grand_total = sum(totals_map.get(idx, 0) for idx, _ in options)
     parts = []
     for idx, label in options:
@@ -119,7 +119,11 @@ def _build_results_summary(options, totals_map, vote_count):
         else:
             parts.append(f'**{label}** 0')
     votes_str = f'{vote_count} vote{"s" if vote_count != 1 else ""}'
-    return f'Poll done! {" / ".join(parts)} ({votes_str})'
+    return discord.Embed(
+        title='Poll Done!',
+        description=f'**{question}**\n{" / ".join(parts)} ({votes_str})',
+        color=discord_common.random_cf_color(),
+    )
 
 
 def _build_disabled_view(poll_id, option_count):
@@ -342,14 +346,16 @@ class Rpoll(commands.Cog):
         except Exception as e:
             logger.warning(f'rpoll: Could not edit message for poll {poll.poll_id}: {e}')
 
-        # Reply to original message with compact results summary
+        # Reply to original message with a compact embed so mentions stay inert.
         try:
-            summary = _build_results_summary(option_pairs, totals_map, vote_count)
+            results_embed = _build_results_embed(
+                poll.question, option_pairs, totals_map, vote_count,
+            )
             ref = discord.MessageReference(
                 message_id=int(poll.message_id), channel_id=int(poll.channel_id),
                 fail_if_not_exists=False,
             )
-            await channel.send(summary, reference=ref)
+            await channel.send(embed=results_embed, reference=ref)
         except Exception as e:
             logger.warning(f'rpoll: Could not send results for poll {poll.poll_id}: {e}')
 

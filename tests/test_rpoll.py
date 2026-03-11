@@ -5,7 +5,7 @@ import time
 import pytest
 
 from tle.util.db.user_db_conn import namedtuple_factory
-from tle.cogs.rpoll import _build_poll_embed, _build_results_summary, _parse_duration, MAX_OPTIONS, _DEFAULT_DURATION
+from tle.cogs.rpoll import _build_poll_embed, _build_results_embed, _parse_duration, MAX_OPTIONS, _DEFAULT_DURATION
 
 
 # ---------------------------------------------------------------------------
@@ -938,24 +938,26 @@ class TestSmartQuoteNormalization:
         assert '"What\'s better?"' in args
 
 
-class TestBuildResultsSummary:
+class TestBuildResultsEmbed:
     def test_basic_summary(self):
         options = [(0, 'BFS'), (1, 'DFS')]
         totals_map = {0: 3400, 1: 1600}
-        result = _build_results_summary(options, totals_map, 5)
-        assert 'Poll done!' in result
-        assert '**BFS** 68%' in result
-        assert '**DFS** 32%' in result
-        assert '5 votes' in result
+        result = _build_results_embed('Best algo?', options, totals_map, 5)
+        assert result.title == 'Poll Done!'
+        assert '**Best algo?**' in result.description
+        assert '**BFS** 68%' in result.description
+        assert '**DFS** 32%' in result.description
+        assert '5 votes' in result.description
 
     def test_zero_totals(self):
         options = [(0, 'A'), (1, 'B')]
-        result = _build_results_summary(options, {}, 0)
-        assert '**A** 0' in result
-        assert '**B** 0' in result
-        assert '0 votes' in result
+        result = _build_results_embed('Q?', options, {}, 0)
+        assert '**Q?**' in result.description
+        assert '**A** 0' in result.description
+        assert '**B** 0' in result.description
+        assert '0 votes' in result.description
 
     def test_singular_vote(self):
         options = [(0, 'A'), (1, 'B')]
-        result = _build_results_summary(options, {0: 1500}, 1)
-        assert '1 vote)' in result
+        result = _build_results_embed('Q?', options, {0: 1500}, 1)
+        assert '1 vote)' in result.description
