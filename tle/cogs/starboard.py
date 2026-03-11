@@ -198,8 +198,9 @@ class Starboard(BackfillMixin, commands.Cog):
                 embed.set_image(url=image_url)
 
             for att in other_attachments:
+                safe_name = att.filename.replace('`', '\u02CB')
                 embed.add_field(
-                    name='Attachment', value=f'[{att.filename}]({att.url})', inline=False
+                    name='Attachment', value=f'`{safe_name}`', inline=False
                 )
 
             # Pull an image from the original message's embeds if we don't
