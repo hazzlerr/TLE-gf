@@ -347,10 +347,15 @@ class TestFormulaDb:
         poll = db.get_rpoll(pid)
         assert poll.formula == 'sum'
 
-    def test_custom_formula(self, db):
+    def test_custom_formula_exp(self, db):
         pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0, formula='exp')
         poll = db.get_rpoll(pid)
         assert poll.formula == 'exp'
+
+    def test_custom_formula_team(self, db):
+        pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0, formula='team')
+        poll = db.get_rpoll(pid)
+        assert poll.formula == 'team'
 
     def test_formula_in_get_by_message_id(self, db):
         pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0, formula='exp')

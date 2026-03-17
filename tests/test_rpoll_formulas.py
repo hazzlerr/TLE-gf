@@ -35,5 +35,20 @@ class TestApplyFormula:
         two_mid = _apply_formula('exp', [1200, 1200])
         assert single_high > two_mid
 
+    def test_team_empty(self):
+        assert _apply_formula('team', []) == 0
+
+    def test_team_single_rating(self):
+        assert _apply_formula('team', [1500]) == 1500
+
+    def test_team_two_equal_ratings(self):
+        assert _apply_formula('team', [1500, 1500]) == 1653
+
+    def test_team_mixed_ratings(self):
+        assert _apply_formula('team', [1500, 2000]) == 2018
+
+    def test_team_zero_rating_does_not_change_positive_vote(self):
+        assert _apply_formula('team', [0, 1500]) == 1500
+
     def test_unknown_formula_falls_back_to_sum(self):
         assert _apply_formula('unknown', [1200, 1800]) == 3000

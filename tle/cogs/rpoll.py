@@ -2,6 +2,7 @@ import asyncio
 import logging
 import re
 import time
+from collections import Counter
 
 import discord
 from discord.ext import commands
@@ -24,10 +25,11 @@ MAX_OPTIONS = 5
 _DEFAULT_DURATION = 86400  # 24 hours in seconds
 _SAFETY_NET_INTERVAL = 300  # Safety-net sweep every 5 minutes
 _DURATION_RE = re.compile(r'^\+(\d+)([mhd])$')
-_VALID_FORMULAS = ('sum', 'exp')
+_VALID_FORMULAS = ('sum', 'exp', 'team')
 _FORMULA_LABELS = {
     'sum': 'sum of ratings',
     'exp': 'exponential: `2^(rating/400) * 100`',
+    'team': 'team Elo: solo rating with 50% win vs all voters',
 }
 
 
@@ -55,18 +57,46 @@ def _apply_formula(formula, ratings):
     """Apply a scoring formula to a list of individual ratings. Returns total score."""
     if formula == 'exp':
         return round(sum(2 ** (r / 400) * 100 for r in ratings))
+    if formula == 'team':
+        if not ratings:
+            return 0
+        return _compose_team_rating(ratings)
     return sum(ratings)
+
+
+def _get_elo_win_probability(player_rating, opponent_rating):
+    """Match the team-rating win probability used by ;teamrate."""
+    return 1.0 / (1 + 10 ** ((opponent_rating - player_rating) / 400.0))
+
+
+def _compose_team_rating(ratings):
+    """Match the team-rating composition used by ;teamrate."""
+    left = -100.0
+    right = 10000.0
+    rating_counts = Counter(ratings)
+    for _ in range(20):
+        candidate_rating = (left + right) / 2.0
+        win_probability = 1.0
+        for rating, count in rating_counts.items():
+            win_probability *= _get_elo_win_probability(candidate_rating, rating) ** count
+        if win_probability < 0.5:
+            left = candidate_rating
+        else:
+            right = candidate_rating
+    return round((left + right) / 2)
 
 
 def _compute_totals_map(poll_id, formula):
     """Compute per-option totals using the given scoring formula."""
-    if formula == 'exp':
+    if formula in {'exp', 'team'}:
         votes = cf_common.user_db.get_rpoll_vote_ratings(poll_id)
         totals = {}
         for vote in votes:
-            score = 2 ** (vote.rating / 400) * 100
-            totals[vote.option_index] = totals.get(vote.option_index, 0) + score
-        return {k: round(v) for k, v in totals.items()}
+            totals.setdefault(vote.option_index, []).append(vote.rating)
+        return {
+            option_index: _apply_formula(formula, option_ratings)
+            for option_index, option_ratings in totals.items()
+        }
     totals = cf_common.user_db.get_rpoll_totals(poll_id)
     return {row.option_index: row.total_rating for row in totals}
 
@@ -397,13 +427,14 @@ class Rpoll(commands.Cog):
                ;rpoll +anon "What's the best approach?" BFS,DFS,Dijkstra
                ;rpoll +2h "What's the best approach?" BFS,DFS,Dijkstra
                ;rpoll +exp "What's the best approach?" BFS,DFS,Dijkstra
+               ;rpoll +team "What's the best approach?" BFS,DFS,Dijkstra
 
         Each voter's CF rating is added to their chosen option(s).
         Users without a linked CF handle count as 0.
         You can vote for multiple options. Click again to un-vote.
         Use +anon to hide who voted for what.
         Duration: +Nm (minutes), +Nh (hours), +Nd (days). Default: 24h.
-        Scoring: +sum (default) or +exp (`2^(rating/400) * 100`).
+        Scoring: +sum (default), +exp (`2^(rating/400) * 100`), or +team (team Elo).
         """
         args = args.strip()
         # Normalize smart/curly quotes (common on macOS) to straight quotes
