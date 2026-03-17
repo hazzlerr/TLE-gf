@@ -119,7 +119,7 @@ def _build_poll_embed(question, options, totals_map, vote_count, voters_map=None
 
     # Formula description
     formula_label = _FORMULA_LABELS.get(formula, formula)
-    lines.append(f'\n*Scoring: {formula_label}*')
+    lines.append(f'\nScoring: {formula_label}')
 
     # Expiry info in description
     if closed:
@@ -150,7 +150,7 @@ def _build_results_embed(question, options, totals_map, vote_count, formula='sum
     votes_str = f'{vote_count} vote{"s" if vote_count != 1 else ""}'
     formula_label = _FORMULA_LABELS.get(formula, formula)
     return discord.Embed(
-        description=f'**{question}**\n{" / ".join(parts)} ({votes_str})\n*{formula_label}*',
+        description=f'**{question}**\n{" / ".join(parts)} ({votes_str})\nScoring: {formula_label}',
         color=discord_common.random_cf_color(),
     )
 

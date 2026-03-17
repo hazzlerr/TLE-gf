@@ -283,9 +283,9 @@ class TestBuildPollEmbedFormula:
         embed = _build_poll_embed('Q?', [(0, 'A'), (1, 'B')], {}, 0, formula='exp')
         assert _FORMULA_LABELS['exp'] in embed.description
 
-    def test_formula_label_italic(self):
+    def test_formula_label_line_shown(self):
         embed = _build_poll_embed('Q?', [(0, 'A'), (1, 'B')], {}, 0, formula='sum')
-        assert f'*Scoring: {_FORMULA_LABELS["sum"]}*' in embed.description
+        assert f'Scoring: {_FORMULA_LABELS["sum"]}' in embed.description
 
     def test_default_formula_is_sum(self):
         embed = _build_poll_embed('Q?', [(0, 'A'), (1, 'B')], {}, 0)
