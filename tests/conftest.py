@@ -18,7 +18,7 @@ _STUB_MODULES = [
     'seaborn', 'matplotlib', 'matplotlib.pyplot', 'matplotlib.ticker',
     'numpy', 'pandas', 'pandas.plotting',
     'lxml', 'lxml.html',
-    'PIL', 'PIL.Image',
+    'PIL', 'PIL.Image', 'PIL.ImageFont', 'PIL.ImageDraw',
     'cairo', 'gi', 'gi.repository',
     'aiocache',
 ]
@@ -56,7 +56,9 @@ class _StubCog:
         return lambda f: f
 _commands_mod.Cog = _StubCog
 _commands_mod.has_role = lambda role: (lambda f: f)
+_commands_mod.has_any_role = lambda *roles: (lambda f: f)
 _commands_mod.command = lambda **kw: (lambda f: f)
+_commands_mod.MemberConverter = type('MemberConverter', (), {'__call__': lambda self, *a, **kw: None})
 
 class _StubGroupResult:
     """Fake return value of @commands.group() — supports chained .command() and .group()."""
@@ -114,6 +116,30 @@ _discord_mod.Forbidden = type('Forbidden', (Exception,), {})
 _discord_mod.HTTPException = type('HTTPException', (Exception,), {})
 _discord_mod.ButtonStyle = type('ButtonStyle', (), {'secondary': 2, 'primary': 1})
 _discord_mod.Interaction = type('Interaction', (), {})
+
+_gi = sys.modules['gi']
+_gi.require_version = lambda *a, **kw: None
+_gi_repo = sys.modules['gi.repository']
+_gi_repo.Pango = types.SimpleNamespace(
+    font_description_from_string=lambda s: s,
+    EllipsizeMode=types.SimpleNamespace(END=0),
+)
+_gi_repo.PangoCairo = types.SimpleNamespace(
+    create_layout=lambda ctx: types.SimpleNamespace(
+        set_font_description=lambda *a, **kw: None,
+        set_ellipsize=lambda *a, **kw: None,
+        set_width=lambda *a, **kw: None,
+        set_markup=lambda *a, **kw: None,
+    ),
+    show_layout=lambda *a, **kw: None,
+)
+
+_pil_image = sys.modules['PIL.Image']
+_pil_image.new = lambda *a, **kw: object()
+_pil_imagefont = sys.modules['PIL.ImageFont']
+_pil_imagefont.truetype = lambda *a, **kw: object()
+_pil_imagedraw = sys.modules['PIL.ImageDraw']
+_pil_imagedraw.Draw = lambda *a, **kw: object()
 
 # discord.utils stubs
 _discord_utils = types.ModuleType('discord.utils')
@@ -182,6 +208,8 @@ constants_mod = sys.modules['tle.constants']
 constants_mod._DEFAULT_STAR_COLOR = 0xffaa10
 constants_mod._DEFAULT_STAR = '\N{WHITE MEDIUM STAR}'
 constants_mod.TLE_ADMIN = 'Admin'
+constants_mod.TLE_MODERATOR = 'Moderator'
+constants_mod.NOTO_SANS_CJK_BOLD_FONT_PATH = '/tmp/fake-font.ttf'
 
 # tle.util.codeforces_common needs a user_db attribute and parse_date for starboard cog
 import time as _time
@@ -341,6 +369,8 @@ _discord_mod.MessageReference = type('MessageReference', (), {
 # Stub EventSystem so codeforces_common can instantiate it at module level
 _events = sys.modules['tle.util.events']
 _events.EventSystem = type('EventSystem', (), {'__init__': lambda self: None})
+_events.listener_spec = lambda **kw: (lambda f: f)
+_events.RatingChangesUpdate = type('RatingChangesUpdate', (), {})
 
 # codeforces_common.py — load for real so SubFilter, parse helpers, etc. are testable.
 # Its imports (codeforces_api, cache_system2, db, events) are all stubbed above.
@@ -377,6 +407,8 @@ _load_module('tle.cogs._starboard_helpers', os.path.join(_cogs_path, '_starboard
 _load_module('tle.cogs._starboard_backfill', os.path.join(_cogs_path, '_starboard_backfill.py'))
 _load_module('tle.cogs.starboard', os.path.join(_cogs_path, 'starboard.py'))
 _load_module('tle.cogs.rpoll', os.path.join(_cogs_path, 'rpoll.py'))
+_load_module('tle.cogs.codeforces', os.path.join(_cogs_path, 'codeforces.py'))
+_load_module('tle.cogs.handles', os.path.join(_cogs_path, 'handles.py'))
 
 # graph_common stubs for versus.py
 _gc = sys.modules['tle.util.graph_common']
