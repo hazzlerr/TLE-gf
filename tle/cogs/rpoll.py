@@ -27,7 +27,7 @@ _DURATION_RE = re.compile(r'^\+(\d+)([mhd])$')
 _VALID_FORMULAS = ('sum', 'exp')
 _FORMULA_LABELS = {
     'sum': 'sum of ratings',
-    'exp': 'exponential — higher ratings weigh more',
+    'exp': 'exponential: 2^(rating/400)*100',
 }
 
 
@@ -403,7 +403,7 @@ class Rpoll(commands.Cog):
         You can vote for multiple options. Click again to un-vote.
         Use +anon to hide who voted for what.
         Duration: +Nm (minutes), +Nh (hours), +Nd (days). Default: 24h.
-        Scoring: +sum (default) or +exp (exponential, higher ratings weigh more).
+        Scoring: +sum (default) or +exp (2^(rating/400)*100).
         """
         args = args.strip()
         # Normalize smart/curly quotes (common on macOS) to straight quotes
