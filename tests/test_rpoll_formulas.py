@@ -73,6 +73,30 @@ class TestApplyFormula:
     def test_osu_zero_rating_does_not_change_positive_vote(self):
         assert _apply_formula('osu', [0, 1500]) == 1500
 
+    def test_fffff_empty(self):
+        assert _apply_formula('fffff', []) == 0
+
+    def test_fffff_single_1900(self):
+        # max(0, 1 + 0/1600) * 100 = 100
+        assert _apply_formula('fffff', [1900]) == 100
+
+    def test_fffff_single_300(self):
+        # max(0, 1 + (300 - 1900)/1600) = max(0, 0) = 0 → 0
+        assert _apply_formula('fffff', [300]) == 0
+
+    def test_fffff_below_threshold(self):
+        # 1 + (100 - 1900)/1600 = 1 - 1.125 = -0.125 → max(0, -0.125) = 0
+        assert _apply_formula('fffff', [100]) == 0
+
+    def test_fffff_multiple(self):
+        # 1900: max(0, 1) = 1; 2700: max(0, 1 + 800/1600) = 1.5
+        # total = 2.5 * 100 = 250
+        assert _apply_formula('fffff', [1900, 2700]) == 250
+
+    def test_fffff_high_rating(self):
+        # max(0, 1 + (3500 - 1900)/1600) = max(0, 2.0) = 2.0 → 200
+        assert _apply_formula('fffff', [3500]) == 200
+
     def test_unknown_formula_falls_back_to_sum(self):
         assert _apply_formula('unknown', [1200, 1800]) == 3000
 

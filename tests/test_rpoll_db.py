@@ -389,6 +389,11 @@ class TestFormulaDb:
         poll = db.get_rpoll(pid)
         assert poll.formula == 'mgg'
 
+    def test_custom_formula_fffff(self, db):
+        pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0, formula='fffff')
+        poll = db.get_rpoll(pid)
+        assert poll.formula == 'fffff'
+
     def test_formula_in_get_by_message_id(self, db):
         pid = db.create_rpoll(GUILD, CHANNEL, 'Q?', ['A', 'B'], 'u', 1.0, formula='exp')
         db.set_rpoll_message_id(pid, 12345)

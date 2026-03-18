@@ -26,7 +26,7 @@ MAX_OPTIONS = 5
 _DEFAULT_DURATION = 86400  # 24 hours in seconds
 _SAFETY_NET_INTERVAL = 300  # Safety-net sweep every 5 minutes
 _DURATION_RE = re.compile(r'^\+(\d+)([mhd])$')
-_VALID_FORMULAS = ('sum', 'exp', 'team', 'osu', 'gg', 'mgg')
+_VALID_FORMULAS = ('sum', 'exp', 'team', 'osu', 'gg', 'mgg', 'fffff')
 _FORMULA_LABELS = {
     'sum': 'sum of ratings',
     'exp': 'exponential: `2^(rating/400) * 100`',
@@ -34,6 +34,7 @@ _FORMULA_LABELS = {
     'osu': 'osu-style: top vote full, then `0.67x`, `0.67^2x`, ...',
     'gg': 'gitgud: all-time gg score',
     'mgg': 'monthly gitgud: score for poll creation month',
+    'fffff': 'scaled linear: `max(0, 1 + (rating - 1900) / 1600) * 100`',
 }
 
 _GITGUD_SCORE_DISTRIB = (1, 2, 3, 5, 8, 12, 17, 23)
@@ -73,6 +74,8 @@ def _apply_formula(formula, ratings):
         return _compose_team_rating(ratings)
     if formula == 'osu':
         return _compose_osu_score(ratings)
+    if formula == 'fffff':
+        return round(sum(max(0, 1 + (r - 1900) / 1600) for r in ratings) * 100)
     return sum(ratings)
 
 
@@ -144,7 +147,7 @@ def _get_vote_weight(poll, user_id, guild_id):
 
 def _compute_totals_map(poll_id, formula):
     """Compute per-option totals using the given scoring formula."""
-    if formula in {'exp', 'team', 'osu'}:
+    if formula in {'exp', 'team', 'osu', 'fffff'}:
         votes = cf_common.user_db.get_rpoll_vote_ratings(poll_id)
         totals = {}
         for vote in votes:

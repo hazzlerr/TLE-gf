@@ -288,6 +288,11 @@ class TestBuildResultsEmbed:
         result = _build_results_embed('Q?', options, {0: 1500}, 1, formula='mgg')
         assert _FORMULA_LABELS['mgg'] in result.description
 
+    def test_shows_fffff_formula_label(self):
+        options = [(0, 'A'), (1, 'B')]
+        result = _build_results_embed('Q?', options, {0: 1500}, 1, formula='fffff')
+        assert _FORMULA_LABELS['fffff'] in result.description
+
     def test_default_formula_label(self):
         options = [(0, 'A'), (1, 'B')]
         result = _build_results_embed('Q?', options, {0: 1500}, 1)
@@ -318,6 +323,10 @@ class TestBuildPollEmbedFormula:
     def test_mgg_formula_label_shown(self):
         embed = _build_poll_embed('Q?', [(0, 'A'), (1, 'B')], {}, 0, formula='mgg')
         assert _FORMULA_LABELS['mgg'] in embed.description
+
+    def test_fffff_formula_label_shown(self):
+        embed = _build_poll_embed('Q?', [(0, 'A'), (1, 'B')], {}, 0, formula='fffff')
+        assert _FORMULA_LABELS['fffff'] in embed.description
 
     def test_formula_label_line_shown(self):
         embed = _build_poll_embed('Q?', [(0, 'A'), (1, 'B')], {}, 0, formula='sum')
