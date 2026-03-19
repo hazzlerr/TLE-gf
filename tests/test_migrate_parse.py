@@ -166,6 +166,29 @@ class TestSerializeEmbedFallback:
         assert len(data['embeds']) == 2
         assert data['embeds'][1]['title'] == 'Second'
 
+    def test_color_serialized_as_int(self):
+        """H2: embed.color must be serialized as int, not a discord.Color object."""
+        # Simulate a discord.Color-like object that has int() support
+        class FakeColor:
+            def __init__(self, value):
+                self._value = value
+            def __int__(self):
+                return self._value
+            def __bool__(self):
+                return True
+        embed = _FakeEmbed(color=FakeColor(0xff0000))
+        msg = _FakeMsg(embeds=[embed])
+        result = serialize_embed_fallback(msg)
+        data = json.loads(result)  # Would crash before fix if Color isn't JSON-serializable
+        assert data['embeds'][0]['color'] == 0xff0000
+
+    def test_color_none_omitted(self):
+        embed = _FakeEmbed(color=None)
+        msg = _FakeMsg(embeds=[embed])
+        result = serialize_embed_fallback(msg)
+        data = json.loads(result)
+        assert data == {}  # No data to serialize
+
 
 # =====================================================================
 # build_fallback_message

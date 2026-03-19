@@ -5,7 +5,8 @@ Flow:
   1. ;migrate start #old_channel #new_channel :emoji1: :emoji2:
   2. ;migrate status
   3. ;migrate complete #new_channel
-  4. ;migrate cancel
+  4. ;migrate resume  (retry after failure)
+  5. ;migrate cancel
 """
 import asyncio
 import logging
@@ -45,25 +46,37 @@ class Migrate(commands.Cog):
         await self.bot.wait_until_ready()
         db = cf_common.user_db
 
-        try:
-            await self._crawl_phase(guild_id, old_channel_id, emoji_set, db)
+        logger.info(f'=== MIGRATION START === guild={guild_id}')
 
+        try:
             migration = db.get_migration(guild_id)
-            if migration is None or migration.status == 'failed':
+            if migration is None:
+                logger.warning(f'Migration: guild={guild_id} migration record not found, aborting')
                 return
 
-            db.update_migration_status(guild_id, 'posting')
+            # Skip crawl if already in posting phase (resume from posting)
+            if migration.status != 'posting':
+                await self._crawl_phase(guild_id, old_channel_id, emoji_set, db)
+
+                migration = db.get_migration(guild_id)
+                if migration is None or migration.status == 'failed':
+                    logger.warning(f'Migration: guild={guild_id} crawl phase ended with '
+                                   f'status={migration.status if migration else "deleted"}')
+                    return
+
+                db.update_migration_status(guild_id, 'posting')
+
             await self._post_phase(guild_id, new_channel_id, emoji_set, db)
 
             db.update_migration_status(guild_id, 'done')
-            logger.info(f'Migration complete for guild {guild_id}')
+            logger.info(f'=== MIGRATION COMPLETE === guild={guild_id}')
 
         except asyncio.CancelledError:
-            logger.info(f'Migration cancelled for guild {guild_id}')
-            db.update_migration_status(guild_id, 'failed')
+            logger.info(f'Migration: guild={guild_id} cancelled')
+            # Don't update status — the cancel command already cleaned up
             raise
         except Exception as e:
-            logger.error(f'Migration failed for guild {guild_id}: {e}', exc_info=True)
+            logger.error(f'Migration: guild={guild_id} FAILED: {e}', exc_info=True)
             db.update_migration_status(guild_id, 'failed')
         finally:
             self._tasks.pop(guild_id, None)
@@ -72,7 +85,7 @@ class Migrate(commands.Cog):
         """Crawl the old bot's channel, collecting entries and reactors."""
         old_channel = self.bot.get_channel(old_channel_id)
         if old_channel is None:
-            logger.error(f'Migration: old channel {old_channel_id} not found')
+            logger.error(f'Migration: guild={guild_id} old channel {old_channel_id} not found')
             db.update_migration_status(guild_id, 'failed')
             return
 
@@ -84,8 +97,9 @@ class Migrate(commands.Cog):
         crawl_done = migration.crawl_done
         crawl_failed = migration.crawl_failed
 
-        logger.info(f'Migration crawl starting for guild {guild_id}, '
-                     f'channel={old_channel_id}, after={migration.last_crawled_msg_id}')
+        logger.info(f'Migration crawl: guild={guild_id} channel={old_channel_id} '
+                     f'checkpoint={migration.last_crawled_msg_id} '
+                     f'done={crawl_done} failed={crawl_failed}')
 
         async for old_bot_msg in old_channel.history(after=after, oldest_first=True, limit=None):
             if not old_bot_msg.content:
@@ -133,7 +147,7 @@ class Migrate(commands.Cog):
                     star_count
                 )
                 crawl_done += 1
-                logger.info(f'Migration crawl [{crawl_done}] '
+                logger.info(f'Migration crawl: guild={guild_id} [{crawl_done}] '
                             f'emoji={emoji_str} msg={original_msg_id} '
                             f'author={original_msg.author} count={star_count}')
 
@@ -145,13 +159,16 @@ class Migrate(commands.Cog):
                 )
                 crawl_done += 1
                 crawl_failed += 1
-                logger.info(f'Migration crawl [{crawl_done}] '
+                logger.info(f'Migration crawl: guild={guild_id} [{crawl_done}] '
                             f'emoji={emoji_str} msg={original_msg_id} DELETED/FORBIDDEN')
 
             except discord.HTTPException as e:
-                logger.warning(f'Migration crawl: HTTP error for msg={original_msg_id}: {e}')
+                # Mark entry as deleted so it's not orphaned as 'pending'
+                db.update_migration_entry_deleted(str(original_msg_id), emoji_str, None)
                 crawl_failed += 1
                 crawl_done += 1
+                logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done}] '
+                               f'HTTP error for msg={original_msg_id}: {e}')
 
             # Checkpoint after each message
             db.update_migration_checkpoint(
@@ -161,21 +178,24 @@ class Migrate(commands.Cog):
             await asyncio.sleep(_RATE_DELAY)
 
         db.set_migration_crawl_total(guild_id, crawl_done)
-        logger.info(f'Migration crawl finished for guild {guild_id}: '
+        logger.info(f'Migration crawl: guild={guild_id} finished — '
                      f'{crawl_done} processed, {crawl_failed} failed')
 
     async def _post_phase(self, guild_id, new_channel_id, emoji_set, db):
         """Post crawled entries to the new starboard channel in chronological order."""
         new_channel = self.bot.get_channel(new_channel_id)
         if new_channel is None:
-            logger.error(f'Migration: new channel {new_channel_id} not found')
+            logger.error(f'Migration post: guild={guild_id} new channel {new_channel_id} not found')
             db.update_migration_status(guild_id, 'failed')
             return
 
         entries = db.get_migration_entries_for_posting(guild_id)
         db.set_migration_post_totals(guild_id, len(entries))
 
+        logger.info(f'Migration post: guild={guild_id} starting — {len(entries)} entries to post')
+
         post_done = 0
+        post_failed = 0
         color = constants._DEFAULT_STAR_COLOR
 
         for entry in entries:
@@ -204,18 +224,23 @@ class Migrate(commands.Cog):
                 post_done += 1
                 db.update_migration_post_done(guild_id, post_done)
 
-                logger.info(f'Migration post [{post_done}/{len(entries)}] '
+                logger.info(f'Migration post: guild={guild_id} [{post_done}/{len(entries)}] '
                             f'msg={entry.original_msg_id} emoji={entry.emoji}')
 
             except Exception as e:
-                logger.error(f'Migration post failed for msg={entry.original_msg_id}: {e}',
+                # Mark as post_failed — won't be retried unless user runs ;migrate resume
+                logger.error(f'Migration post: guild={guild_id} FAILED '
+                             f'msg={entry.original_msg_id} emoji={entry.emoji}: {e}',
                              exc_info=True)
+                db.update_migration_entry_post_failed(entry.original_msg_id, entry.emoji)
                 post_done += 1
+                post_failed += 1
                 db.update_migration_post_done(guild_id, post_done)
 
             await asyncio.sleep(_RATE_DELAY)
 
-        logger.info(f'Migration post finished for guild {guild_id}: {post_done}/{len(entries)}')
+        logger.info(f'Migration post: guild={guild_id} finished — '
+                     f'{post_done}/{len(entries)} ({post_failed} failed)')
 
     # ------------------------------------------------------------------
     # Commands
@@ -258,6 +283,8 @@ class Migrate(commands.Cog):
         )
         self._tasks[guild_id] = task
 
+        logger.info(f'Migration: guild={guild_id} started by {ctx.author} '
+                     f'old={old_channel.id} new={new_channel.id} emojis={emoji_csv}')
         await ctx.send(f'Migration started! Crawling {old_channel.mention} for '
                         f'{", ".join(emojis)}.\n'
                         f'Use `;migrate status` to check progress.')
@@ -283,7 +310,7 @@ class Migrate(commands.Cog):
             f' (total: {migration.crawl_total})',
         ]
 
-        if migration.status in ('posting', 'done'):
+        if migration.status in ('posting', 'done', 'failed'):
             lines.append(f'**Post:** {migration.post_done}/{migration.post_total}')
 
         if counts:
@@ -314,24 +341,34 @@ class Migrate(commands.Cog):
         db = cf_common.user_db
         emojis = migration.emojis.split(',')
 
-        # Get all posted entries
-        entries = db.get_migration_entries_for_posting(guild_id)
-        # Also include already-posted entries
-        all_entries = db.conn.execute(
-            'SELECT * FROM starboard_migration_entry '
-            'WHERE guild_id = ? AND crawl_status = ?',
-            (str(guild_id), 'posted')
-        ).fetchall()
+        posted_entries = db.get_posted_migration_entries(guild_id)
+
+        # Warn about post_failed entries before completing
+        failed_counts = db.count_migration_entries_by_status(guild_id)
+        failed_map = {r.crawl_status: r.cnt for r in failed_counts}
+        pf_count = failed_map.get('post_failed', 0)
+
+        if pf_count > 0:
+            await ctx.send(f'**Warning:** {pf_count} entries failed to post and will not be '
+                           f'imported. Use `;migrate resume` to retry them, or proceed with '
+                           f'`;migrate complete {new_channel.mention}` again to accept the loss.')
+            # Only warn once — if they call complete again, we skip this check
+            # by checking if there are actually posted entries to import
+            if not posted_entries:
+                return
+
+        logger.info(f'Migration complete: guild={guild_id} importing {len(posted_entries)} entries '
+                     f'({pf_count} post_failed entries discarded)')
 
         # Copy posted entries into starboard tables
-        for entry in all_entries:
+        for entry in posted_entries:
             db.add_starboard_message_v1(
                 entry.original_msg_id, entry.new_starboard_msg_id,
                 str(guild_id), entry.emoji,
                 author_id=entry.author_id,
                 channel_id=entry.source_channel_id
             )
-            if entry.star_count:
+            if entry.star_count is not None and entry.star_count > 0:
                 db.update_starboard_star_count(
                     entry.original_msg_id, entry.emoji, entry.star_count
                 )
@@ -346,9 +383,63 @@ class Migrate(commands.Cog):
         db.delete_migration(guild_id)
 
         emoji_list = ', '.join(emojis)
-        await ctx.send(f'Migration complete! {len(all_entries)} messages imported.\n'
+        logger.info(f'Migration complete: guild={guild_id} done — '
+                     f'{len(posted_entries)} imported, emojis={emoji_list}')
+        await ctx.send(f'Migration complete! {len(posted_entries)} messages imported.\n'
                         f'Emoji configs created for {emoji_list} in {new_channel.mention}.\n'
                         f'Live reaction tracking is now active.')
+
+    @migrate.command(name='resume')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def resume(self, ctx):
+        """Resume a failed migration. Retries any post_failed entries.
+
+        Usage: ;migrate resume
+        """
+        guild_id = ctx.guild.id
+        migration = cf_common.user_db.get_migration(guild_id)
+
+        if migration is None:
+            await ctx.send('No migration to resume.')
+            return
+
+        if migration.status not in ('failed', 'crawling', 'posting'):
+            await ctx.send(f'Migration cannot be resumed (status: {migration.status}). '
+                           f'Use `;migrate complete` if status is done.')
+            return
+
+        if guild_id in self._tasks:
+            task = self._tasks[guild_id]
+            if not task.done():
+                await ctx.send('Migration task is already running.')
+                return
+
+        db = cf_common.user_db
+
+        # Reset post_failed entries so they can be retried
+        db.reset_post_failed_entries(guild_id)
+
+        # Determine which phase to resume
+        postable = db.get_migration_entries_for_posting(guild_id)
+        if postable:
+            db.update_migration_status(guild_id, 'posting')
+        else:
+            db.update_migration_status(guild_id, 'crawling')
+
+        emoji_set = set(migration.emojis.split(','))
+        task = asyncio.create_task(
+            self._run_migration(
+                guild_id,
+                int(migration.old_channel_id),
+                int(migration.new_channel_id),
+                emoji_set
+            )
+        )
+        self._tasks[guild_id] = task
+
+        logger.info(f'Migration resume: guild={guild_id} by {ctx.author} '
+                     f'(was status={migration.status})')
+        await ctx.send(f'Migration resumed! Use `;migrate status` to check progress.')
 
     @migrate.command(name='cancel')
     @commands.has_role(constants.TLE_ADMIN)
@@ -360,6 +451,9 @@ class Migrate(commands.Cog):
         if migration is None:
             await ctx.send('No migration to cancel.')
             return
+
+        logger.info(f'Migration cancel: guild={guild_id} by {ctx.author} '
+                     f'(was status={migration.status})')
 
         # Cancel background task if running
         task = self._tasks.pop(guild_id, None)
@@ -377,8 +471,15 @@ class Migrate(commands.Cog):
     # ------------------------------------------------------------------
 
     @commands.Cog.listener()
+    @discord_common.once
     async def on_ready(self):
         """Resume any in-progress migrations after bot restart."""
+        # Wait for user_db to be initialized
+        if cf_common.user_db is None:
+            logger.debug('Migration: user_db not ready in on_ready, skipping resume')
+            return
+
+        resumed = 0
         for guild in self.bot.guilds:
             migration = cf_common.user_db.get_migration(guild.id)
             if migration is None:
@@ -386,8 +487,9 @@ class Migrate(commands.Cog):
 
             if migration.status in ('crawling', 'posting'):
                 emoji_set = set(migration.emojis.split(','))
-                logger.info(f'Resuming migration for guild {guild.id} '
-                            f'(status={migration.status})')
+                logger.info(f'Migration resume: guild={guild.id} status={migration.status} '
+                            f'checkpoint={migration.last_crawled_msg_id} '
+                            f'crawl_done={migration.crawl_done} emojis={migration.emojis}')
                 task = asyncio.create_task(
                     self._run_migration(
                         guild.id,
@@ -397,6 +499,10 @@ class Migrate(commands.Cog):
                     )
                 )
                 self._tasks[guild.id] = task
+                resumed += 1
+
+        if resumed:
+            logger.info(f'Migration resume: {resumed} migration(s) resumed across all guilds')
 
 
 def setup(bot):

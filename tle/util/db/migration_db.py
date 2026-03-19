@@ -142,6 +142,39 @@ class MigrationDbMixin:
             (str(guild_id),)
         ).fetchall()
 
+    def update_migration_entry_post_failed(self, original_msg_id, emoji):
+        """Mark an entry as failed during posting. Preserves all other data."""
+        self.conn.execute(
+            'UPDATE starboard_migration_entry '
+            'SET crawl_status = ? '
+            'WHERE original_msg_id = ? AND emoji = ?',
+            ('post_failed', str(original_msg_id), emoji)
+        )
+        self.conn.commit()
+
+    def reset_post_failed_entries(self, guild_id):
+        """Reset post_failed entries for retry.
+
+        Entries with source_channel_id go back to 'crawled' (will try full render),
+        entries without go back to 'deleted' (will use fallback).
+        """
+        self.conn.execute(
+            'UPDATE starboard_migration_entry SET crawl_status = CASE '
+            'WHEN source_channel_id IS NOT NULL THEN ? ELSE ? END '
+            'WHERE guild_id = ? AND crawl_status = ?',
+            ('crawled', 'deleted', str(guild_id), 'post_failed')
+        )
+        self.conn.commit()
+
+    def get_posted_migration_entries(self, guild_id):
+        """Get all entries with crawl_status='posted', ordered chronologically."""
+        return self.conn.execute(
+            'SELECT * FROM starboard_migration_entry '
+            'WHERE guild_id = ? AND crawl_status = ? '
+            'ORDER BY CAST(original_msg_id AS INTEGER) ASC',
+            (str(guild_id), 'posted')
+        ).fetchall()
+
     def get_migration_entry(self, original_msg_id, emoji):
         """Get a single migration entry."""
         return self.conn.execute(

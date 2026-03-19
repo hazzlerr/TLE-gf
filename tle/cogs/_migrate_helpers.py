@@ -5,7 +5,6 @@ Parsing old bot messages, embed serialization, and fallback message building.
 import json
 import re
 
-from tle.cogs._starboard_helpers import _parse_jump_url
 from tle.cogs.starboard import _starboard_content
 from tle import constants
 
@@ -50,7 +49,7 @@ def serialize_embed_fallback(message):
         if hasattr(embed, 'description') and embed.description:
             data['description'] = embed.description
         if hasattr(embed, 'color') and embed.color is not None:
-            data['color'] = embed.color
+            data['color'] = int(embed.color)
         if hasattr(embed, 'image') and embed.image:
             url = getattr(embed.image, 'url', None)
             if url:
@@ -110,7 +109,7 @@ def build_fallback_message(entry, fallback_json, emoji_str):
     """
     import discord
 
-    count = entry.star_count if entry.star_count else 0
+    count = entry.star_count if entry.star_count is not None else 0
     jump_url = f'https://discord.com/channels/0/0/{entry.original_msg_id}'
     content = _starboard_content(emoji_str, count, jump_url)
 
