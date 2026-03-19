@@ -388,7 +388,10 @@ _load_module('tle.util.db.cache_db_upgrades', os.path.join(_db_path, 'cache_db_u
 # starboard_db.py — standalone mixin, no heavy deps
 _load_module('tle.util.db.starboard_db', os.path.join(_db_path, 'starboard_db.py'))
 
-# user_db_conn.py imports discord.ext.commands, tle.util.codeforces_*, and starboard_db
+# migration_db.py — standalone mixin, no heavy deps
+_load_module('tle.util.db.migration_db', os.path.join(_db_path, 'migration_db.py'))
+
+# user_db_conn.py imports discord.ext.commands, tle.util.codeforces_*, starboard_db, migration_db
 # All are stubbed/loaded above, so this should work now
 _load_module('tle.util.db.user_db_conn', os.path.join(_db_path, 'user_db_conn.py'))
 
@@ -406,6 +409,8 @@ _cogs_path = os.path.join(_root, 'tle', 'cogs')
 _load_module('tle.cogs._starboard_helpers', os.path.join(_cogs_path, '_starboard_helpers.py'))
 _load_module('tle.cogs._starboard_backfill', os.path.join(_cogs_path, '_starboard_backfill.py'))
 _load_module('tle.cogs.starboard', os.path.join(_cogs_path, 'starboard.py'))
+_load_module('tle.cogs._migrate_helpers', os.path.join(_cogs_path, '_migrate_helpers.py'))
+_load_module('tle.cogs.migrate', os.path.join(_cogs_path, 'migrate.py'))
 _load_module('tle.cogs.rpoll', os.path.join(_cogs_path, 'rpoll.py'))
 _load_module('tle.cogs.codeforces', os.path.join(_cogs_path, 'codeforces.py'))
 _load_module('tle.cogs.handles', os.path.join(_cogs_path, 'handles.py'))
