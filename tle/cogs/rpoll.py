@@ -161,7 +161,7 @@ def _compute_totals_map(poll_id, formula):
 
 
 def _build_poll_embed(question, options, totals_map, vote_count, voters_map=None,
-                      expires_at=None, closed=False, formula='sum'):
+                      expires_at=None, closed=False, formula='sum', color=None):
     """Build the embed for a rating poll.
 
     Args:
@@ -219,7 +219,7 @@ def _build_poll_embed(question, options, totals_map, vote_count, voters_map=None
     embed = discord.Embed(
         title=question,
         description='\n'.join(lines),
-        color=discord_common.random_cf_color(),
+        color=color if color is not None else discord_common.random_cf_color(),
     )
     embed.set_footer(text=f'{vote_count} vote{"s" if vote_count != 1 else ""}')
     return embed
@@ -314,6 +314,11 @@ class RpollButton(discord.ui.Button):
             for row in voters:
                 voters_map.setdefault(row.option_index, []).append(int(row.user_id))
 
+        # Preserve the original embed color
+        existing_color = None
+        if interaction.message and interaction.message.embeds:
+            existing_color = interaction.message.embeds[0].color
+
         embed = _build_poll_embed(
             poll.question,
             [(opt.option_index, opt.label) for opt in options],
@@ -322,6 +327,7 @@ class RpollButton(discord.ui.Button):
             voters_map,
             expires_at=poll.expires_at,
             formula=poll.formula,
+            color=existing_color,
         )
 
         action = 'voted for' if added else 'removed vote from'
@@ -442,11 +448,6 @@ class Rpoll(commands.Cog):
                 voters_map.setdefault(row.option_index, []).append(int(row.user_id))
 
         option_pairs = [(opt.option_index, opt.label) for opt in options]
-        closed_embed = _build_poll_embed(
-            poll.question, option_pairs, totals_map, vote_count,
-            voters_map, expires_at=poll.expires_at, closed=True,
-            formula=poll.formula,
-        )
         disabled_view = _build_disabled_view(poll.poll_id, len(options))
 
         channel = self.bot.get_channel(int(poll.channel_id))
@@ -457,9 +458,25 @@ class Rpoll(commands.Cog):
                 logger.warning(f'rpoll: Could not fetch channel {poll.channel_id} for poll {poll.poll_id}')
                 return
 
-        # Edit original message to disable buttons and show "ended"
+        # Preserve the original embed color when closing
+        existing_color = None
         try:
             msg = await channel.fetch_message(int(poll.message_id))
+            if msg.embeds:
+                existing_color = msg.embeds[0].color
+        except Exception:
+            msg = None
+
+        closed_embed = _build_poll_embed(
+            poll.question, option_pairs, totals_map, vote_count,
+            voters_map, expires_at=poll.expires_at, closed=True,
+            formula=poll.formula, color=existing_color,
+        )
+
+        # Edit original message to disable buttons and show "ended"
+        try:
+            if msg is None:
+                msg = await channel.fetch_message(int(poll.message_id))
             await msg.edit(embed=closed_embed, view=disabled_view)
         except Exception as e:
             logger.warning(f'rpoll: Could not edit message for poll {poll.poll_id}: {e}')
