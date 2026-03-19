@@ -111,6 +111,7 @@ class _StubColor:
 _discord_mod.Color = _StubColor
 _discord_mod.Colour = _StubColor
 _discord_mod.DeletedReferencedMessage = type('DeletedReferencedMessage', (), {})
+_discord_mod.Object = type('Object', (), {'__init__': lambda self, *, id=None: setattr(self, 'id', id)})
 _discord_mod.NotFound = type('NotFound', (Exception,), {})
 _discord_mod.Forbidden = type('Forbidden', (Exception,), {})
 _discord_mod.HTTPException = type('HTTPException', (Exception,), {})
@@ -408,6 +409,7 @@ if 'tle.cogs' not in sys.modules:
 _cogs_path = os.path.join(_root, 'tle', 'cogs')
 _load_module('tle.cogs._starboard_helpers', os.path.join(_cogs_path, '_starboard_helpers.py'))
 _load_module('tle.cogs._starboard_backfill', os.path.join(_cogs_path, '_starboard_backfill.py'))
+_load_module('tle.cogs._starboard_render', os.path.join(_cogs_path, '_starboard_render.py'))
 _load_module('tle.cogs.starboard', os.path.join(_cogs_path, 'starboard.py'))
 _load_module('tle.cogs._migrate_helpers', os.path.join(_cogs_path, '_migrate_helpers.py'))
 _load_module('tle.cogs.migrate', os.path.join(_cogs_path, 'migrate.py'))
