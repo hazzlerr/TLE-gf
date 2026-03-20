@@ -754,3 +754,264 @@ class TestShowDeletedCommand:
             assert pos_111 < pos_999
         finally:
             self._teardown_cog()
+
+
+# =====================================================================
+# Alias merge tests
+# =====================================================================
+
+
+class TestAliasMerge:
+    """Test alias merging in the post phase and complete."""
+
+    def test_alias_map_roundtrip(self, db):
+        """set/get alias_map should round-trip correctly."""
+        db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+        db.set_migration_alias_map(str(GUILD), json.dumps({CHOC: PILL}))
+        alias_map = db.get_migration_alias_map(str(GUILD))
+        assert alias_map == {CHOC: PILL}
+
+    def test_alias_map_null_returns_empty(self, db):
+        """get_migration_alias_map returns {} when alias_map is NULL."""
+        db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+        assert db.get_migration_alias_map(str(GUILD)) == {}
+
+    def test_merge_combines_entries_for_same_msg(self, db):
+        """Two entries for the same original_msg_id should merge into one."""
+        from tle.cogs.migrate import Migrate
+        db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+        db.set_migration_alias_map(str(GUILD), json.dumps({CHOC: PILL}))
+
+        db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+        db.add_migration_entry(str(GUILD), '333', CHOC, '445', '100')
+        db.update_migration_entry_crawled('333', PILL, '500', '777', 3)
+        db.update_migration_entry_crawled('333', CHOC, '500', '777', 2)
+
+        # Add reactors: some overlap
+        db.bulk_add_reactors('333', PILL, ['u1', 'u2', 'u3'])
+        db.bulk_add_reactors('333', CHOC, ['u2', 'u3', 'u4'])
+
+        entries = db.get_migration_entries_for_posting(str(GUILD))
+        alias_map = db.get_migration_alias_map(str(GUILD))
+        merged = Migrate._merge_alias_entries(entries, alias_map, db)
+
+        assert len(merged) == 1
+        assert merged[0].emoji == PILL  # resolved to main
+        assert merged[0].star_count == 4  # u1, u2, u3, u4 de-duplicated
+        assert merged[0].original_msg_id == '333'
+
+    def test_merge_prefers_crawled_over_deleted(self, db):
+        """When merging, prefer the crawled entry (has richer data)."""
+        from tle.cogs.migrate import Migrate
+        db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+        db.set_migration_alias_map(str(GUILD), json.dumps({CHOC: PILL}))
+
+        db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+        db.add_migration_entry(str(GUILD), '333', CHOC, '445', '100')
+        db.update_migration_entry_deleted('333', PILL, '{}')
+        db.update_migration_entry_crawled('333', CHOC, '500', '777', 5)
+
+        entries = db.get_migration_entries_for_posting(str(GUILD))
+        alias_map = db.get_migration_alias_map(str(GUILD))
+        merged = Migrate._merge_alias_entries(entries, alias_map, db)
+
+        assert len(merged) == 1
+        # Should have picked the crawled entry (CHOC) as base
+        assert merged[0].crawl_status == 'crawled'
+        assert merged[0].source_channel_id == '500'
+
+    def test_merge_passthrough_single_entry(self, db):
+        """Single entry without alias passes through unchanged."""
+        from tle.cogs.migrate import Migrate
+        db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+        db.set_migration_alias_map(str(GUILD), json.dumps({CHOC: PILL}))
+
+        db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+        db.update_migration_entry_crawled('333', PILL, '500', '777', 5)
+
+        entries = db.get_migration_entries_for_posting(str(GUILD))
+        alias_map = db.get_migration_alias_map(str(GUILD))
+        merged = Migrate._merge_alias_entries(entries, alias_map, db)
+
+        assert len(merged) == 1
+        # No wrapping — original entry passed through
+        assert not hasattr(merged[0], 'all_emojis')
+
+    def test_merge_only_alias_entry_resolves_to_main(self, db):
+        """Entry with only the alias emoji resolves to the main emoji."""
+        from tle.cogs.migrate import Migrate
+        db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+        db.set_migration_alias_map(str(GUILD), json.dumps({CHOC: PILL}))
+
+        # Only chocolate entry, no pill
+        db.add_migration_entry(str(GUILD), '333', CHOC, '445', '100')
+        db.update_migration_entry_crawled('333', CHOC, '500', '777', 3)
+
+        entries = db.get_migration_entries_for_posting(str(GUILD))
+        alias_map = db.get_migration_alias_map(str(GUILD))
+        merged = Migrate._merge_alias_entries(entries, alias_map, db)
+
+        assert len(merged) == 1
+        assert merged[0].emoji == PILL  # resolved to main
+
+    def test_post_phase_with_aliases_sends_one_msg_per_original(self, db):
+        """Post phase should send one message per original, even with two emoji entries."""
+        new_channel = _FakeChannel(channel_id=200)
+        bot = _FakeBot(channels=[new_channel])
+
+        db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+        db.set_migration_alias_map(str(GUILD), json.dumps({CHOC: PILL}))
+
+        db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+        db.add_migration_entry(str(GUILD), '333', CHOC, '445', '100')
+        db.update_migration_entry_deleted('333', PILL, json.dumps({'content': 'hi'}))
+        db.update_migration_entry_deleted('333', CHOC, json.dumps({'content': 'hi'}))
+
+        from tle.cogs.migrate import Migrate
+        cog = Migrate(bot)
+        _run(cog._post_phase(GUILD, 200, {PILL, CHOC}, db))
+
+        # Only ONE message sent (merged)
+        assert len(new_channel.sent) == 1
+        # Content should reference the main emoji
+        assert PILL in new_channel.sent[0].content
+
+        # Both entries should be marked as posted
+        pill_entry = db.get_migration_entry('333', PILL)
+        choc_entry = db.get_migration_entry('333', CHOC)
+        assert pill_entry.crawl_status == 'posted'
+        assert choc_entry.crawl_status == 'posted'
+        # Both point to the same starboard message
+        assert pill_entry.new_starboard_msg_id == choc_entry.new_starboard_msg_id
+
+    def test_post_phase_without_aliases_unchanged(self, db):
+        """Post phase without alias_map should work exactly as before."""
+        new_channel = _FakeChannel(channel_id=200)
+        bot = _FakeBot(channels=[new_channel])
+
+        db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+        # No alias_map set
+
+        db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+        db.update_migration_entry_deleted('333', PILL, json.dumps({'content': 'hi'}))
+
+        from tle.cogs.migrate import Migrate
+        cog = Migrate(bot)
+        _run(cog._post_phase(GUILD, 200, {PILL}, db))
+
+        assert len(new_channel.sent) == 1
+        assert db.get_migration_entry('333', PILL).crawl_status == 'posted'
+
+    def test_complete_creates_alias_not_config(self, db):
+        """Complete should create config for main emoji only, register alias."""
+        db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+        db.set_migration_alias_map(str(GUILD), json.dumps({CHOC: PILL}))
+
+        # Set up posted entries
+        db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+        db.add_migration_entry(str(GUILD), '333', CHOC, '445', '100')
+        db.update_migration_entry_crawled('333', PILL, '500', '777', 5)
+        db.update_migration_entry_crawled('333', CHOC, '500', '777', 3)
+        db.update_migration_entry_posted('333', PILL, '888')
+        db.update_migration_entry_posted('333', CHOC, '888')
+        db.update_migration_status(str(GUILD), 'done')
+
+        # Simulate what complete does
+        migration = db.get_migration(str(GUILD))
+        alias_map = db.get_migration_alias_map(str(GUILD))
+        emojis = migration.emojis.split(',')
+        main_emojis = set(emojis) - set(alias_map.keys())
+        posted_entries = db.get_posted_migration_entries(str(GUILD))
+
+        seen = set()
+        for entry in posted_entries:
+            resolved = alias_map.get(entry.emoji, entry.emoji)
+            key = (entry.original_msg_id, resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            db.add_starboard_message_v1(
+                entry.original_msg_id, entry.new_starboard_msg_id,
+                str(GUILD), resolved, author_id=entry.author_id
+            )
+
+        for emoji in main_emojis:
+            db.add_starboard_emoji(str(GUILD), emoji, 1, 0xffaa10)
+            db.set_starboard_channel(str(GUILD), emoji, '200')
+
+        for alias_emoji, main_emoji in alias_map.items():
+            db.add_starboard_alias(str(GUILD), alias_emoji, main_emoji)
+
+        # Verify: pill config exists
+        pill_entry = db.get_starboard_entry(str(GUILD), PILL)
+        assert pill_entry is not None
+        assert pill_entry.channel_id == '200'
+
+        # Verify: chocolate has NO config (it's an alias)
+        choc_entry = db.get_starboard_entry(str(GUILD), CHOC)
+        assert choc_entry is None
+
+        # Verify: chocolate is registered as alias of pill
+        assert db.resolve_alias(str(GUILD), CHOC) == PILL
+
+        # Verify: only one starboard_message_v1 row (under pill)
+        sb = db.get_starboard_message_v1('333', PILL)
+        assert sb is not None
+        assert sb.starboard_msg_id == '888'
+        sb_choc = db.get_starboard_message_v1('333', CHOC)
+        assert sb_choc is None
+
+    def test_full_flow_with_aliases(self, db):
+        """Full migration with aliases: crawl both, merge in post, correct final state."""
+        original = _FakeMessage(
+            msg_id=333, content='Hello',
+            reactions=[
+                _FakeReaction(PILL, count=3, user_ids=[10, 11, 12]),
+                _FakeReaction(CHOC, count=2, user_ids=[11, 13]),
+            ],
+            author=_FakeUser(777, 'Author'),
+        )
+        source_channel = _FakeChannel(channel_id=222, messages=[original])
+
+        pill_bot_msg = _FakeMessage(
+            msg_id=1001,
+            content=f'{PILL} **3** | https://discord.com/channels/{GUILD}/222/333'
+        )
+        choc_bot_msg = _FakeMessage(
+            msg_id=1002,
+            content=f'{CHOC} **2** | https://discord.com/channels/{GUILD}/222/333'
+        )
+        old_channel = _FakeChannel(channel_id=100, messages=[pill_bot_msg, choc_bot_msg])
+        new_channel = _FakeChannel(channel_id=200)
+
+        bot = _FakeBot(channels=[old_channel, source_channel, new_channel])
+
+        from tle.util import codeforces_common as cf_common
+        old_db = cf_common.user_db
+        cf_common.user_db = db
+
+        try:
+            db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+            db.set_migration_alias_map(str(GUILD), json.dumps({CHOC: PILL}))
+
+            from tle.cogs.migrate import Migrate
+            cog = Migrate(bot)
+            _run(cog._run_migration(GUILD, 100, 200, {PILL, CHOC}))
+
+            migration = db.get_migration(str(GUILD))
+            assert migration.status == 'done'
+
+            # Only ONE message posted (merged)
+            assert len(new_channel.sent) == 1
+
+            # Both entries are posted
+            pill_entry = db.get_migration_entry('333', PILL)
+            choc_entry = db.get_migration_entry('333', CHOC)
+            assert pill_entry.crawl_status == 'posted'
+            assert choc_entry.crawl_status == 'posted'
+
+            # Merged star count should be 4 (users 10, 11, 12, 13 de-duped)
+            assert PILL in new_channel.sent[0].content
+            assert '4' in new_channel.sent[0].content
+        finally:
+            cf_common.user_db = old_db

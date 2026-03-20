@@ -2,15 +2,20 @@
 re-posts everything into TLE-gf's starboard system.
 
 Flow:
-  1. ;migrate start #old_channel #new_channel :emoji1: :emoji2:
+  1. ;migrate start #old_channel #new_channel :main_emoji: :alias_emoji:
   2. ;migrate status
   3. ;migrate complete #new_channel
   4. ;migrate resume  (retry after failure)
   5. ;migrate cancel
+
+The first emoji is the main emoji; subsequent emojis are aliases that get
+merged into the main emoji during posting and registered as aliases on complete.
 """
 import asyncio
+import json
 import logging
 import time
+from collections import OrderedDict
 
 import discord
 from discord.ext import commands
@@ -30,6 +35,29 @@ logger = logging.getLogger(__name__)
 
 # Rate limit delay between Discord API calls during crawl/post
 _RATE_DELAY = 1.5
+
+
+class _MergedEntry:
+    """Wraps a migration entry with merged alias data for posting.
+
+    Proxies attribute access to the underlying entry but overrides emoji
+    (always the main emoji) and star_count (merged across aliases).
+    Tracks all component emojis so the post loop can mark them all as posted.
+    """
+    __slots__ = ('_entry', '_star_count', '_main_emoji', 'all_emojis')
+
+    def __init__(self, entry, main_emoji, star_count, all_emojis):
+        self._entry = entry
+        self._main_emoji = main_emoji
+        self._star_count = star_count
+        self.all_emojis = all_emojis
+
+    def __getattr__(self, name):
+        if name == 'star_count':
+            return self._star_count
+        if name == 'emoji':
+            return self._main_emoji
+        return getattr(self._entry, name)
 
 
 class Migrate(commands.Cog):
@@ -177,6 +205,54 @@ class Migrate(commands.Cog):
         logger.info(f'Migration crawl: guild={guild_id} finished — '
                      f'{crawl_done} processed, {crawl_failed} failed')
 
+    @staticmethod
+    def _merge_alias_entries(entries, alias_map, db):
+        """Merge entries that share an original_msg_id when aliases are configured.
+
+        Groups entries by original_msg_id. For each group with multiple emojis,
+        picks the best entry (prefer crawled over deleted, prefer main emoji),
+        computes a de-duplicated reactor count, and returns a _MergedEntry.
+        Single-entry groups pass through unchanged.
+        """
+        main_emojis = set(alias_map.values())
+
+        groups = OrderedDict()
+        for entry in entries:
+            key = entry.original_msg_id
+            if key not in groups:
+                groups[key] = []
+            groups[key].append(entry)
+
+        merged = []
+        for original_msg_id, group in groups.items():
+            if len(group) == 1 and group[0].emoji not in alias_map:
+                merged.append(group[0])
+                continue
+
+            # Pick best entry: prefer crawled over deleted, prefer main emoji
+            best = group[0]
+            for entry in group:
+                is_main = entry.emoji in main_emojis
+                is_crawled = entry.crawl_status == 'crawled'
+                best_is_main = best.emoji in main_emojis
+                best_is_crawled = best.crawl_status == 'crawled'
+                if (is_crawled and not best_is_crawled) or \
+                   (is_main and not best_is_main and is_crawled == best_is_crawled):
+                    best = entry
+
+            all_emojis = [e.emoji for e in group]
+            resolved_emoji = alias_map.get(best.emoji, best.emoji)
+
+            # De-duplicated reactor count across all emojis
+            star_count = db.get_merged_reactor_count(original_msg_id, all_emojis)
+            if star_count == 0:
+                # Fall back to max of stored counts if no reactor rows
+                star_count = max((e.star_count or 0) for e in group)
+
+            merged.append(_MergedEntry(best, resolved_emoji, star_count, all_emojis))
+
+        return merged
+
     async def _post_phase(self, guild_id, new_channel_id, emoji_set, db):
         """Post crawled entries to the new starboard channel in chronological order."""
         new_channel = self.bot.get_channel(new_channel_id)
@@ -186,6 +262,12 @@ class Migrate(commands.Cog):
             return
 
         entries = db.get_migration_entries_for_posting(guild_id)
+
+        # Merge alias entries before posting
+        alias_map = db.get_migration_alias_map(guild_id)
+        if alias_map:
+            entries = self._merge_alias_entries(entries, alias_map, db)
+
         db.set_migration_post_totals(guild_id, len(entries))
 
         logger.info(f'Migration post: guild={guild_id} starting — {len(entries)} entries to post')
@@ -219,7 +301,12 @@ class Migrate(commands.Cog):
                     content, embeds = build_fallback_message(entry, entry.embed_fallback, entry.emoji)
                     sent = await new_channel.send(content=content, embeds=embeds)
 
-                db.update_migration_entry_posted(entry.original_msg_id, entry.emoji, str(sent.id))
+                # Mark all component entries as posted (merged or single)
+                if hasattr(entry, 'all_emojis'):
+                    for emoji in entry.all_emojis:
+                        db.update_migration_entry_posted(entry.original_msg_id, emoji, str(sent.id))
+                else:
+                    db.update_migration_entry_posted(entry.original_msg_id, entry.emoji, str(sent.id))
                 post_done += 1
                 db.update_migration_post_done(guild_id, post_done)
 
@@ -231,7 +318,11 @@ class Migrate(commands.Cog):
                 logger.error(f'Migration post: guild={guild_id} FAILED '
                              f'msg={entry.original_msg_id} emoji={entry.emoji}: {e}',
                              exc_info=True)
-                db.update_migration_entry_post_failed(entry.original_msg_id, entry.emoji)
+                if hasattr(entry, 'all_emojis'):
+                    for emoji in entry.all_emojis:
+                        db.update_migration_entry_post_failed(entry.original_msg_id, emoji)
+                else:
+                    db.update_migration_entry_post_failed(entry.original_msg_id, entry.emoji)
                 post_done += 1
                 post_failed += 1
                 db.update_migration_post_done(guild_id, post_done)
@@ -257,6 +348,10 @@ class Migrate(commands.Cog):
                     new_channel: discord.TextChannel, *emojis: str):
         """Start migrating from an old bot's starboard channel.
 
+        The first emoji is the main emoji. Any additional emojis are treated
+        as aliases — they'll be crawled separately but merged into the main
+        emoji during posting.
+
         Usage: ;migrate start #old-pillboard #new-pillboard :pill: :chocolate_bar:
         """
         guild_id = ctx.guild.id
@@ -271,10 +366,17 @@ class Migrate(commands.Cog):
                            f'Use `;migrate cancel` first.')
             return
 
+        main_emoji = emojis[0]
+        alias_emojis = list(emojis[1:])
+        alias_map = {alias: main_emoji for alias in alias_emojis}
+
         emoji_csv = ','.join(emojis)
         cf_common.user_db.create_migration(
             guild_id, old_channel.id, new_channel.id, emoji_csv, time.time()
         )
+
+        if alias_map:
+            cf_common.user_db.set_migration_alias_map(guild_id, json.dumps(alias_map))
 
         emoji_set = set(emojis)
         task = asyncio.create_task(
@@ -283,10 +385,15 @@ class Migrate(commands.Cog):
         self._tasks[guild_id] = task
 
         logger.info(f'Migration: guild={guild_id} started by {ctx.author} '
-                     f'old={old_channel.id} new={new_channel.id} emojis={emoji_csv}')
-        await ctx.send(f'Migration started! Crawling {old_channel.mention} for '
-                        f'{", ".join(emojis)}.\n'
-                        f'Use `;migrate status` to check progress.')
+                     f'old={old_channel.id} new={new_channel.id} emojis={emoji_csv} '
+                     f'aliases={alias_map}')
+
+        desc = f'Migration started! Crawling {old_channel.mention} for {", ".join(emojis)}.'
+        if alias_map:
+            alias_desc = ', '.join(f'{a} → {m}' for a, m in alias_map.items())
+            desc += f'\nAliases: {alias_desc}'
+        desc += '\nUse `;migrate status` to check progress.'
+        await ctx.send(desc)
 
     @migrate.command(name='status')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
@@ -302,6 +409,8 @@ class Migrate(commands.Cog):
         status_counts = cf_common.user_db.count_migration_entries_by_status(guild_id)
         counts = {r.crawl_status: r.cnt for r in status_counts}
 
+        alias_map = cf_common.user_db.get_migration_alias_map(guild_id)
+
         lines = [
             f'**Migration Status:** {migration.status}',
             f'**Emojis:** {migration.emojis}',
@@ -311,6 +420,10 @@ class Migrate(commands.Cog):
 
         if migration.status in ('posting', 'done', 'failed'):
             lines.append(f'**Post:** {migration.post_done}/{migration.post_total}')
+
+        if alias_map:
+            alias_desc = ', '.join(f'{a} → {m}' for a, m in alias_map.items())
+            lines.append(f'**Aliases:** {alias_desc}')
 
         if counts:
             parts = [f'{k}: {v}' for k, v in sorted(counts.items())]
@@ -359,34 +472,66 @@ class Migrate(commands.Cog):
         logger.info(f'Migration complete: guild={guild_id} importing {len(posted_entries)} entries '
                      f'({pf_count} post_failed entries discarded)')
 
-        # Copy posted entries into starboard tables
+        # Load alias map
+        alias_map = db.get_migration_alias_map(guild_id)
+        main_emojis = set(emojis) - set(alias_map.keys()) if alias_map else set(emojis)
+
+        # Copy posted entries into starboard tables, de-duplicating merged entries
+        seen_msgs = set()
+        imported = 0
         for entry in posted_entries:
+            resolved_emoji = alias_map.get(entry.emoji, entry.emoji) if alias_map else entry.emoji
+
+            # Skip duplicate entries from merged aliases (same original_msg_id)
+            dedup_key = (entry.original_msg_id, resolved_emoji)
+            if dedup_key in seen_msgs:
+                continue
+            seen_msgs.add(dedup_key)
+
+            # Compute merged star count if aliases exist
+            star_count = entry.star_count or 0
+            if alias_map:
+                all_family = [resolved_emoji] + [k for k, v in alias_map.items()
+                                                  if v == resolved_emoji]
+                merged_count = db.get_merged_reactor_count(entry.original_msg_id, all_family)
+                if merged_count > 0:
+                    star_count = merged_count
+
             db.add_starboard_message_v1(
                 entry.original_msg_id, entry.new_starboard_msg_id,
-                str(guild_id), entry.emoji,
+                str(guild_id), resolved_emoji,
                 author_id=entry.author_id,
                 channel_id=entry.source_channel_id
             )
-            if entry.star_count is not None and entry.star_count > 0:
+            if star_count > 0:
                 db.update_starboard_star_count(
-                    entry.original_msg_id, entry.emoji, entry.star_count
+                    entry.original_msg_id, resolved_emoji, star_count
                 )
+            imported += 1
 
-        # Create emoji configs pointing at the new channel
-        for emoji in emojis:
+        # Create emoji configs for main emojis only
+        for emoji in main_emojis:
             db.add_starboard_emoji(str(guild_id), emoji, 1, constants._DEFAULT_STAR_COLOR)
             db.set_starboard_channel(str(guild_id), emoji, new_channel.id)
+
+        # Register aliases
+        for alias_emoji, main_emoji in alias_map.items():
+            db.add_starboard_alias(str(guild_id), alias_emoji, main_emoji)
 
         # Clean up migration data
         db.delete_migration_entries(guild_id)
         db.delete_migration(guild_id)
 
-        emoji_list = ', '.join(emojis)
+        emoji_list = ', '.join(main_emojis)
+        alias_list = ', '.join(f'{a} → {m}' for a, m in alias_map.items())
         logger.info(f'Migration complete: guild={guild_id} done — '
-                     f'{len(posted_entries)} imported, emojis={emoji_list}')
-        await ctx.send(f'Migration complete! {len(posted_entries)} messages imported.\n'
-                        f'Emoji configs created for {emoji_list} in {new_channel.mention}.\n'
-                        f'Live reaction tracking is now active.')
+                     f'{imported} imported, emojis={emoji_list}, aliases={alias_list}')
+        msg = f'Migration complete! {imported} messages imported.\n'
+        msg += f'Emoji config created for {emoji_list} in {new_channel.mention}.'
+        if alias_map:
+            msg += f'\nAliases registered: {alias_list}'
+        msg += '\nLive reaction tracking is now active.'
+        await ctx.send(msg)
 
     @migrate.command(name='resume')
     @commands.has_role(constants.TLE_ADMIN)

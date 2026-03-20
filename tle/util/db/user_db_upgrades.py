@@ -332,3 +332,15 @@ def upgrade_1_11_0(db):
     ''')
     db.commit()
     logger.info('1.11.0: Starboard migration tables created')
+
+
+@registry.register('1.12.0', 'Migration alias map')
+def upgrade_1_12_0(db):
+    logger.info('1.12.0: Adding alias_map column to starboard_migration')
+    try:
+        db.execute('ALTER TABLE starboard_migration ADD COLUMN alias_map TEXT')
+        logger.info('1.12.0: Added alias_map column')
+    except Exception as e:
+        logger.debug(f'1.12.0: alias_map column already exists or error: {e}')
+    db.commit()
+    logger.info('1.12.0: Upgrade complete')

@@ -140,7 +140,8 @@ class _FakeMigrateDb(StarboardDbMixin, MigrationDbMixin):
                 last_crawled_msg_id TEXT, crawl_total INTEGER DEFAULT 0,
                 crawl_done INTEGER DEFAULT 0, crawl_failed INTEGER DEFAULT 0,
                 post_total INTEGER DEFAULT 0, post_done INTEGER DEFAULT 0,
-                started_at REAL NOT NULL)''',
+                started_at REAL NOT NULL,
+                alias_map TEXT)''',
             '''CREATE TABLE IF NOT EXISTS starboard_migration_entry (
                 guild_id TEXT NOT NULL, original_msg_id TEXT NOT NULL,
                 emoji TEXT NOT NULL, old_bot_msg_id TEXT NOT NULL,

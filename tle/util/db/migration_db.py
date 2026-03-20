@@ -4,6 +4,7 @@ Provides all DB operations needed by the starboard migration cog:
 migration lifecycle (create/get/update/delete) and migration entries
 (add/update status/query for posting/count/delete).
 """
+import json
 import logging
 
 logger = logging.getLogger(__name__)
@@ -71,6 +72,24 @@ class MigrationDbMixin:
             (post_done, str(guild_id))
         )
         self.conn.commit()
+
+    def set_migration_alias_map(self, guild_id, alias_map_json):
+        """Store the alias map (JSON string, e.g. {"🍫":"💊"})."""
+        self.conn.execute(
+            'UPDATE starboard_migration SET alias_map = ? WHERE guild_id = ?',
+            (alias_map_json, str(guild_id))
+        )
+        self.conn.commit()
+
+    def get_migration_alias_map(self, guild_id):
+        """Return the alias map as a dict, or {} if unset."""
+        row = self.conn.execute(
+            'SELECT alias_map FROM starboard_migration WHERE guild_id = ?',
+            (str(guild_id),)
+        ).fetchone()
+        if row and row.alias_map:
+            return json.loads(row.alias_map)
+        return {}
 
     def delete_migration(self, guild_id):
         """Delete the migration record for a guild."""
