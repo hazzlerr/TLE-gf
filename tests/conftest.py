@@ -117,6 +117,7 @@ _discord_mod.Forbidden = type('Forbidden', (Exception,), {})
 _discord_mod.HTTPException = type('HTTPException', (Exception,), {})
 _discord_mod.ButtonStyle = type('ButtonStyle', (), {'secondary': 2, 'primary': 1})
 _discord_mod.Interaction = type('Interaction', (), {})
+_discord_mod.TextChannel = type('TextChannel', (), {})
 
 _gi = sys.modules['gi']
 _gi.require_version = lambda *a, **kw: None

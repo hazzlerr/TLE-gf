@@ -182,6 +182,19 @@ class MigrationDbMixin:
             (str(original_msg_id), emoji)
         ).fetchone()
 
+    def get_deleted_migration_entries(self, guild_id):
+        """Get entries where the original message was deleted/inaccessible.
+
+        Identified by NULL source_channel_id (only set for successfully fetched
+        messages). Works regardless of current crawl_status (deleted, posted, etc.).
+        """
+        return self.conn.execute(
+            'SELECT * FROM starboard_migration_entry '
+            'WHERE guild_id = ? AND source_channel_id IS NULL AND crawl_status != ? '
+            'ORDER BY CAST(original_msg_id AS INTEGER) ASC',
+            (str(guild_id), 'pending')
+        ).fetchall()
+
     def delete_migration_entries(self, guild_id):
         """Delete all migration entries for a guild."""
         self.conn.execute(

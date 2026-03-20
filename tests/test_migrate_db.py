@@ -344,3 +344,63 @@ class TestCompleteIntegration:
         db.update_migration_entry_deleted('333', PILL, '{"content":"old msg"}')
         entries = db.get_migration_entries_for_posting(GUILD)
         assert entries[0].embed_fallback == '{"content":"old msg"}'
+
+
+# =====================================================================
+# Deleted entry queries
+# =====================================================================
+
+
+class TestDeletedEntryQueries:
+    def test_returns_deleted_entries(self, db):
+        db.create_migration(GUILD, '100', '200', '💊', 1000.0)
+        db.add_migration_entry(GUILD, '333', PILL, '444', '100')
+        db.update_migration_entry_deleted('333', PILL, '{"content":"hi"}')
+        entries = db.get_deleted_migration_entries(GUILD)
+        assert len(entries) == 1
+        assert entries[0].original_msg_id == '333'
+
+    def test_excludes_crawled_entries(self, db):
+        db.create_migration(GUILD, '100', '200', '💊', 1000.0)
+        db.add_migration_entry(GUILD, '333', PILL, '444', '100')
+        db.update_migration_entry_crawled('333', PILL, '500', '777', 5)
+        entries = db.get_deleted_migration_entries(GUILD)
+        assert len(entries) == 0
+
+    def test_excludes_pending_entries(self, db):
+        """Pending entries also have NULL source_channel_id but should be excluded."""
+        db.create_migration(GUILD, '100', '200', '💊', 1000.0)
+        db.add_migration_entry(GUILD, '333', PILL, '444', '100')
+        entries = db.get_deleted_migration_entries(GUILD)
+        assert len(entries) == 0
+
+    def test_includes_posted_deleted_entries(self, db):
+        """Deleted entries that have been posted still have NULL source_channel_id."""
+        db.create_migration(GUILD, '100', '200', '💊', 1000.0)
+        db.add_migration_entry(GUILD, '333', PILL, '444', '100')
+        db.update_migration_entry_deleted('333', PILL, '{}')
+        db.update_migration_entry_posted('333', PILL, '888')
+        entries = db.get_deleted_migration_entries(GUILD)
+        assert len(entries) == 1
+        assert entries[0].new_starboard_msg_id == '888'
+
+    def test_chronological_order(self, db):
+        db.create_migration(GUILD, '100', '200', '💊', 1000.0)
+        db.add_migration_entry(GUILD, '999', PILL, '444', '100')
+        db.add_migration_entry(GUILD, '111', PILL, '445', '100')
+        db.update_migration_entry_deleted('999', PILL, '{}')
+        db.update_migration_entry_deleted('111', PILL, '{}')
+        entries = db.get_deleted_migration_entries(GUILD)
+        assert entries[0].original_msg_id == '111'
+        assert entries[1].original_msg_id == '999'
+
+    def test_mixed_deleted_and_crawled(self, db):
+        """Only deleted entries returned when both types exist."""
+        db.create_migration(GUILD, '100', '200', '💊', 1000.0)
+        db.add_migration_entry(GUILD, '111', PILL, '444', '100')
+        db.add_migration_entry(GUILD, '222', PILL, '445', '100')
+        db.update_migration_entry_crawled('111', PILL, '500', '777', 5)
+        db.update_migration_entry_deleted('222', PILL, '{}')
+        entries = db.get_deleted_migration_entries(GUILD)
+        assert len(entries) == 1
+        assert entries[0].original_msg_id == '222'

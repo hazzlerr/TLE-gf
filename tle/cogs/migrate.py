@@ -440,6 +440,59 @@ class Migrate(commands.Cog):
                      f'(was status={migration.status})')
         await ctx.send(f'Migration resumed! Use `;migrate status` to check progress.')
 
+    @migrate.command(name='show-deleted')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def show_deleted(self, ctx):
+        """List deleted/inaccessible messages found during migration.
+
+        Shows links to the old bot's starboard posts so you can verify
+        which messages were lost. If already posted, also links the new post.
+
+        Usage: ;migrate show-deleted
+        """
+        guild_id = ctx.guild.id
+        migration = cf_common.user_db.get_migration(guild_id)
+
+        if migration is None:
+            await ctx.send('No migration in progress.')
+            return
+
+        entries = cf_common.user_db.get_deleted_migration_entries(guild_id)
+
+        if not entries:
+            await ctx.send('No deleted/inaccessible messages found.')
+            return
+
+        header = f'**Deleted/Inaccessible Messages ({len(entries)})**\n'
+        lines = []
+
+        for i, entry in enumerate(entries, 1):
+            old_link = (f'https://discord.com/channels/{guild_id}/'
+                        f'{entry.old_channel_id}/{entry.old_bot_msg_id}')
+            line = f'{i}. {entry.emoji} — [Old post]({old_link})'
+
+            if entry.new_starboard_msg_id:
+                new_link = (f'https://discord.com/channels/{guild_id}/'
+                            f'{migration.new_channel_id}/{entry.new_starboard_msg_id}')
+                line += f' | [New post]({new_link})'
+
+            lines.append(line)
+
+        # Paginate to fit Discord's 2000-char message limit
+        chunks = []
+        current = header
+        for line in lines:
+            if len(current) + len(line) + 1 > 1900:
+                chunks.append(current)
+                current = line
+            else:
+                current += '\n' + line
+        if current:
+            chunks.append(current)
+
+        for chunk in chunks:
+            await ctx.send(chunk)
+
     @migrate.command(name='cancel')
     @commands.has_role(constants.TLE_ADMIN)
     async def cancel(self, ctx):
