@@ -344,3 +344,15 @@ def upgrade_1_12_0(db):
         logger.debug(f'1.12.0: alias_map column already exists or error: {e}')
     db.commit()
     logger.info('1.12.0: Upgrade complete')
+
+
+@registry.register('1.13.0', 'Migration retry: last_error column')
+def upgrade_1_13_0(db):
+    logger.info('1.13.0: Adding last_error column to starboard_migration_entry')
+    try:
+        db.execute('ALTER TABLE starboard_migration_entry ADD COLUMN last_error TEXT')
+        logger.info('1.13.0: Added last_error column')
+    except Exception as e:
+        logger.debug(f'1.13.0: last_error column already exists or error: {e}')
+    db.commit()
+    logger.info('1.13.0: Upgrade complete')

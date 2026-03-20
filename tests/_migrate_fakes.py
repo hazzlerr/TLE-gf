@@ -156,6 +156,7 @@ class _FakeMigrateDb(StarboardDbMixin, MigrationDbMixin):
                 new_starboard_msg_id TEXT,
                 crawl_status TEXT NOT NULL DEFAULT 'pending',
                 embed_fallback TEXT,
+                last_error TEXT,
                 PRIMARY KEY (original_msg_id, emoji))''',
         ]:
             self.conn.execute(sql)

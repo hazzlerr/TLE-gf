@@ -413,6 +413,7 @@ _load_module('tle.cogs._starboard_backfill', os.path.join(_cogs_path, '_starboar
 _load_module('tle.cogs._starboard_render', os.path.join(_cogs_path, '_starboard_render.py'))
 _load_module('tle.cogs.starboard', os.path.join(_cogs_path, 'starboard.py'))
 _load_module('tle.cogs._migrate_helpers', os.path.join(_cogs_path, '_migrate_helpers.py'))
+_load_module('tle.cogs._migrate_retry', os.path.join(_cogs_path, '_migrate_retry.py'))
 _load_module('tle.cogs.migrate', os.path.join(_cogs_path, 'migrate.py'))
 _load_module('tle.cogs.rpoll', os.path.join(_cogs_path, 'rpoll.py'))
 _load_module('tle.cogs.codeforces', os.path.join(_cogs_path, 'codeforces.py'))

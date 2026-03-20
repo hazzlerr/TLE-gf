@@ -29,11 +29,16 @@ from tle.cogs._migrate_helpers import (
     build_fallback_message,
 )
 from tle.cogs.starboard import Starboard, _starboard_content
+from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
 
 logger = logging.getLogger(__name__)
 
 # Rate limit delay between Discord API calls during crawl/post
 _RATE_DELAY = 1.5
+
+# Retry parameters for Discord API calls
+_MAX_RETRIES = 5
+_RETRY_BASE_DELAY = 2.0
 
 
 
@@ -86,6 +91,16 @@ class Migrate(commands.Cog):
         finally:
             self._tasks.pop(guild_id, None)
 
+    async def _fetch_source_channel(self, source_channel_id):
+        """Get a source channel, falling back to fetch_channel for threads."""
+        ch = self.bot.get_channel(source_channel_id)
+        if ch is not None:
+            return ch
+        return await discord_retry(
+            lambda: self.bot.fetch_channel(source_channel_id),
+            max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
+        )
+
     async def _crawl_phase(self, guild_id, old_channel_id, emoji_set, db):
         """Crawl the old bot's channel, collecting entries and reactors."""
         old_channel = self.bot.get_channel(old_channel_id)
@@ -125,38 +140,44 @@ class Migrate(commands.Cog):
                 str(old_bot_msg.id), str(old_channel_id)
             )
 
-            # Try to fetch the original message
+            # Try to fetch the original message with retry
             original_msg = None
-            source_channel = self.bot.get_channel(source_channel_id)
-            if source_channel is None:
-                # Threads (especially archived) aren't in the channel cache.
-                # Fall back to an API call.
-                try:
-                    source_channel = await self.bot.fetch_channel(source_channel_id)
-                except (discord.NotFound, discord.Forbidden):
-                    pass
-                except discord.HTTPException as e:
-                    logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done + 1}] '
-                                   f'fetch_channel failed for {source_channel_id}: {e}')
             try:
-                if source_channel is not None:
-                    original_msg = await source_channel.fetch_message(original_msg_id)
+                source_channel = await self._fetch_source_channel(source_channel_id)
+                original_msg = await discord_retry(
+                    lambda: source_channel.fetch_message(original_msg_id),
+                    max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
+                )
             except (discord.NotFound, discord.Forbidden):
-                pass
-            except discord.HTTPException as e:
-                logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done + 1}] '
-                               f'HTTP error for msg={original_msg_id}: {e}')
+                pass  # permanent — message deleted or no access
+            except RetryExhaustedError as e:
+                db.update_migration_entry_retry_exhausted(
+                    str(original_msg_id), emoji_str, str(e.last_exception))
+                crawl_done += 1
+                crawl_failed += 1
+                logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done}] '
+                               f'emoji={emoji_str} msg={original_msg_id} RETRY EXHAUSTED: {e}')
+                db.update_migration_checkpoint(
+                    guild_id, str(old_bot_msg.id), crawl_done, crawl_failed)
+                await asyncio.sleep(_RATE_DELAY)
+                continue
 
             if original_msg is not None:
                 # Count reactions and collect reactors for this emoji
                 star_count = 0
                 reactor_ids = []
-                for reaction in original_msg.reactions:
-                    if _emoji_str(reaction.emoji) == emoji_str:
-                        star_count = reaction.count
-                        async for user in reaction.users():
-                            reactor_ids.append(str(user.id))
-                        break
+                try:
+                    for reaction in original_msg.reactions:
+                        if _emoji_str(reaction.emoji) == emoji_str:
+                            star_count = reaction.count
+                            async for user in reaction.users():
+                                reactor_ids.append(str(user.id))
+                            break
+                except discord.HTTPException as e:
+                    # Reactor fetch failed — use displayed count, no reactor rows
+                    logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done + 1}] '
+                                   f'reactor fetch failed for msg={original_msg_id}: {e}')
+                    star_count = displayed_count
 
                 if reactor_ids:
                     db.bulk_add_reactors(str(original_msg_id), emoji_str, reactor_ids)
@@ -197,6 +218,7 @@ class Migrate(commands.Cog):
 
         Each entry is posted with its original emoji — no merging or conversion.
         Alias resolution only happens later during ;migrate complete.
+        Uses exponential backoff on transient Discord errors.
         """
         new_channel = self.bot.get_channel(new_channel_id)
         if new_channel is None:
@@ -218,30 +240,39 @@ class Migrate(commands.Cog):
                 if entry.crawl_status == 'crawled' and entry.source_channel_id:
                     # Try to fetch original and build proper starboard message
                     original_msg = None
-                    source_channel = self.bot.get_channel(int(entry.source_channel_id))
-                    if source_channel is None:
-                        try:
-                            source_channel = await self.bot.fetch_channel(int(entry.source_channel_id))
-                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                            pass
-                    if source_channel is not None:
-                        try:
-                            original_msg = await source_channel.fetch_message(int(entry.original_msg_id))
-                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                            pass
+                    try:
+                        source_channel = await self._fetch_source_channel(
+                            int(entry.source_channel_id))
+                        original_msg = await discord_retry(
+                            lambda: source_channel.fetch_message(int(entry.original_msg_id)),
+                            max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
+                        )
+                    except (discord.NotFound, discord.Forbidden):
+                        pass  # permanent — fall through to fallback
+                    except RetryExhaustedError:
+                        pass  # fall through to fallback
 
                     if original_msg is not None:
                         content, embeds, files = await Starboard.build_starboard_message(
                             original_msg, entry.emoji, entry.star_count, color
                         )
-                        sent = await new_channel.send(content=content, embeds=embeds, files=files)
+                        sent = await discord_retry(
+                            lambda: new_channel.send(content=content, embeds=embeds, files=files),
+                            max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
+                        )
                     else:
                         content, embeds = build_fallback_message(entry, entry.embed_fallback, entry.emoji)
-                        sent = await new_channel.send(content=content, embeds=embeds)
+                        sent = await discord_retry(
+                            lambda: new_channel.send(content=content, embeds=embeds),
+                            max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
+                        )
                 else:
                     # Deleted original — use fallback
                     content, embeds = build_fallback_message(entry, entry.embed_fallback, entry.emoji)
-                    sent = await new_channel.send(content=content, embeds=embeds)
+                    sent = await discord_retry(
+                        lambda: new_channel.send(content=content, embeds=embeds),
+                        max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
+                    )
 
                 db.update_migration_entry_posted(entry.original_msg_id, entry.emoji, str(sent.id))
                 post_done += 1
@@ -250,12 +281,20 @@ class Migrate(commands.Cog):
                 logger.info(f'Migration post: guild={guild_id} [{post_done}/{len(entries)}] '
                             f'msg={entry.original_msg_id} emoji={entry.emoji}')
 
+            except RetryExhaustedError as e:
+                logger.error(f'Migration post: guild={guild_id} RETRY EXHAUSTED '
+                             f'msg={entry.original_msg_id} emoji={entry.emoji}: {e}')
+                db.update_migration_entry_retry_exhausted(
+                    entry.original_msg_id, entry.emoji, str(e.last_exception))
+                post_done += 1
+                post_failed += 1
+                db.update_migration_post_done(guild_id, post_done)
             except Exception as e:
-                # Mark as post_failed — won't be retried unless user runs ;migrate resume
                 logger.error(f'Migration post: guild={guild_id} FAILED '
                              f'msg={entry.original_msg_id} emoji={entry.emoji}: {e}',
                              exc_info=True)
-                db.update_migration_entry_post_failed(entry.original_msg_id, entry.emoji)
+                db.update_migration_entry_retry_exhausted(
+                    entry.original_msg_id, entry.emoji, str(e))
                 post_done += 1
                 post_failed += 1
                 db.update_migration_post_done(guild_id, post_done)
@@ -392,11 +431,13 @@ class Migrate(commands.Cog):
         failed_counts = db.count_migration_entries_by_status(guild_id)
         failed_map = {r.crawl_status: r.cnt for r in failed_counts}
         pf_count = failed_map.get('post_failed', 0)
+        re_count = failed_map.get('retry_exhausted', 0)
+        total_failed = pf_count + re_count
 
-        if pf_count > 0:
-            await ctx.send(f'**Warning:** {pf_count} entries failed to post and will not be '
-                           f'imported. Use `;migrate resume` to retry them, or proceed with '
-                           f'`;migrate complete {new_channel.mention}` again to accept the loss.')
+        if total_failed > 0:
+            await ctx.send(f'**Warning:** {total_failed} entries failed and will not be '
+                           f'imported. Use `;migrate retry-failed` to retry them, or proceed '
+                           f'with `;migrate complete {new_channel.mention}` again to accept the loss.')
             # Only warn once — if they call complete again, we skip this check
             # by checking if there are actually posted entries to import
             if not posted_entries:
@@ -560,6 +601,100 @@ class Migrate(commands.Cog):
             lines.append(line)
 
         # Paginate to fit Discord's 2000-char message limit
+        chunks = []
+        current = header
+        for line in lines:
+            if len(current) + len(line) + 1 > 1900:
+                chunks.append(current)
+                current = line
+            else:
+                current += '\n' + line
+        if current:
+            chunks.append(current)
+
+        for chunk in chunks:
+            await ctx.send(chunk)
+
+    @migrate.command(name='retry-failed')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def retry_failed(self, ctx):
+        """Retry messages that failed after all retry attempts.
+
+        Resets retry_exhausted entries and re-runs the post phase for them.
+
+        Usage: ;migrate retry-failed
+        """
+        guild_id = ctx.guild.id
+        migration = cf_common.user_db.get_migration(guild_id)
+
+        if migration is None:
+            await ctx.send('No migration in progress.')
+            return
+
+        if guild_id in self._tasks:
+            task = self._tasks[guild_id]
+            if not task.done():
+                await ctx.send('Migration task is already running.')
+                return
+
+        db = cf_common.user_db
+        entries = db.get_retry_exhausted_entries(guild_id)
+
+        if not entries:
+            await ctx.send('No failed entries to retry.')
+            return
+
+        count = len(entries)
+        db.reset_retry_exhausted_entries(guild_id)
+        db.update_migration_status(guild_id, 'posting')
+
+        emoji_set = set(migration.emojis.split(','))
+        task = asyncio.create_task(
+            self._run_migration(
+                guild_id,
+                int(migration.old_channel_id),
+                int(migration.new_channel_id),
+                emoji_set
+            )
+        )
+        self._tasks[guild_id] = task
+
+        logger.info(f'Migration retry-failed: guild={guild_id} by {ctx.author} '
+                     f'retrying {count} entries')
+        await ctx.send(f'Retrying {count} failed entries. Use `;migrate status` to check progress.')
+
+    @migrate.command(name='view-failed')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def view_failed(self, ctx):
+        """List messages that failed after all retry attempts.
+
+        Shows links to the old bot's starboard posts and the error message.
+
+        Usage: ;migrate view-failed
+        """
+        guild_id = ctx.guild.id
+        migration = cf_common.user_db.get_migration(guild_id)
+
+        if migration is None:
+            await ctx.send('No migration in progress.')
+            return
+
+        entries = cf_common.user_db.get_retry_exhausted_entries(guild_id)
+
+        if not entries:
+            await ctx.send('No failed entries.')
+            return
+
+        header = f'**Failed Messages ({len(entries)})**\n'
+        lines = []
+
+        for i, entry in enumerate(entries, 1):
+            old_link = (f'https://discord.com/channels/{guild_id}/'
+                        f'{entry.old_channel_id}/{entry.old_bot_msg_id}')
+            error = (entry.last_error or 'unknown')[:80]
+            line = f'{i}. {entry.emoji} — [Old post]({old_link}) — `{error}`'
+            lines.append(line)
+
         chunks = []
         current = header
         for line in lines:

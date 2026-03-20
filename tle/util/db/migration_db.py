@@ -201,6 +201,41 @@ class MigrationDbMixin:
             (str(original_msg_id), emoji)
         ).fetchone()
 
+    def update_migration_entry_retry_exhausted(self, original_msg_id, emoji, error_msg):
+        """Mark an entry as retry_exhausted with the last error message."""
+        self.conn.execute(
+            'UPDATE starboard_migration_entry '
+            'SET crawl_status = ?, last_error = ? '
+            'WHERE original_msg_id = ? AND emoji = ?',
+            ('retry_exhausted', error_msg, str(original_msg_id), emoji)
+        )
+        self.conn.commit()
+
+    def get_retry_exhausted_entries(self, guild_id):
+        """Get entries that failed after all retries, ordered chronologically."""
+        return self.conn.execute(
+            'SELECT * FROM starboard_migration_entry '
+            'WHERE guild_id = ? AND crawl_status = ? '
+            'ORDER BY CAST(original_msg_id AS INTEGER) ASC',
+            (str(guild_id), 'retry_exhausted')
+        ).fetchall()
+
+    def reset_retry_exhausted_entries(self, guild_id):
+        """Reset retry_exhausted entries for retry.
+
+        Entries with source_channel_id go back to 'crawled',
+        entries without go back to 'deleted'. Clears last_error.
+        """
+        self.conn.execute(
+            'UPDATE starboard_migration_entry '
+            'SET crawl_status = CASE '
+            'WHEN source_channel_id IS NOT NULL THEN ? ELSE ? END, '
+            'last_error = NULL '
+            'WHERE guild_id = ? AND crawl_status = ?',
+            ('crawled', 'deleted', str(guild_id), 'retry_exhausted')
+        )
+        self.conn.commit()
+
     def get_deleted_migration_entries(self, guild_id):
         """Get entries where the original message was deleted/inaccessible.
 
