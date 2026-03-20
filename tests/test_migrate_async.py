@@ -1119,3 +1119,149 @@ class TestAliasSupport:
             assert set(choc_reactors) == {'11', '13'}
         finally:
             cf_common.user_db = old_db
+
+
+# =====================================================================
+# Tests verifying crawl ignores old bot's display emoji
+# =====================================================================
+
+CATSHOCK = ':catshock:'
+
+
+class TestCrawlIgnoresDisplayEmoji:
+    """Verify the crawl phase scans original message reactions, not the old bot's display emoji."""
+
+    def _make_old_bot_msg(self, msg_id, emoji_str, count, orig_channel_id, orig_msg_id):
+        content = f'{emoji_str} **{count}** | https://discord.com/channels/{GUILD}/{orig_channel_id}/{orig_msg_id}'
+        return _FakeMessage(msg_id=msg_id, content=content)
+
+    def test_display_catshock_original_has_pill(self, db):
+        """Old bot displays :catshock: but original has pill reactions -- pill entry crawled."""
+        original = _FakeMessage(
+            msg_id=333, content='Hello',
+            reactions=[_FakeReaction(PILL, count=4, user_ids=[10, 11, 12, 13])],
+            author=_FakeUser(777, 'Author'),
+        )
+        source_channel = _FakeChannel(channel_id=222, messages=[original])
+
+        old_bot_msg = self._make_old_bot_msg(1001, CATSHOCK, 4, 222, 333)
+        old_channel = _FakeChannel(channel_id=100, messages=[old_bot_msg])
+
+        bot = _FakeBot(channels=[old_channel, source_channel])
+        db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+
+        from tle.cogs.migrate import Migrate
+        cog = Migrate(bot)
+        _run(cog._crawl_phase(GUILD, 100, {PILL}, db))
+
+        # Pill entry should exist with correct data from the original's reaction
+        pill_entry = db.get_migration_entry('333', PILL)
+        assert pill_entry is not None
+        assert pill_entry.crawl_status == 'crawled'
+        assert pill_entry.author_id == '777'
+        assert pill_entry.star_count == 4
+
+        # Reactors should be recorded
+        reactors = db.get_reactors('333', PILL)
+        assert set(reactors) == {'10', '11', '12', '13'}
+
+        # No entry for catshock itself (it's not in emoji_set)
+        catshock_entry = db.get_migration_entry('333', CATSHOCK)
+        assert catshock_entry is None
+
+    def test_display_catshock_original_has_pill_and_choc(self, db):
+        """Old bot displays :catshock: but original has both pill AND chocolate reactions."""
+        original = _FakeMessage(
+            msg_id=333, content='Hello',
+            reactions=[
+                _FakeReaction(PILL, count=3, user_ids=[10, 11, 12]),
+                _FakeReaction(CHOC, count=2, user_ids=[20, 21]),
+            ],
+            author=_FakeUser(777, 'Author'),
+        )
+        source_channel = _FakeChannel(channel_id=222, messages=[original])
+
+        old_bot_msg = self._make_old_bot_msg(1001, CATSHOCK, 5, 222, 333)
+        old_channel = _FakeChannel(channel_id=100, messages=[old_bot_msg])
+
+        bot = _FakeBot(channels=[old_channel, source_channel])
+        db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+
+        from tle.cogs.migrate import Migrate
+        cog = Migrate(bot)
+        _run(cog._crawl_phase(GUILD, 100, {PILL, CHOC}, db))
+
+        # Both pill and chocolate entries should be crawled
+        pill_entry = db.get_migration_entry('333', PILL)
+        assert pill_entry is not None
+        assert pill_entry.crawl_status == 'crawled'
+        assert pill_entry.star_count == 3
+
+        choc_entry = db.get_migration_entry('333', CHOC)
+        assert choc_entry is not None
+        assert choc_entry.crawl_status == 'crawled'
+        assert choc_entry.star_count == 2
+
+        # Reactors per emoji
+        pill_reactors = db.get_reactors('333', PILL)
+        assert set(pill_reactors) == {'10', '11', '12'}
+        choc_reactors = db.get_reactors('333', CHOC)
+        assert set(choc_reactors) == {'20', '21'}
+
+    def test_display_pill_original_no_matching_reactions(self, db):
+        """Old bot displays pill but original has no matching reactions -- handled as deleted."""
+        original = _FakeMessage(
+            msg_id=333, content='Hello',
+            reactions=[_FakeReaction('\N{THUMBS UP SIGN}', count=5, user_ids=[10, 11, 12, 13, 14])],
+            author=_FakeUser(777, 'Author'),
+        )
+        source_channel = _FakeChannel(channel_id=222, messages=[original])
+
+        old_bot_msg = self._make_old_bot_msg(1001, PILL, 3, 222, 333)
+        old_channel = _FakeChannel(channel_id=100, messages=[old_bot_msg])
+
+        bot = _FakeBot(channels=[old_channel, source_channel])
+        db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+
+        from tle.cogs.migrate import Migrate
+        cog = Migrate(bot)
+        _run(cog._crawl_phase(GUILD, 100, {PILL}, db))
+
+        # Entry should be stored as deleted (using the parsed emoji as fallback)
+        entry = db.get_migration_entry('333', PILL)
+        assert entry is not None
+        assert entry.crawl_status == 'deleted'
+
+    def test_two_old_bot_msgs_same_original_no_duplicates(self, db):
+        """Two old bot messages (pill and catshock) reference the same original -- no duplicate entries."""
+        original = _FakeMessage(
+            msg_id=333, content='Hello',
+            reactions=[_FakeReaction(PILL, count=3, user_ids=[10, 11, 12])],
+            author=_FakeUser(777, 'Author'),
+        )
+        source_channel = _FakeChannel(channel_id=222, messages=[original])
+
+        # Two different old bot messages referencing the same original msg 333
+        pill_bot_msg = self._make_old_bot_msg(1001, PILL, 3, 222, 333)
+        catshock_bot_msg = self._make_old_bot_msg(1002, CATSHOCK, 3, 222, 333)
+        old_channel = _FakeChannel(channel_id=100, messages=[pill_bot_msg, catshock_bot_msg])
+
+        bot = _FakeBot(channels=[old_channel, source_channel])
+        db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+
+        from tle.cogs.migrate import Migrate
+        cog = Migrate(bot)
+        _run(cog._crawl_phase(GUILD, 100, {PILL}, db))
+
+        # Only one pill entry should exist (idempotent via INSERT OR IGNORE)
+        entry = db.get_migration_entry('333', PILL)
+        assert entry is not None
+        assert entry.crawl_status == 'crawled'
+        assert entry.star_count == 3
+
+        # Verify only one entry total for this original message
+        rows = db.conn.execute(
+            'SELECT COUNT(*) AS cnt FROM starboard_migration_entry WHERE original_msg_id = ?',
+            ('333',)
+        ).fetchone()
+        assert rows.cnt == 1
