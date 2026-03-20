@@ -450,9 +450,9 @@ class Migrate(commands.Cog):
             await ctx.send(f'**Warning:** {total_failed} entries failed and will not be '
                            f'imported. Use `;migrate retry-failed` to retry them, or proceed '
                            f'with `;migrate complete {new_channel.mention}` again to accept the loss.')
-            # Only warn once — if they call complete again, we skip this check
-            # by checking if there are actually posted entries to import
             if not posted_entries:
+                await ctx.send('No posted entries to import. Use `;migrate retry-failed` '
+                               'to retry failed entries first.')
                 return
 
         logger.info(f'Migration complete: guild={guild_id} importing {len(posted_entries)} entries '
@@ -546,8 +546,9 @@ class Migrate(commands.Cog):
 
         db = cf_common.user_db
 
-        # Reset post_failed entries so they can be retried
+        # Reset failed entries so they can be retried
         db.reset_post_failed_entries(guild_id)
+        db.reset_retry_exhausted_entries(guild_id)
 
         # Determine which phase to resume.
         # crawl_total is set at the END of the crawl phase. If it's 0, the crawl

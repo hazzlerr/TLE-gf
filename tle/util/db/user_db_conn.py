@@ -456,7 +456,8 @@ class UserDbConn(StarboardDbMixin, MigrationDbMixin):
                 crawl_failed        INTEGER DEFAULT 0,
                 post_total          INTEGER DEFAULT 0,
                 post_done           INTEGER DEFAULT 0,
-                started_at          REAL NOT NULL
+                started_at          REAL NOT NULL,
+                alias_map           TEXT
             )
         ''')
         self.conn.execute('''
@@ -472,6 +473,7 @@ class UserDbConn(StarboardDbMixin, MigrationDbMixin):
                 new_starboard_msg_id TEXT,
                 crawl_status        TEXT NOT NULL DEFAULT 'pending',
                 embed_fallback      TEXT,
+                last_error          TEXT,
                 PRIMARY KEY (original_msg_id, emoji)
             )
         ''')
