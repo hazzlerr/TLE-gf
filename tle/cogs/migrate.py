@@ -42,6 +42,10 @@ _RETRY_BASE_DELAY = 2.0
 
 
 
+def _pause_kvs_key(guild_id):
+    return f'migration_pre_pause_status:{guild_id}'
+
+
 class Migrate(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -746,6 +750,7 @@ class Migrate(commands.Cog):
         event = self._paused.pop(guild_id, None)
         if event is not None:
             event.set()
+        cf_common.user_db.kvs_set(_pause_kvs_key(guild_id), '')
         task = self._tasks.pop(guild_id, None)
         if task and not task.done():
             task.cancel()
@@ -806,21 +811,28 @@ class Migrate(commands.Cog):
         """
         guild_id = ctx.guild.id
 
-        if guild_id not in self._tasks or self._tasks[guild_id].done():
-            await ctx.send('No migration task is running.')
+        migration = cf_common.user_db.get_migration(guild_id)
+        if migration is None:
+            await ctx.send('No migration in progress.')
             return
 
-        event = self._paused.get(guild_id)
-        if event is not None and not event.is_set():
-            await ctx.send('Migration is already paused. Use `;migrate unpause` to continue.')
+        if migration.status == 'paused':
+            await ctx.send('Migration is already paused.')
             return
 
-        event = asyncio.Event()
-        # Event starts clear = paused
-        self._paused[guild_id] = event
-        logger.info(f'Migration pause: guild={guild_id} by {ctx.author}')
-        await ctx.send('Migration will pause after the current message. '
-                       'Use `;migrate unpause` to continue.')
+        # Store the current status in KVS so unpause can restore it (survives restart)
+        cf_common.user_db.kvs_set(_pause_kvs_key(guild_id), migration.status)
+        cf_common.user_db.update_migration_status(guild_id, 'paused')
+
+        # If a task is running, block it with an event
+        if guild_id in self._tasks and not self._tasks[guild_id].done():
+            event = asyncio.Event()
+            self._paused[guild_id] = event
+
+        logger.info(f'Migration pause: guild={guild_id} by {ctx.author} '
+                     f'(was {migration.status})')
+        await ctx.send('Migration paused. Use `;migrate unpause` to continue. '
+                       'Safe to restart the server — it will NOT auto-resume.')
 
     @migrate.command(name='unpause')
     @commands.has_role(constants.TLE_ADMIN)
@@ -830,16 +842,40 @@ class Migrate(commands.Cog):
         Usage: ;migrate unpause
         """
         guild_id = ctx.guild.id
-        event = self._paused.get(guild_id)
+        migration = cf_common.user_db.get_migration(guild_id)
 
-        if event is None or event.is_set():
+        if migration is None or migration.status != 'paused':
             await ctx.send('Migration is not paused.')
             return
 
-        event.set()
-        self._paused.pop(guild_id, None)
-        logger.info(f'Migration unpause: guild={guild_id} by {ctx.author}')
-        await ctx.send('Migration unpaused.')
+        # Restore the previous status from KVS
+        kvs_key = _pause_kvs_key(guild_id)
+        prev_status = cf_common.user_db.kvs_get(kvs_key) or 'crawling'
+        cf_common.user_db.update_migration_status(guild_id, prev_status)
+        cf_common.user_db.kvs_set(kvs_key, '')  # clean up
+
+        # Unblock the in-memory event if a task is waiting
+        event = self._paused.pop(guild_id, None)
+        if event is not None:
+            event.set()
+            logger.info(f'Migration unpause: guild={guild_id} by {ctx.author} '
+                         f'(restored to {prev_status}, task still running)')
+            await ctx.send('Migration unpaused.')
+        else:
+            # No running task (server was restarted while paused) — re-launch
+            emoji_set = set(migration.emojis.split(','))
+            task = asyncio.create_task(
+                self._run_migration(
+                    guild_id,
+                    int(migration.old_channel_id),
+                    int(migration.new_channel_id),
+                    emoji_set
+                )
+            )
+            self._tasks[guild_id] = task
+            logger.info(f'Migration unpause: guild={guild_id} by {ctx.author} '
+                         f'(restored to {prev_status}, re-launched task)')
+            await ctx.send('Migration unpaused and re-launched.')
 
     @migrate.command(name='cancel')
     @commands.has_role(constants.TLE_ADMIN)
@@ -855,10 +891,11 @@ class Migrate(commands.Cog):
         logger.info(f'Migration cancel: guild={guild_id} by {ctx.author} '
                      f'(was status={migration.status})')
 
-        # Unpause if paused (so the task can receive the cancel)
+        # Clean up pause state
         event = self._paused.pop(guild_id, None)
         if event is not None:
             event.set()
+        cf_common.user_db.kvs_set(_pause_kvs_key(guild_id), '')
 
         # Cancel background task if running
         task = self._tasks.pop(guild_id, None)

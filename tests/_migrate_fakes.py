@@ -162,9 +162,24 @@ class _FakeMigrateDb(StarboardDbMixin, MigrationDbMixin):
                 embed_fallback TEXT,
                 last_error TEXT,
                 PRIMARY KEY (original_msg_id, emoji))''',
+            '''CREATE TABLE IF NOT EXISTS kvs (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL)''',
         ]:
             self.conn.execute(sql)
         self.conn.commit()
+
+    def kvs_set(self, key, value):
+        self.conn.execute(
+            'INSERT OR REPLACE INTO kvs (key, value) VALUES (?, ?)',
+            (key, value)
+        )
+        self.conn.commit()
+
+    def kvs_get(self, key):
+        row = self.conn.execute(
+            'SELECT value FROM kvs WHERE key = ?', (key,)
+        ).fetchone()
+        return row[0] if row else None
 
     def close(self):
         self.conn.close()

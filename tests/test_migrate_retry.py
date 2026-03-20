@@ -641,23 +641,85 @@ class TestPauseUnpause:
         assert db.get_migration_entry('111', PILL).crawl_status == 'posted'
         assert db.get_migration_entry('222', PILL).crawl_status == 'posted'
 
-    def test_pause_no_task_running(self, db):
-        """Pause with no running task should report an error."""
+    def test_pause_no_migration(self, db):
+        """Pause with no migration should report an error."""
         from tle.cogs.migrate import Migrate
-        cog = Migrate(_FakeBot())
+        from tle.util import codeforces_common as cf_common
+        old_db = cf_common.user_db
+        cf_common.user_db = db
+        try:
+            cog = Migrate(_FakeBot())
+            ctx = _FakeCtx()
+            _run(cog.pause.__wrapped__(cog, ctx))
+            assert 'No migration' in ctx.sent[0]
+        finally:
+            cf_common.user_db = old_db
 
-        ctx = _FakeCtx()
-        _run(cog.pause.__wrapped__(cog, ctx))
-        assert 'No migration task' in ctx.sent[0]
+    def test_pause_survives_restart(self, db):
+        """Paused status is persisted in DB — on_ready should NOT resume it."""
+        from tle.cogs.migrate import Migrate
+        from tle.util import codeforces_common as cf_common
+        old_db = cf_common.user_db
+        cf_common.user_db = db
+        try:
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            db.update_migration_status(str(GUILD), 'paused')
+
+            # Simulate on_ready — paused should NOT be resumed
+            migration = db.get_migration(str(GUILD))
+            assert migration.status == 'paused'
+            # on_ready only resumes 'crawling' and 'posting'
+            assert migration.status not in ('crawling', 'posting')
+        finally:
+            cf_common.user_db = old_db
+
+    def test_unpause_after_restart_relaunches(self, db):
+        """Unpause after server restart should re-launch the task."""
+        from tle.cogs.migrate import Migrate
+        from tle.util import codeforces_common as cf_common
+        old_db = cf_common.user_db
+        cf_common.user_db = db
+        try:
+            new_channel = _FakeChannel(channel_id=200)
+            bot = _FakeBot(channels=[new_channel])
+            cog = Migrate(bot)
+
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            db.set_migration_crawl_total(str(GUILD), 1)
+            db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+            db.update_migration_entry_deleted('333', PILL, json.dumps({
+                'content': f'{PILL} **3** | https://discord.com/channels/{GUILD}/100/333'}))
+            # Simulate: was posting, got paused, server restarted
+            db.kvs_set(f'migration_pre_pause_status:{GUILD}', 'posting')
+            db.update_migration_status(str(GUILD), 'paused')
+
+            # No in-memory event exists (server restarted)
+            assert GUILD not in cog._paused
+
+            ctx = _FakeCtx()
+            _run(cog.unpause.__wrapped__(cog, ctx))
+
+            # Should have restored status and launched task
+            assert 're-launched' in ctx.sent[0]
+            migration = db.get_migration(str(GUILD))
+            assert migration.status != 'paused'
+        finally:
+            cf_common.user_db = old_db
 
     def test_unpause_not_paused(self, db):
         """Unpause when not paused should report an error."""
         from tle.cogs.migrate import Migrate
-        cog = Migrate(_FakeBot())
-
-        ctx = _FakeCtx()
-        _run(cog.unpause.__wrapped__(cog, ctx))
-        assert 'not paused' in ctx.sent[0]
+        from tle.util import codeforces_common as cf_common
+        old_db = cf_common.user_db
+        cf_common.user_db = db
+        try:
+            cog = Migrate(_FakeBot())
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            ctx = _FakeCtx()
+            _run(cog.unpause.__wrapped__(cog, ctx))
+            assert 'not paused' in ctx.sent[0]
+        finally:
+            cf_common.user_db = old_db
 
     def test_cancel_unpauses_first(self, db):
         """Cancel should unpause to allow the task to receive cancellation."""
