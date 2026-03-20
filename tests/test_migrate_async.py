@@ -10,6 +10,21 @@ from tests._migrate_fakes import (
 from tle.cogs._migrate_helpers import build_fallback_message
 
 
+class _FakeGuild:
+    def __init__(self, guild_id=GUILD):
+        self.id = guild_id
+
+
+class _FakeCtx:
+    """Minimal ctx for testing command methods directly."""
+    def __init__(self, guild_id=GUILD):
+        self.guild = _FakeGuild(guild_id)
+        self.sent = []
+
+    async def send(self, content=None, **kwargs):
+        self.sent.append(content)
+
+
 # =====================================================================
 # Async crawl phase tests
 # =====================================================================
@@ -540,3 +555,202 @@ class TestCompleteWarning:
         counts = db.count_migration_entries_by_status(str(GUILD))
         by_status = {r.crawl_status: r.cnt for r in counts}
         assert by_status.get('post_failed', 0) == 0
+
+
+# =====================================================================
+# ;migrate show-deleted command tests
+# =====================================================================
+
+
+class TestShowDeletedCommand:
+    """Test the ;migrate show-deleted command."""
+
+    def _make_cog(self, db):
+        from tle.util import codeforces_common as cf_common
+        from tle.cogs.migrate import Migrate
+        self._old_db = cf_common.user_db
+        cf_common.user_db = db
+        bot = _FakeBot()
+        return Migrate(bot)
+
+    def _teardown_cog(self):
+        from tle.util import codeforces_common as cf_common
+        cf_common.user_db = self._old_db
+
+    def _call_show_deleted(self, cog, ctx):
+        """Call the underlying async function, bypassing the discord.py stub."""
+        _run(cog.show_deleted.__wrapped__(cog, ctx))
+
+    def test_no_migration(self, db):
+        """Should report no migration when none exists."""
+        cog = self._make_cog(db)
+        try:
+            ctx = _FakeCtx()
+            self._call_show_deleted(cog, ctx)
+            assert len(ctx.sent) == 1
+            assert 'No migration in progress' in ctx.sent[0]
+        finally:
+            self._teardown_cog()
+
+    def test_no_deleted_entries(self, db):
+        """Should report no deleted messages when all entries are crawled."""
+        cog = self._make_cog(db)
+        try:
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+            db.update_migration_entry_crawled('333', PILL, '500', '777', 5)
+
+            ctx = _FakeCtx()
+            self._call_show_deleted(cog, ctx)
+            assert len(ctx.sent) == 1
+            assert 'No deleted/inaccessible messages found' in ctx.sent[0]
+        finally:
+            self._teardown_cog()
+
+    def test_shows_deleted_entries_with_old_post_links(self, db):
+        """Should list deleted entries with links to the old bot's starboard posts."""
+        cog = self._make_cog(db)
+        try:
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+            db.update_migration_entry_deleted('333', PILL, '{}')
+
+            ctx = _FakeCtx()
+            self._call_show_deleted(cog, ctx)
+            assert len(ctx.sent) == 1
+            msg = ctx.sent[0]
+            assert 'Deleted/Inaccessible Messages (1)' in msg
+            assert f'https://discord.com/channels/{GUILD}/100/444' in msg
+            assert PILL in msg
+        finally:
+            self._teardown_cog()
+
+    def test_shows_new_post_link_after_posting(self, db):
+        """After posting, should include a link to the new starboard post too."""
+        cog = self._make_cog(db)
+        try:
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+            db.update_migration_entry_deleted('333', PILL, '{}')
+            db.update_migration_entry_posted('333', PILL, '888')
+
+            ctx = _FakeCtx()
+            self._call_show_deleted(cog, ctx)
+            msg = ctx.sent[0]
+            # Old post link
+            assert f'https://discord.com/channels/{GUILD}/100/444' in msg
+            # New post link (uses migration's new_channel_id=200)
+            assert f'https://discord.com/channels/{GUILD}/200/888' in msg
+            assert 'Old post' in msg
+            assert 'New post' in msg
+        finally:
+            self._teardown_cog()
+
+    def test_multiple_deleted_entries(self, db):
+        """Should list all deleted entries numbered sequentially."""
+        cog = self._make_cog(db)
+        try:
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            db.add_migration_entry(str(GUILD), '111', PILL, '441', '100')
+            db.add_migration_entry(str(GUILD), '222', PILL, '442', '100')
+            db.add_migration_entry(str(GUILD), '333', PILL, '443', '100')
+            db.update_migration_entry_deleted('111', PILL, '{}')
+            db.update_migration_entry_deleted('222', PILL, '{}')
+            db.update_migration_entry_deleted('333', PILL, '{}')
+
+            ctx = _FakeCtx()
+            self._call_show_deleted(cog, ctx)
+            msg = ctx.sent[0]
+            assert 'Deleted/Inaccessible Messages (3)' in msg
+            assert '1.' in msg
+            assert '2.' in msg
+            assert '3.' in msg
+        finally:
+            self._teardown_cog()
+
+    def test_mixed_deleted_and_crawled(self, db):
+        """Only deleted entries should appear, not crawled ones."""
+        cog = self._make_cog(db)
+        try:
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            db.add_migration_entry(str(GUILD), '111', PILL, '441', '100')
+            db.add_migration_entry(str(GUILD), '222', PILL, '442', '100')
+            db.update_migration_entry_crawled('111', PILL, '500', '777', 5)
+            db.update_migration_entry_deleted('222', PILL, '{}')
+
+            ctx = _FakeCtx()
+            self._call_show_deleted(cog, ctx)
+            msg = ctx.sent[0]
+            assert 'Deleted/Inaccessible Messages (1)' in msg
+            # Only msg 222's old bot post should appear
+            assert '442' in msg
+            assert '441' not in msg
+        finally:
+            self._teardown_cog()
+
+    def test_multiple_emojis_deleted(self, db):
+        """Same original message deleted for different emojis should show both."""
+        cog = self._make_cog(db)
+        try:
+            db.create_migration(str(GUILD), '100', '200', f'{PILL},{CHOC}', 1000.0)
+            db.add_migration_entry(str(GUILD), '333', PILL, '444', '100')
+            db.add_migration_entry(str(GUILD), '333', CHOC, '445', '100')
+            db.update_migration_entry_deleted('333', PILL, '{}')
+            db.update_migration_entry_deleted('333', CHOC, '{}')
+
+            ctx = _FakeCtx()
+            self._call_show_deleted(cog, ctx)
+            msg = ctx.sent[0]
+            assert 'Deleted/Inaccessible Messages (2)' in msg
+            assert PILL in msg
+            assert CHOC in msg
+        finally:
+            self._teardown_cog()
+
+    def test_pagination_splits_long_output(self, db):
+        """Should send multiple messages when output exceeds Discord's char limit."""
+        # Use a realistic-length guild ID so links are long enough to trigger pagination
+        long_guild = 111222333444555666
+        cog = self._make_cog(db)
+        try:
+            old_ch = '100200300400500600'
+            db.create_migration(str(long_guild), old_ch, '200300400500600700', PILL, 1000.0)
+            for i in range(25):
+                msg_id = str(900100200300400000 + i)
+                bot_msg_id = str(800100200300400000 + i)
+                db.add_migration_entry(str(long_guild), msg_id, PILL, bot_msg_id, old_ch)
+                db.update_migration_entry_deleted(msg_id, PILL, '{}')
+
+            ctx = _FakeCtx(guild_id=long_guild)
+            self._call_show_deleted(cog, ctx)
+            # Should have sent multiple messages
+            assert len(ctx.sent) > 1
+            # All messages should be within Discord's limit
+            for msg in ctx.sent:
+                assert len(msg) <= 1900
+            # All 25 entries should be accounted for
+            all_text = '\n'.join(ctx.sent)
+            assert '25.' in all_text
+        finally:
+            self._teardown_cog()
+
+    def test_chronological_order(self, db):
+        """Entries should be listed oldest-first (by snowflake ID)."""
+        cog = self._make_cog(db)
+        try:
+            db.create_migration(str(GUILD), '100', '200', PILL, 1000.0)
+            # Add out of order
+            db.add_migration_entry(str(GUILD), '999', PILL, '449', '100')
+            db.add_migration_entry(str(GUILD), '111', PILL, '441', '100')
+            db.update_migration_entry_deleted('999', PILL, '{}')
+            db.update_migration_entry_deleted('111', PILL, '{}')
+
+            ctx = _FakeCtx()
+            self._call_show_deleted(cog, ctx)
+            msg = ctx.sent[0]
+            # 111 should appear before 999 (as entry 1 vs entry 2)
+            pos_111 = msg.index('441')  # old_bot_msg_id for 111
+            pos_999 = msg.index('449')  # old_bot_msg_id for 999
+            assert pos_111 < pos_999
+        finally:
+            self._teardown_cog()
