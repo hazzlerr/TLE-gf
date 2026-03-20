@@ -172,6 +172,10 @@ class Migrate(commands.Cog):
                 await asyncio.sleep(_RATE_DELAY)
                 continue
 
+            # Always save the old bot's message as fallback — even for crawled
+            # entries, the original might be temporarily unavailable during posting
+            fallback = serialize_embed_fallback(old_bot_msg)
+
             if original_msg is not None:
                 # Count reactions and collect reactors for this emoji
                 star_count = 0
@@ -195,7 +199,7 @@ class Migrate(commands.Cog):
                 db.update_migration_entry_crawled(
                     str(original_msg_id), emoji_str,
                     str(source_channel_id), str(original_msg.author.id),
-                    star_count
+                    star_count, fallback
                 )
                 crawl_done += 1
                 logger.info(f'Migration crawl: guild={guild_id} [{crawl_done}] '

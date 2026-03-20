@@ -98,54 +98,64 @@ def serialize_embed_fallback(message):
 
 
 def build_fallback_message(entry, fallback_json, emoji_str):
-    """Build a (content, embeds) tuple for a deleted original message.
+    """Build a (content, embeds) tuple that copies the old bot's starboard post.
 
-    Uses the serialized fallback data to reconstruct a reasonable starboard
-    message for messages whose originals are no longer fetchable.
+    The fallback JSON contains the old bot's original content line and embeds,
+    serialized by serialize_embed_fallback(). This function reproduces them
+    as faithfully as possible so the new post looks identical to the old one.
 
-    entry: a DB row with .star_count and .original_msg_id
+    entry: a DB row with .star_count, .original_msg_id, .guild_id, .source_channel_id
     fallback_json: JSON string from serialize_embed_fallback()
-    emoji_str: the emoji string for the starboard content line
+    emoji_str: the emoji string (used only if fallback has no content)
     """
     import discord
 
-    count = entry.star_count if entry.star_count is not None else 0
-    guild_id = getattr(entry, 'guild_id', None) or '0'
-    channel_id = getattr(entry, 'source_channel_id', None) or '0'
-    jump_url = f'https://discord.com/channels/{guild_id}/{channel_id}/{entry.original_msg_id}'
-    content = _starboard_content(emoji_str, count, jump_url)
-
-    embeds = []
+    data = {}
     if fallback_json:
         try:
             data = json.loads(fallback_json)
         except (json.JSONDecodeError, TypeError):
             data = {}
 
-        desc = data.get('content')
-        embed_list = data.get('embeds', [])
-        if desc or embed_list:
-            main_embed = discord.Embed(
-                color=constants._DEFAULT_STAR_COLOR,
-                description=desc or None,
+    # Use the old bot's original content line if available — it already has
+    # the correct emoji, count, and jump URL. Only build our own if missing.
+    content = data.get('content')
+    if not content:
+        count = entry.star_count if entry.star_count is not None else 0
+        guild_id = getattr(entry, 'guild_id', None) or '0'
+        channel_id = getattr(entry, 'source_channel_id', None) or '0'
+        jump_url = f'https://discord.com/channels/{guild_id}/{channel_id}/{entry.original_msg_id}'
+        content = _starboard_content(emoji_str, count, jump_url)
+
+    # Rebuild each embed from the serialized data
+    embeds = []
+    for embed_data in data.get('embeds', []):
+        embed = discord.Embed(
+            title=embed_data.get('title'),
+            description=embed_data.get('description'),
+            color=embed_data.get('color', constants._DEFAULT_STAR_COLOR),
+        )
+        if embed_data.get('author'):
+            author = embed_data['author']
+            embed.set_author(
+                name=author.get('name', 'Unknown'),
+                icon_url=author.get('icon_url'),
+                url=author.get('url'),
             )
-            if embed_list:
-                first = embed_list[0]
-                if first.get('author'):
-                    author = first['author']
-                    main_embed.set_author(
-                        name=author.get('name', 'Unknown'),
-                        icon_url=author.get('icon_url'),
-                        url=author.get('url'),
-                    )
-                if first.get('image_url'):
-                    main_embed.set_image(url=first['image_url'])
-                for field in first.get('fields', []):
-                    main_embed.add_field(
-                        name=field.get('name', ''),
-                        value=field.get('value', ''),
-                        inline=field.get('inline', True),
-                    )
-            embeds.append(main_embed)
+        if embed_data.get('image_url'):
+            embed.set_image(url=embed_data['image_url'])
+        for field in embed_data.get('fields', []):
+            embed.add_field(
+                name=field.get('name', ''),
+                value=field.get('value', ''),
+                inline=field.get('inline', True),
+            )
+        if embed_data.get('footer'):
+            footer = embed_data['footer']
+            embed.set_footer(
+                text=footer.get('text', ''),
+                icon_url=footer.get('icon_url'),
+            )
+        embeds.append(embed)
 
     return content, embeds

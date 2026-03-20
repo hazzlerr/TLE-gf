@@ -112,14 +112,15 @@ class MigrationDbMixin:
         self.conn.commit()
 
     def update_migration_entry_crawled(self, original_msg_id, emoji, source_channel_id,
-                                       author_id, star_count):
+                                       author_id, star_count, embed_fallback=None):
         """Mark an entry as crawled with resolved data."""
         self.conn.execute(
             'UPDATE starboard_migration_entry '
-            'SET crawl_status = ?, source_channel_id = ?, author_id = ?, star_count = ? '
+            'SET crawl_status = ?, source_channel_id = ?, author_id = ?, star_count = ?, '
+            'embed_fallback = ? '
             'WHERE original_msg_id = ? AND emoji = ?',
             ('crawled', str(source_channel_id), str(author_id), star_count,
-             str(original_msg_id), emoji)
+             embed_fallback, str(original_msg_id), emoji)
         )
         self.conn.commit()
 
