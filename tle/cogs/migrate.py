@@ -142,16 +142,7 @@ class Migrate(commands.Cog):
             if parsed is None:
                 continue
 
-            emoji_str, displayed_count, msg_guild_id, source_channel_id, original_msg_id = parsed
-
-            if emoji_str not in emoji_set:
-                continue
-
-            # Add entry (idempotent for resume)
-            db.add_migration_entry(
-                guild_id, str(original_msg_id), emoji_str,
-                str(old_bot_msg.id), str(old_channel_id)
-            )
+            _parsed_emoji, displayed_count, msg_guild_id, source_channel_id, original_msg_id = parsed
 
             # Try to fetch the original message with retry
             original_msg = None
@@ -164,12 +155,16 @@ class Migrate(commands.Cog):
             except (discord.NotFound, discord.Forbidden):
                 pass  # permanent — message deleted or no access
             except RetryExhaustedError as e:
+                db.add_migration_entry(
+                    guild_id, str(original_msg_id), _parsed_emoji,
+                    str(old_bot_msg.id), str(old_channel_id)
+                )
                 db.update_migration_entry_retry_exhausted(
-                    str(original_msg_id), emoji_str, str(e.last_exception))
+                    str(original_msg_id), _parsed_emoji, str(e.last_exception))
                 crawl_done += 1
                 crawl_failed += 1
                 logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done}] '
-                               f'emoji={emoji_str} msg={original_msg_id} RETRY EXHAUSTED: {e}')
+                               f'msg={original_msg_id} RETRY EXHAUSTED: {e}')
                 db.update_migration_checkpoint(
                     guild_id, str(old_bot_msg.id), crawl_done, crawl_failed)
                 await self._wait_if_paused(guild_id)
@@ -181,37 +176,67 @@ class Migrate(commands.Cog):
             fallback = serialize_embed_fallback(old_bot_msg)
 
             if original_msg is not None:
-                # Count reactions and collect reactors for this emoji
-                star_count = 0
-                reactor_ids = []
-                try:
-                    for reaction in original_msg.reactions:
-                        if _emoji_str(reaction.emoji) == emoji_str:
-                            star_count = reaction.count
-                            async for user in reaction.users():
-                                reactor_ids.append(str(user.id))
-                            break
-                except discord.HTTPException as e:
-                    # Reactor fetch failed — use displayed count, no reactor rows
-                    logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done + 1}] '
-                                   f'reactor fetch failed for msg={original_msg_id}: {e}')
-                    star_count = displayed_count
+                # Scan ALL reactions on the original message for any emoji we care about.
+                # Don't trust the old bot's display emoji — just look at the actual reactions.
+                found_any = False
+                for reaction in original_msg.reactions:
+                    emoji_str = _emoji_str(reaction.emoji)
+                    if emoji_str not in emoji_set:
+                        continue
+                    found_any = True
 
-                if reactor_ids:
-                    db.bulk_add_reactors(str(original_msg_id), emoji_str, reactor_ids)
+                    # Add entry (idempotent for resume)
+                    db.add_migration_entry(
+                        guild_id, str(original_msg_id), emoji_str,
+                        str(old_bot_msg.id), str(old_channel_id)
+                    )
 
-                db.update_migration_entry_crawled(
-                    str(original_msg_id), emoji_str,
-                    str(source_channel_id), str(original_msg.author.id),
-                    star_count, fallback
-                )
+                    star_count = reaction.count
+                    reactor_ids = []
+                    try:
+                        async for user in reaction.users():
+                            reactor_ids.append(str(user.id))
+                    except discord.HTTPException as e:
+                        logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done + 1}] '
+                                       f'reactor fetch failed for msg={original_msg_id} '
+                                       f'emoji={emoji_str}: {e}')
+
+                    if reactor_ids:
+                        db.bulk_add_reactors(str(original_msg_id), emoji_str, reactor_ids)
+
+                    db.update_migration_entry_crawled(
+                        str(original_msg_id), emoji_str,
+                        str(source_channel_id), str(original_msg.author.id),
+                        star_count, fallback
+                    )
+                    logger.info(f'Migration crawl: guild={guild_id} [{crawl_done + 1}] '
+                                f'emoji={emoji_str} msg={original_msg_id} '
+                                f'author={original_msg.author} count={star_count}')
+
+                if not found_any:
+                    # Original exists but has no matching reactions — store as deleted
+                    # with the parsed emoji so it still gets a fallback post
+                    emoji_str = _parsed_emoji
+                    db.add_migration_entry(
+                        guild_id, str(original_msg_id), emoji_str,
+                        str(old_bot_msg.id), str(old_channel_id)
+                    )
+                    db.update_migration_entry_deleted(
+                        str(original_msg_id), emoji_str, fallback
+                    )
+
                 crawl_done += 1
                 logger.info(f'Migration crawl: guild={guild_id} [{crawl_done}] '
-                            f'emoji={emoji_str} msg={original_msg_id} '
-                            f'author={original_msg.author} count={star_count}')
+                            f'msg={original_msg_id} done')
             else:
-                # Original message deleted, inaccessible, or channel gone
+                # Original message deleted, inaccessible, or channel gone.
+                # Use the parsed emoji from the old bot's message header.
+                emoji_str = _parsed_emoji
                 fallback = serialize_embed_fallback(old_bot_msg)
+                db.add_migration_entry(
+                    guild_id, str(original_msg_id), emoji_str,
+                    str(old_bot_msg.id), str(old_channel_id)
+                )
                 db.update_migration_entry_deleted(
                     str(original_msg_id), emoji_str, fallback
                 )

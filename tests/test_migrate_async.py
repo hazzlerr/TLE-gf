@@ -1102,18 +1102,20 @@ class TestAliasSupport:
             migration = db.get_migration(str(GUILD))
             assert migration.status == 'done'
 
-            # Two messages posted (one per emoji, each as-is)
-            assert len(new_channel.sent) == 2
-
-            # Both entries are posted
+            # Both entries are posted (one per emoji found on original message)
             pill_entry = db.get_migration_entry('333', PILL)
             choc_entry = db.get_migration_entry('333', CHOC)
             assert pill_entry.crawl_status == 'posted'
             assert choc_entry.crawl_status == 'posted'
 
-            # Each post shows its original emoji
-            contents = [m.content for m in new_channel.sent]
-            assert any(PILL in c for c in contents)
-            assert any(CHOC in c for c in contents)
+            # Both entries have correct star counts from actual reactions
+            assert pill_entry.star_count == 3
+            assert choc_entry.star_count == 2
+
+            # Reactors stored per emoji
+            pill_reactors = db.get_reactors('333', PILL)
+            choc_reactors = db.get_reactors('333', CHOC)
+            assert set(pill_reactors) == {'10', '11', '12'}
+            assert set(choc_reactors) == {'11', '13'}
         finally:
             cf_common.user_db = old_db
