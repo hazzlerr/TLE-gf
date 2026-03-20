@@ -253,11 +253,35 @@ class Migrate(commands.Cog):
         post_done = 0
         post_failed = 0
 
+        # Get the old channel for fetching old bot messages on the fly
+        old_channel = self.bot.get_channel(int(
+            db.get_migration(guild_id).old_channel_id))
+
         for entry in entries:
             try:
-                # Always copy the old bot's message exactly — same content,
-                # same embeds. No re-fetching, no re-rendering.
-                content, embeds = build_fallback_message(entry, entry.embed_fallback, entry.emoji)
+                # If we have the old bot's message data, use it directly.
+                # Otherwise fetch it on the fly from the old channel.
+                if entry.embed_fallback:
+                    content, embeds = build_fallback_message(
+                        entry, entry.embed_fallback, entry.emoji)
+                elif old_channel is not None:
+                    try:
+                        old_bot_msg = await discord_retry(
+                            lambda: old_channel.fetch_message(int(entry.old_bot_msg_id)),
+                            max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
+                        )
+                        # Save it so we don't fetch again on retry
+                        fallback = serialize_embed_fallback(old_bot_msg)
+                        db.set_embed_fallback(entry.original_msg_id, entry.emoji, fallback)
+                        content, embeds = build_fallback_message(
+                            entry, fallback, entry.emoji)
+                    except (discord.NotFound, discord.Forbidden, RetryExhaustedError):
+                        content, embeds = build_fallback_message(
+                            entry, None, entry.emoji)
+                else:
+                    content, embeds = build_fallback_message(
+                        entry, None, entry.emoji)
+
                 sent = await discord_retry(
                     lambda: new_channel.send(content=content, embeds=embeds),
                     max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
@@ -760,36 +784,6 @@ class Migrate(commands.Cog):
 
         # Reset all entries back to crawled/deleted
         db.reset_all_entries_for_repost(guild_id)
-
-        # Backfill missing embed_fallback by reading old bot messages
-        missing = db.get_entries_missing_fallback(guild_id)
-        if missing:
-            await ctx.send(f'Backfilling {len(missing)} entries with missing embed data '
-                           f'from old channel...')
-            old_channel = self.bot.get_channel(int(migration.old_channel_id))
-            if old_channel is not None:
-                # Build lookup: old_bot_msg_id -> list of entries
-                by_bot_msg = {}
-                for entry in missing:
-                    by_bot_msg.setdefault(entry.old_bot_msg_id, []).append(entry)
-
-                filled = 0
-                for bot_msg_id, entries_for_msg in by_bot_msg.items():
-                    try:
-                        old_bot_msg = await discord_retry(
-                            lambda: old_channel.fetch_message(int(bot_msg_id)),
-                            max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
-                        )
-                        fallback = serialize_embed_fallback(old_bot_msg)
-                        for entry in entries_for_msg:
-                            db.set_embed_fallback(entry.original_msg_id, entry.emoji, fallback)
-                            filled += 1
-                    except (discord.NotFound, discord.Forbidden, RetryExhaustedError) as e:
-                        logger.warning(f'Migration restart-post: could not fetch old bot msg '
-                                       f'{bot_msg_id}: {e}')
-                    await asyncio.sleep(_RATE_DELAY)
-                await ctx.send(f'Backfilled {filled}/{len(missing)} entries.')
-
         db.update_migration_status(guild_id, 'posting')
         db.set_migration_post_totals(guild_id, 0)
         db.update_migration_post_done(guild_id, 0)
