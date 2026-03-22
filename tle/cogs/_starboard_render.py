@@ -186,8 +186,20 @@ async def build_starboard_message(message, emoji_str, count, color):
                 if e.type == 'image' and e.url:
                     embed.set_image(url=e.url)
                     break
-                if e.type == 'gifv' and e.video and e.video.url:
-                    embed.set_image(url=e.video.url)
+                if e.type == 'gifv':
+                    # Tenor/Giphy gifv embeds: thumbnail is a static PNG,
+                    # video is an MP4 (can't use in set_image).  Swapping
+                    # the extension on the proxy URL to .gif gives us the
+                    # animated version via Discord's CDN proxy.
+                    proxy = getattr(e.thumbnail, 'proxy_url', None) or ''
+                    if proxy.rsplit('.', 1)[-1] in ('png', 'jpg', 'jpeg', 'webp'):
+                        embed.set_image(url=proxy.rsplit('.', 1)[0] + '.gif')
+                    elif e.thumbnail and e.thumbnail.url:
+                        raw = str(e.thumbnail.url)
+                        if raw.rsplit('.', 1)[-1] in ('png', 'jpg', 'jpeg', 'webp'):
+                            embed.set_image(url=raw.rsplit('.', 1)[0] + '.gif')
+                        else:
+                            embed.set_image(url=raw)
                     break
                 if e.type == 'rich' and e.image and e.image.url:
                     embed.set_image(url=e.image.url)
