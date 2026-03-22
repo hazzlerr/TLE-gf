@@ -501,6 +501,51 @@ class TestBuildStarboardMessage:
         assert embeds[0].description == 'Parent msg'
         assert embeds[1].description == 'Child msg'
 
+    def test_reply_embed_shows_video_attachment_as_field(self):
+        """Video in the replied-to message should appear as an Attachment field."""
+        ref_msg = _FakeMessage(
+            content='Check this clip',
+            attachments=[_FakeAttachment('clip.mp4', url='https://cdn.example.com/clip.mp4')],
+        )
+        ref = _FakeReference(message_id=444, resolved=ref_msg)
+        msg = _FakeMessage(content='Nice!', reference=ref)
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        reply_embed = embeds[0]
+        field_names = [f['name'] for f in reply_embed.fields]
+        assert 'Attachment' in field_names
+        assert '`clip.mp4`' in reply_embed.fields[0]['value']
+
+    def test_reply_embed_shows_other_attachment_as_field(self):
+        """Non-image attachment (PDF, ZIP) in replied-to message should appear as field."""
+        ref_msg = _FakeMessage(
+            content='Here is the doc',
+            attachments=[_FakeAttachment('notes.pdf')],
+        )
+        ref = _FakeReference(message_id=444, resolved=ref_msg)
+        msg = _FakeMessage(content='Thanks', reference=ref)
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
+        reply_embed = embeds[0]
+        field_names = [f['name'] for f in reply_embed.fields]
+        assert 'Attachment' in field_names
+        assert '`notes.pdf`' in reply_embed.fields[0]['value']
+
+    def test_reply_embed_video_and_image(self):
+        """Reply to message with both image and video: image in embed, video as field."""
+        ref_msg = _FakeMessage(
+            content='',
+            attachments=[
+                _FakeAttachment('photo.png', url='https://cdn.example.com/photo.png'),
+                _FakeAttachment('clip.mp4', url='https://cdn.example.com/clip.mp4'),
+            ],
+        )
+        ref = _FakeReference(message_id=444, resolved=ref_msg)
+        msg = _FakeMessage(content='Wow', reference=ref)
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        reply_embed = embeds[0]
+        assert reply_embed.image_url == 'https://cdn.example.com/photo.png'
+        field_names = [f['name'] for f in reply_embed.fields]
+        assert 'Attachment' in field_names
+
     def test_long_content_truncated(self):
         msg = _FakeMessage(content='x' * 5000)
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))

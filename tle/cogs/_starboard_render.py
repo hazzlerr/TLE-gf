@@ -148,12 +148,24 @@ async def build_starboard_message(message, emoji_str, count, color):
                 reply_embed.description = text
 
             # Pull image from the referenced message's attachments
+            # and note video/other attachments for field display.
             ref_image_url = None
+            ref_other_attachments = []
             for att in ref_msg.attachments:
                 ext = att.filename.lower().rsplit('.', 1)[-1] if '.' in att.filename else ''
                 if ext in _IMAGE_EXTENSIONS:
-                    ref_image_url = att.url
-                    break
+                    if ref_image_url is None:
+                        ref_image_url = att.url
+                elif ext in _VIDEO_EXTENSIONS:
+                    ref_other_attachments.append(att)
+                else:
+                    ref_other_attachments.append(att)
+
+            for att in ref_other_attachments:
+                safe_name = att.filename.replace('`', '\u02CB')
+                reply_embed.add_field(
+                    name='Attachment', value=f'`{safe_name}`', inline=False
+                )
 
             # Fall back to the referenced message's embeds
             if not ref_image_url and ref_msg.embeds:
