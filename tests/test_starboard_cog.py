@@ -501,6 +501,51 @@ class TestBuildStarboardMessage:
         assert embeds[0].description == 'Parent msg'
         assert embeds[1].description == 'Child msg'
 
+    def test_reply_embed_skipped_when_ref_msg_empty(self):
+        """Reply to a message with no text, no attachments, no embeds should skip reply embed."""
+        ref_msg = _FakeMessage(content='', attachments=[], embeds=[])
+        ref = _FakeReference(message_id=444, resolved=ref_msg)
+        msg = _FakeMessage(content='Replying to nothing', reference=ref)
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        # Only the main embed, no empty reply embed
+        assert len(embeds) == 1
+        assert embeds[0].description == 'Replying to nothing'
+
+    def test_reply_embed_present_when_ref_has_text(self):
+        """Reply embed should still appear when ref_msg has text."""
+        ref_msg = _FakeMessage(content='I have text')
+        ref = _FakeReference(message_id=444, resolved=ref_msg)
+        msg = _FakeMessage(content='Reply', reference=ref)
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert len(embeds) == 2
+        assert embeds[0].description == 'I have text'
+
+    def test_reply_embed_present_when_ref_has_only_image(self):
+        """Reply embed should appear when ref_msg has only an image attachment."""
+        ref_msg = _FakeMessage(
+            content='',
+            attachments=[_FakeAttachment('photo.png', url='https://cdn.example.com/photo.png')],
+        )
+        ref = _FakeReference(message_id=444, resolved=ref_msg)
+        msg = _FakeMessage(content='Nice pic', reference=ref)
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert len(embeds) == 2
+        assert embeds[0].image_url == 'https://cdn.example.com/photo.png'
+
+    def test_reply_embed_present_when_ref_has_only_video(self):
+        """Reply embed should appear when ref_msg has only a video (shown as field)."""
+        ref_msg = _FakeMessage(
+            content='',
+            attachments=[_FakeAttachment('clip.mp4', url='https://cdn.example.com/clip.mp4')],
+        )
+        ref = _FakeReference(message_id=444, resolved=ref_msg)
+        msg = _FakeMessage(content='Cool clip', reference=ref)
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert len(embeds) == 2
+        reply_embed = embeds[0]
+        field_names = [f['name'] for f in reply_embed.fields]
+        assert 'Attachment' in field_names
+
     def test_reply_embed_shows_video_attachment_as_field(self):
         """Video in the replied-to message should appear as an Attachment field."""
         ref_msg = _FakeMessage(

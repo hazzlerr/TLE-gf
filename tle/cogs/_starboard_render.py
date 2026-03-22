@@ -195,7 +195,16 @@ async def build_starboard_message(message, emoji_str, count, color):
             if ref_image_url:
                 reply_embed.set_image(url=ref_image_url)
 
-            embeds.append(reply_embed)
+            # Only include the reply embed if it has useful content
+            # (description, image, or attachment fields). An embed with
+            # just an author header + timestamp looks empty and ugly.
+            has_content = (
+                reply_embed.description
+                or reply_embed.image_url
+                or reply_embed.fields
+            )
+            if has_content:
+                embeds.append(reply_embed)
         except Exception:
             logger.debug(f'Could not fetch referenced message {message.reference.message_id}')
 
