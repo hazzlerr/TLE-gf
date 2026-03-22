@@ -372,6 +372,41 @@ class TestBuildStarboardMessage:
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
         assert len(embeds) == 1  # Only main embed
 
+    def test_gifv_embed_uses_video_url(self):
+        """Tenor GIFs (gifv embeds) should use video.url for animated GIF, not static thumbnail."""
+        class FakeVideo:
+            url = 'https://media.tenor.com/abc/gif.gif'
+        class FakeThumbnail:
+            url = 'https://media.tenor.com/abc/static.png'
+        class FakeGifvEmbed:
+            type = 'gifv'
+            url = 'https://tenor.com/view/funny-12345'
+            video = FakeVideo()
+            image = None
+            thumbnail = FakeThumbnail()
+        msg = _FakeMessage(content='', embeds=[FakeGifvEmbed()])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        main_embed = embeds[0]
+        # Should use the animated video URL, not the static thumbnail
+        assert main_embed.image_url == 'https://media.tenor.com/abc/gif.gif'
+
+    def test_gifv_embed_not_carried_over(self):
+        """gifv auto-embeds should not be carried over (same as image/video)."""
+        class FakeVideo:
+            url = 'https://media.tenor.com/abc/gif.gif'
+        class FakeThumbnail:
+            url = 'https://media.tenor.com/abc/static.png'
+        class FakeGifvEmbed:
+            type = 'gifv'
+            url = 'https://tenor.com/view/funny-12345'
+            video = FakeVideo()
+            image = None
+            thumbnail = FakeThumbnail()
+        msg = _FakeMessage(content='Check this out', embeds=[FakeGifvEmbed()])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        # Only main embed — gifv should not be carried over
+        assert len(embeds) == 1
+
     def test_embeds_capped_at_10(self):
         """Discord allows max 10 embeds per message."""
         class FakeRichEmbed:

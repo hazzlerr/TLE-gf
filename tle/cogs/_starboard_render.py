@@ -186,6 +186,9 @@ async def build_starboard_message(message, emoji_str, count, color):
                 if e.type == 'image' and e.url:
                     embed.set_image(url=e.url)
                     break
+                if e.type == 'gifv' and e.video and e.video.url:
+                    embed.set_image(url=e.video.url)
+                    break
                 if e.type == 'rich' and e.image and e.image.url:
                     embed.set_image(url=e.image.url)
                     break
