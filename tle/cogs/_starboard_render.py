@@ -146,6 +146,43 @@ async def build_starboard_message(message, emoji_str, count, color):
                 if len(text) > 4096:
                     text = text[:4093] + '...'
                 reply_embed.description = text
+
+            # Pull image from the referenced message's attachments
+            ref_image_url = None
+            for att in ref_msg.attachments:
+                ext = att.filename.lower().rsplit('.', 1)[-1] if '.' in att.filename else ''
+                if ext in _IMAGE_EXTENSIONS:
+                    ref_image_url = att.url
+                    break
+
+            # Fall back to the referenced message's embeds
+            if not ref_image_url and ref_msg.embeds:
+                for e in ref_msg.embeds:
+                    if e.type == 'image' and e.url:
+                        ref_image_url = e.url
+                        break
+                    if e.type == 'gifv':
+                        thumb_url = getattr(e.thumbnail, 'url', None) or ''
+                        gif_url = re.sub(
+                            r'(media\.tenor\.com/[^/]+?)AAAA[a-zA-Z0-9](/[^.]+)\.\w+$',
+                            r'\1AAAAC\2.gif',
+                            thumb_url,
+                        )
+                        if gif_url != thumb_url:
+                            ref_image_url = gif_url
+                        elif thumb_url:
+                            ref_image_url = thumb_url
+                        break
+                    if e.type == 'rich' and e.image and e.image.url:
+                        ref_image_url = e.image.url
+                        break
+                    if e.thumbnail and e.thumbnail.url:
+                        ref_image_url = e.thumbnail.url
+                        break
+
+            if ref_image_url:
+                reply_embed.set_image(url=ref_image_url)
+
             embeds.append(reply_embed)
         except Exception:
             logger.debug(f'Could not fetch referenced message {message.reference.message_id}')
