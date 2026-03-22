@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import io
 import logging
 import os
 import subprocess
@@ -14,6 +15,7 @@ from tle import constants
 from tle.util import codeforces_common as cf_common
 from tle.util.codeforces_common import pretty_time_format
 from tle.util import discord_common
+from tle.cogs._starboard_helpers import _parse_jump_url
 
 logger = logging.getLogger(__name__)
 
@@ -173,6 +175,106 @@ class Meta(commands.Cog):
         cf_common.user_db.delete_guild_config(ctx.guild.id, feature)
         logger.info(f'CMD config disable: guild={ctx.guild.id} feature={feature} by user={ctx.author.id}')
         await ctx.send(embed=discord_common.embed_success(f'Feature `{feature}` disabled.'))
+
+
+    @meta.command(brief='Dump Discord message data')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def log(self, ctx, message_ref: str):
+        """Fetch a message by jump URL and dump all its metadata.
+
+        Usage: ;meta log https://discord.com/channels/guild/channel/msg
+        """
+        parsed = _parse_jump_url(message_ref)
+        if parsed is None:
+            await ctx.send(embed=discord_common.embed_alert('Invalid message link.'))
+            return
+        guild_id, channel_id, message_id = parsed
+
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except discord.NotFound:
+                await ctx.send(embed=discord_common.embed_alert('Channel not found.'))
+                return
+        try:
+            msg = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            await ctx.send(embed=discord_common.embed_alert('Message not found.'))
+            return
+
+        lines = []
+        lines.append(f'id:          {msg.id}')
+        lines.append(f'type:        {msg.type}')
+        lines.append(f'author:      {msg.author} (id={msg.author.id})')
+        lines.append(f'created_at:  {msg.created_at}')
+        lines.append(f'content:     {msg.content[:300]!r}')
+        lines.append(f'attachments: {len(msg.attachments)}')
+        lines.append(f'embeds:      {len(msg.embeds)}')
+        lines.append(f'reactions:   {len(msg.reactions)}')
+        lines.append('')
+
+        for i, att in enumerate(msg.attachments):
+            lines.append(f'--- attachment[{i}] ---')
+            lines.append(f'  filename:     {att.filename}')
+            lines.append(f'  url:          {att.url}')
+            lines.append(f'  content_type: {getattr(att, "content_type", None)}')
+            lines.append(f'  size:         {att.size}')
+            lines.append('')
+
+        for i, e in enumerate(msg.embeds):
+            lines.append(f'--- embed[{i}] ---')
+            lines.append(f'  type:        {e.type}')
+            lines.append(f'  url:         {e.url}')
+            lines.append(f'  title:       {e.title}')
+            lines.append(f'  description: {e.description!r}' if e.description else '  description: None')
+            if e.thumbnail:
+                lines.append(f'  thumbnail:')
+                for k, v in (e.thumbnail.__dict__ or {}).items():
+                    lines.append(f'    {k}: {v}')
+            else:
+                lines.append(f'  thumbnail:   None')
+            if e.video:
+                lines.append(f'  video:')
+                for k, v in (e.video.__dict__ or {}).items():
+                    lines.append(f'    {k}: {v}')
+            else:
+                lines.append(f'  video:       None')
+            if e.image:
+                lines.append(f'  image:')
+                for k, v in (e.image.__dict__ or {}).items():
+                    lines.append(f'    {k}: {v}')
+            else:
+                lines.append(f'  image:       None')
+            if e.provider:
+                lines.append(f'  provider:')
+                for k, v in (e.provider.__dict__ or {}).items():
+                    lines.append(f'    {k}: {v}')
+            else:
+                lines.append(f'  provider:    None')
+            if e.author:
+                lines.append(f'  author:')
+                for k, v in (e.author.__dict__ or {}).items():
+                    lines.append(f'    {k}: {v}')
+            else:
+                lines.append(f'  author:      None')
+            if e.fields:
+                for j, f in enumerate(e.fields):
+                    lines.append(f'  field[{j}]:   {f.name} = {f.value!r}')
+            lines.append('')
+
+        for i, r in enumerate(msg.reactions):
+            lines.append(f'reaction[{i}]: {r.emoji} count={r.count}')
+
+        dump = '\n'.join(lines)
+
+        # Send as file if too long for a codeblock, otherwise codeblock
+        if len(dump) > 1900:
+            await ctx.send(
+                file=discord.File(io.StringIO(dump), filename=f'msg_{message_id}.txt')
+            )
+        else:
+            await ctx.send(f'```\n{dump}\n```')
 
 
 async def setup(bot):

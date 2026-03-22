@@ -184,20 +184,6 @@ async def build_starboard_message(message, emoji_str, count, color):
         # already have one from attachments.
         if not image_url and message.embeds:
             for e in message.embeds:
-                logger.info(
-                    '[gifv-debug] embed type=%r url=%r '
-                    'image=%r thumbnail=%r video=%r '
-                    'thumbnail.url=%r thumbnail.proxy_url=%r '
-                    'video.url=%r',
-                    getattr(e, 'type', None),
-                    getattr(e, 'url', None),
-                    getattr(e, 'image', None),
-                    getattr(e, 'thumbnail', None),
-                    getattr(e, 'video', None),
-                    getattr(getattr(e, 'thumbnail', None), 'url', 'N/A'),
-                    getattr(getattr(e, 'thumbnail', None), 'proxy_url', 'N/A'),
-                    getattr(getattr(e, 'video', None), 'url', 'N/A'),
-                )
                 if e.type == 'image' and e.url:
                     embed.set_image(url=e.url)
                     break
@@ -217,7 +203,6 @@ async def build_starboard_message(message, emoji_str, count, color):
                         chosen = gif_url
                     else:
                         chosen = thumb_url or None
-                    logger.info('[gifv-debug] chosen image URL: %r', chosen)
                     if chosen:
                         embed.set_image(url=chosen)
                     break
