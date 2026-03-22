@@ -5,6 +5,7 @@ and commands.  Everything here is pure logic with no bot state.
 """
 import datetime
 import logging
+import re
 import time
 
 import discord
@@ -201,21 +202,24 @@ async def build_starboard_message(message, emoji_str, count, color):
                     embed.set_image(url=e.url)
                     break
                 if e.type == 'gifv':
-                    # Tenor/Giphy gifv embeds: thumbnail is a static PNG,
-                    # video is an MP4 (can't use in set_image).  Swapping
-                    # the extension on the proxy URL to .gif gives us the
-                    # animated version via Discord's CDN proxy.
-                    proxy = getattr(e.thumbnail, 'proxy_url', None) or ''
-                    if proxy.rsplit('.', 1)[-1] in ('png', 'jpg', 'jpeg', 'webp'):
-                        chosen = proxy.rsplit('.', 1)[0] + '.gif'
-                    elif e.thumbnail and e.thumbnail.url:
-                        raw = str(e.thumbnail.url)
-                        if raw.rsplit('.', 1)[-1] in ('png', 'jpg', 'jpeg', 'webp'):
-                            chosen = raw.rsplit('.', 1)[0] + '.gif'
-                        else:
-                            chosen = raw
+                    # Tenor/Giphy gifv embeds: thumbnail.url is a static PNG
+                    # with format code AAAAe, video.url is an MP4 with AAAPo.
+                    # Tenor serves the animated GIF at format code AAAAC.
+                    # Derive the GIF URL from the thumbnail URL by swapping
+                    # the format code and extension.  Fall back to the static
+                    # thumbnail if the URL doesn't match the expected pattern.
+                    chosen = None
+                    thumb_url = getattr(e.thumbnail, 'url', None) or ''
+                    gif_url = re.sub(
+                        r'(media\.tenor\.com/[^/]+?)AAAA[a-zA-Z0-9](/[^.]+)\.\w+$',
+                        r'\1AAAAC\2.gif',
+                        thumb_url,
+                    )
+                    if gif_url != thumb_url:
+                        chosen = gif_url
                     else:
-                        chosen = None
+                        # Pattern didn't match — use static thumbnail as fallback
+                        chosen = thumb_url or None
                     logger.info('[gifv-debug] chosen image URL: %r', chosen)
                     if chosen:
                         embed.set_image(url=chosen)

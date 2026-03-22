@@ -372,13 +372,13 @@ class TestBuildStarboardMessage:
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 3, 0xffaa10))
         assert len(embeds) == 1  # Only main embed
 
-    def test_gifv_embed_uses_proxy_gif_url(self):
-        """Tenor GIFs (gifv embeds) should swap proxy_url extension to .gif for animation."""
+    def test_gifv_embed_swaps_tenor_format_code(self):
+        """Tenor GIFs: swap AAAAe format code to AAAAC and .png to .gif."""
         class FakeVideo:
-            url = 'https://media.tenor.com/abc/luigi.mp4'
+            url = 'https://media.tenor.com/-92EuoZ_JUUAAAPo/luigi-discord-mod.mp4'
         class FakeThumbnail:
-            url = 'https://media.tenor.com/abc/luigi.png'
-            proxy_url = 'https://images-ext-1.discordapp.net/external/HASH/https/media.tenor.com/abc/luigi.png'
+            url = 'https://media.tenor.com/-92EuoZ_JUUAAAAe/luigi-discord-mod.png'
+            proxy_url = 'https://images-ext-1.discordapp.net/external/HASH/https/media.tenor.com/-92EuoZ_JUUAAAAe/luigi-discord-mod.png'
         class FakeGifvEmbed:
             type = 'gifv'
             url = 'https://tenor.com/view/luigi-discord-mod-post-luigi-gif-25261697'
@@ -388,34 +388,34 @@ class TestBuildStarboardMessage:
         msg = _FakeMessage(content='', embeds=[FakeGifvEmbed()])
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[0]
-        # Should swap .png -> .gif on proxy_url for animated rendering
-        assert main_embed.image_url == 'https://images-ext-1.discordapp.net/external/HASH/https/media.tenor.com/abc/luigi.gif'
+        assert main_embed.image_url == 'https://media.tenor.com/-92EuoZ_JUUAAAAC/luigi-discord-mod.gif'
 
-    def test_gifv_embed_falls_back_to_thumbnail_url(self):
-        """When proxy_url is missing, swap extension on thumbnail.url instead."""
+    def test_gifv_embed_falls_back_to_static_thumbnail(self):
+        """When thumbnail URL doesn't match Tenor pattern, use it as-is."""
         class FakeVideo:
-            url = 'https://media.tenor.com/abc/luigi.mp4'
+            url = 'https://example.com/video.mp4'
         class FakeThumbnail:
-            url = 'https://media.tenor.com/abc/luigi.png'
+            url = 'https://example.com/some-thumbnail.png'
             proxy_url = None
         class FakeGifvEmbed:
             type = 'gifv'
-            url = 'https://tenor.com/view/luigi-discord-mod-post-luigi-gif-25261697'
+            url = 'https://example.com/gif-page'
             video = FakeVideo()
             image = None
             thumbnail = FakeThumbnail()
         msg = _FakeMessage(content='', embeds=[FakeGifvEmbed()])
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         main_embed = embeds[0]
-        assert main_embed.image_url == 'https://media.tenor.com/abc/luigi.gif'
+        # Falls back to static thumbnail — at least shows something
+        assert main_embed.image_url == 'https://example.com/some-thumbnail.png'
 
     def test_gifv_embed_not_carried_over(self):
         """gifv auto-embeds should not be carried over (same as image/video)."""
         class FakeVideo:
-            url = 'https://media.tenor.com/abc/luigi.mp4'
+            url = 'https://media.tenor.com/-92EuoZ_JUUAAAPo/luigi-discord-mod.mp4'
         class FakeThumbnail:
-            url = 'https://media.tenor.com/abc/luigi.png'
-            proxy_url = 'https://images-ext-1.discordapp.net/external/HASH/https/media.tenor.com/abc/luigi.png'
+            url = 'https://media.tenor.com/-92EuoZ_JUUAAAAe/luigi-discord-mod.png'
+            proxy_url = 'https://images-ext-1.discordapp.net/external/HASH/https/media.tenor.com/-92EuoZ_JUUAAAAe/luigi-discord-mod.png'
         class FakeGifvEmbed:
             type = 'gifv'
             url = 'https://tenor.com/view/luigi-discord-mod-post-luigi-gif-25261697'
