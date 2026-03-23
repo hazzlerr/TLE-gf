@@ -52,6 +52,24 @@ def set_author_footer(embed, user):
     embed.set_footer(text=f'Requested by {user}', icon_url=user.avatar)
 
 
+class FeatureDisabledSilent(commands.CheckFailure):
+    """Raised when a guild feature flag is off. Silently swallowed by the error handler."""
+    pass
+
+
+def requires_guild_feature(feature):
+    """Check decorator that silently blocks a command when *feature* is not enabled."""
+    async def predicate(ctx):
+        from tle.util import codeforces_common as cf_common
+        if cf_common.user_db is None:
+            raise FeatureDisabledSilent()
+        val = cf_common.user_db.get_guild_config(ctx.guild.id, feature)
+        if val != '1':
+            raise FeatureDisabledSilent()
+        return True
+    return commands.check(predicate)
+
+
 def send_error_if(*error_cls):
     """Decorator for `cog_command_error` methods. Decorated methods send the error in an alert embed
     when the error is an instance of one of the specified errors, otherwise the wrapped function is
@@ -72,6 +90,9 @@ def send_error_if(*error_cls):
 async def bot_error_handler(ctx, exception):
     if getattr(exception, 'handled', False):
         # Errors already handled in cogs should have .handled = True
+        return
+
+    if isinstance(exception, FeatureDisabledSilent):
         return
 
     if isinstance(exception, db.DatabaseDisabledError):

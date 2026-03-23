@@ -10,6 +10,7 @@ from tle.util import discord_common
 from tle.util import paginator
 from tle.cogs._starboard_helpers import _emoji_str
 from tle.cogs._starboard_backfill import BackfillMixin, _BACKFILL_UNKNOWN
+from tle.util.discord_common import requires_guild_feature
 from tle.cogs._starboard_render import (
     _starboard_content,
     _parse_starboard_args,
@@ -715,6 +716,7 @@ class Starboard(BackfillMixin, commands.Cog):
 
     @starboard.command(brief='Resync star count for a message from Discord')
     @commands.has_role(constants.TLE_ADMIN)
+    @requires_guild_feature('migration_ops')
     async def fix(self, ctx, message_ref: str, emoji: str = None):
         """Resync reactors for a starboarded message from Discord.
 
@@ -790,6 +792,7 @@ class Starboard(BackfillMixin, commands.Cog):
     # --- Backfill status ---
 
     @starboard.command(brief='Show backfill progress')
+    @requires_guild_feature('migration_ops')
     async def backfill_status(self, ctx):
         """Show the progress of the background star count backfill."""
         if self.backfill_complete:

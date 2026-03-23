@@ -30,6 +30,7 @@ from tle.cogs._migrate_helpers import (
 )
 from tle.cogs.starboard import Starboard, _starboard_content
 from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
+from tle.util.discord_common import requires_guild_feature
 
 logger = logging.getLogger(__name__)
 
@@ -353,6 +354,7 @@ class Migrate(commands.Cog):
 
     @commands.group(name='migrate', invoke_without_command=True)
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @requires_guild_feature('migration_ops')
     async def migrate(self, ctx):
         """Starboard migration commands."""
         await ctx.send_help(ctx.command)
