@@ -40,6 +40,13 @@ class Starboard(BackfillMixin, commands.Cog):
         self._init_backfill_state()
         logger.info('Starboard cog initialized')
 
+    async def _resolve_channel(self, channel_id):
+        """Get a channel from cache, falling back to fetch_channel for threads."""
+        ch = self.bot.get_channel(channel_id)
+        if ch is not None:
+            return ch
+        return await self.bot.fetch_channel(channel_id)
+
     @commands.Cog.listener()
     @discord_common.once
     async def on_ready(self):
@@ -125,9 +132,10 @@ class Starboard(BackfillMixin, commands.Cog):
                 self.locks[payload.guild_id] = lock = asyncio.Lock()
             async with lock:
                 try:
-                    channel = self.bot.get_channel(payload.channel_id)
-                    if channel is None:
-                        logger.warning(f'Reaction remove: channel {payload.channel_id} not found in cache')
+                    try:
+                        channel = await self._resolve_channel(payload.channel_id)
+                    except discord.NotFound:
+                        logger.warning(f'Reaction remove: channel {payload.channel_id} not found')
                         return
                     emoji_family = cf_common.user_db.get_emoji_family(payload.guild_id, main_emoji)
                     count = cf_common.user_db.get_merged_reactor_count(payload.message_id, emoji_family)
@@ -212,8 +220,11 @@ class Starboard(BackfillMixin, commands.Cog):
 
             if FULL_RE_RENDER or self._is_old_format(sb_msg):
                 if original_message is None:
-                    source_ch = self.bot.get_channel(int(sb_entry.channel_id)) if sb_entry.channel_id else None
-                    if source_ch is None:
+                    if not sb_entry.channel_id:
+                        return
+                    try:
+                        source_ch = await self._resolve_channel(int(sb_entry.channel_id))
+                    except discord.NotFound:
                         return
                     original_message = await source_ch.fetch_message(int(original_msg_id))
                 content, embeds, files = await self.build_starboard_message(
@@ -249,9 +260,10 @@ class Starboard(BackfillMixin, commands.Cog):
         if starboard_channel is None:
             raise StarboardCogError(f'Starboard channel {starboard_channel_id} not found in guild {guild.id}')
 
-        channel = self.bot.get_channel(payload.channel_id)
-        if channel is None:
-            raise StarboardCogError(f'Source channel {payload.channel_id} not found in bot cache')
+        try:
+            channel = await self._resolve_channel(payload.channel_id)
+        except discord.NotFound:
+            raise StarboardCogError(f'Source channel {payload.channel_id} not found')
         message = await channel.fetch_message(payload.message_id)
 
         if ((message.type != discord.MessageType.default and message.type != discord.MessageType.reply)
