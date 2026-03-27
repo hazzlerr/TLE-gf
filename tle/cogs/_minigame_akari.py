@@ -49,16 +49,28 @@ def parse_akari_message(content):
     if len(lines) < 3:
         return []
 
-    first_match = _FIRST_LINE_RE.match(lines[0])
+    # Search for the "Daily Akari <number>" header anywhere in the message
+    # (users may prepend a URL, commentary, or invisible Unicode chars).
+    first_match = None
+    header_idx = None
+    for i, line in enumerate(lines):
+        first_match = _FIRST_LINE_RE.match(line)
+        if first_match is not None:
+            header_idx = i
+            break
     if first_match is None:
         return []
 
-    date_match = _DATE_RE.search(lines[1])
+    # Need at least a date line and a stats line after the header
+    if header_idx + 2 >= len(lines):
+        return []
+
+    date_match = _DATE_RE.search(lines[header_idx + 1])
     if date_match is None:
         return []
 
     stats_line = None
-    for line in lines[2:]:
+    for line in lines[header_idx + 2:]:
         if '🕓' in line:
             stats_line = line
             break

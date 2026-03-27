@@ -147,6 +147,29 @@ class TestParsing:
         assert results[0].is_perfect is True
         assert results[0].accuracy == 100
 
+    def test_parse_url_before_header(self):
+        """Akari share text may have the URL before the header line."""
+        results = parse_akari_message(
+            'https://dailyakari.com/\n'
+            'Daily Akari 😊 445\n'
+            '✅2026-03-26 (Thu)✅\n'
+            '🌟 Perfect!   🕓 1:29'
+        )
+        assert len(results) == 1
+        assert results[0].puzzle_number == 445
+        assert results[0].is_perfect is True
+
+    def test_parse_commentary_before_header(self):
+        """Users may add commentary before their Akari result."""
+        results = parse_akari_message(
+            'got it!\n'
+            'Daily Akari 😊 445\n'
+            '✅2026-03-26 (Thu)✅\n'
+            '🌟 Perfect!   🕓 1:29'
+        )
+        assert len(results) == 1
+        assert results[0].puzzle_number == 445
+
     def test_parse_rejects_invalid_message(self):
         assert parse_akari_message('hello world') == []
 
