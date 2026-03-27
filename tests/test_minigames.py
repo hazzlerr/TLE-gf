@@ -739,6 +739,29 @@ class TestGuessGameParsing:
         assert results[1].accuracy == 6  # 7-1
         assert results[1].is_perfect is True
 
+    def test_parse_no_url_hashtag_only(self):
+        """Messages with #GuessTheGame (no dot, no URL) should still parse."""
+        results = parse_guessgame_message(
+            '#GuessTheGame #1197\n\n'
+            '\U0001f3ae \U0001f7e5 \U0001f7e5 \U0001f7e5 \U0001f7e5 \U0001f7e9 \u2b1c\n\n'
+            '#RookieGuesser'
+        )
+        assert len(results) == 1
+        assert results[0].puzzle_number == 1197
+        assert results[0].accuracy == 2  # 7 - green_pos(5)
+
+    def test_parse_with_user_prefix(self):
+        """User commentary before the GG content."""
+        results = parse_guessgame_message(
+            'f0lse \n\n'
+            '#GuessTheGame #1197\n\n'
+            '\U0001f3ae \U0001f7e5 \U0001f7e5 \U0001f7e5 \U0001f7e5 \U0001f7e9 \u2b1c\n\n'
+            '#RookieGuesser\n'
+            'https://guessthe.game/p/1197'
+        )
+        assert len(results) == 1
+        assert results[0].puzzle_number == 1197
+
     def test_parse_rejects_non_guessgame(self):
         assert parse_guessgame_message('hello world') == []
         assert parse_guessgame_message('#1234\n\U0001f3ae \U0001f7e9') == []

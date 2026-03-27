@@ -122,4 +122,5 @@ AKARI_GAME = GameDef(
     display_name='Daily Akari',
     feature_flag='akari',
     parse=parse_akari_message,
+    detect=_HEADER_RE,
 )

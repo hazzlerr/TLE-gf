@@ -184,8 +184,16 @@ class Minigames(commands.Cog):
                 status['scanned'] += 1
                 if message.author.bot or not message.content:
                     continue
-                results = game.parse(strip_codeblock(message.content))
+                cleaned = strip_codeblock(message.content)
+                results = game.parse(cleaned)
                 if not results:
+                    if game.detect and game.detect.search(cleaned):
+                        status['skipped'].append(str(message.id))
+                        logger.warning(
+                            '%s import: detected but unparseable msg=%s user=%s content=%r',
+                            game.display_name, message.id, message.author.id,
+                            message.content[:200],
+                        )
                     continue
 
                 puzzle_date_fallback = message.created_at.date()
@@ -398,12 +406,13 @@ class Minigames(commands.Cog):
         channel = channel or ctx.channel
 
         deleted = cf_common.user_db.clear_imported_minigame_results(
-            ctx.guild.id, game.name)
+            ctx.guild.id, game.name, channel_id=channel.id)
         self._import_status[key] = {
             'state': 'running',
             'channel_id': channel.id,
             'scanned': 0,
             'done': 0,
+            'skipped': [],
             'error': None,
             'latest_message_id': None,
             'cleared': deleted,
@@ -438,6 +447,10 @@ class Minigames(commands.Cog):
         ]
         if status['latest_message_id'] is not None:
             lines.append(f'latest message: `{status["latest_message_id"]}`')
+        skipped = status.get('skipped', [])
+        if skipped:
+            lines.append(f'detected but unparseable: **{len(skipped)}** '
+                         f'(IDs: {", ".join(skipped[:10])}{"…" if len(skipped) > 10 else ""})')
         if status['error']:
             lines.append(f'error: `{status["error"]}`')
         await ctx.send(embed=discord_common.embed_neutral('\n'.join(lines)))

@@ -183,11 +183,17 @@ class MinigameDbMixin:
         self.conn.commit()
         return rc
 
-    def clear_imported_minigame_results(self, guild_id, game):
-        rc = self.conn.execute(
-            'DELETE FROM minigame_import_result WHERE guild_id = ? AND game = ?',
-            (str(guild_id), game)
-        ).rowcount
+    def clear_imported_minigame_results(self, guild_id, game, channel_id=None):
+        if channel_id is not None:
+            rc = self.conn.execute(
+                'DELETE FROM minigame_import_result WHERE guild_id = ? AND game = ? AND channel_id = ?',
+                (str(guild_id), game, str(channel_id))
+            ).rowcount
+        else:
+            rc = self.conn.execute(
+                'DELETE FROM minigame_import_result WHERE guild_id = ? AND game = ?',
+                (str(guild_id), game)
+            ).rowcount
         self.conn.commit()
         return rc
 

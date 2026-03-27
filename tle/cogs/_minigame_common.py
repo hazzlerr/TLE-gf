@@ -50,6 +50,7 @@ class GameDef:
     display_name: str       # human-readable, e.g. 'Daily Akari'
     feature_flag: str       # guild config key, e.g. 'akari'
     parse: Callable[[str], List[ParsedResult]]
+    detect: Optional[re.Pattern] = None  # loose pattern to detect game content (for logging)
     # Optional per-game overrides (defaults = Akari-style scoring)
     score_matchup: Optional[Callable] = None
     is_eligible_winner: Optional[Callable] = None

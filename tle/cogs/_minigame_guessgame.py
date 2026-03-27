@@ -10,7 +10,7 @@ _RED = '\U0001f7e5'     # 🟥
 _WHITE = '\u2b1c'       # ⬜
 _BLACK = '\u2b1b'       # ⬛
 
-_URL_RE = re.compile(r'GuessThe\.Game', re.IGNORECASE)
+_DETECT_RE = re.compile(r'GuessThe\.?Game', re.IGNORECASE)
 _NUMBER_RE = re.compile(r'(?<!<)#(\d+)')
 _SQUARES_RE = re.compile(
     r'\U0001f3ae\s*'  # 🎮
@@ -36,7 +36,7 @@ def parse_guessgame_message(content):
 
     A single message may contain multiple game results.
     """
-    if not _URL_RE.search(content):
+    if not _DETECT_RE.search(content):
         return []
 
     results = []
@@ -109,6 +109,7 @@ GUESSGAME_GAME = GameDef(
     display_name='GuessThe.Game',
     feature_flag='guessgame',
     parse=parse_guessgame_message,
+    detect=_DETECT_RE,
     score_matchup=guessgame_score_matchup,
     is_eligible_winner=guessgame_is_eligible_winner,
     missing_is_loss=True,
