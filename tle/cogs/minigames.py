@@ -109,7 +109,7 @@ class Minigames(commands.Cog):
             message.id, message.guild.id, game.name, message.channel.id,
             message.author.id, parsed.puzzle_number,
             parsed.puzzle_date.isoformat(), parsed.accuracy,
-            parsed.time_seconds, parsed.is_perfect,
+            parsed.time_seconds, parsed.is_perfect, message.content,
         )
         logger.info(
             '%s result stored: guild=%s channel=%s msg=%s user=%s puzzle=%s '
@@ -181,7 +181,7 @@ class Minigames(commands.Cog):
                     message.author.id, parsed.puzzle_number,
                     parsed.puzzle_date.isoformat(), parsed.accuracy,
                     parsed.time_seconds, parsed.is_perfect,
-                    commit=False,
+                    message.content, commit=False,
                 )
                 status['done'] += 1
                 status['latest_message_id'] = str(message.id)

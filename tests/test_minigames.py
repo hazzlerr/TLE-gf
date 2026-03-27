@@ -48,7 +48,8 @@ class FakeMinigameDb(MinigameDbMixin):
                 puzzle_date    TEXT NOT NULL,
                 accuracy       INTEGER NOT NULL,
                 time_seconds   INTEGER NOT NULL,
-                is_perfect     INTEGER NOT NULL DEFAULT 0
+                is_perfect     INTEGER NOT NULL DEFAULT 0,
+                raw_content    TEXT NOT NULL DEFAULT ''
             )
         ''')
         self.conn.execute('''
@@ -62,7 +63,8 @@ class FakeMinigameDb(MinigameDbMixin):
                 puzzle_date    TEXT NOT NULL,
                 accuracy       INTEGER NOT NULL,
                 time_seconds   INTEGER NOT NULL,
-                is_perfect     INTEGER NOT NULL DEFAULT 0
+                is_perfect     INTEGER NOT NULL DEFAULT 0,
+                raw_content    TEXT NOT NULL DEFAULT ''
             )
         ''')
         self.conn.execute('''
@@ -225,36 +227,37 @@ class TestDbMixin:
         assert db.get_minigame_channel(123, _GAME) is None
 
     def test_result_storage(self, db):
-        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True)
+        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True, 'raw msg')
         row = db.get_minigame_result(1)
         assert row is not None
         assert row.user_id == '300'
         assert row.puzzle_number == 445
         assert row.is_perfect == 1
         assert row.time_seconds == 89
+        assert row.raw_content == 'raw msg'
 
     def test_results_for_user(self, db):
-        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True)
-        db.save_minigame_result(2, 100, _GAME, 200, 301, 446, '2026-03-27', 90, 99, False)
+        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True, 'c1')
+        db.save_minigame_result(2, 100, _GAME, 200, 301, 446, '2026-03-27', 90, 99, False, 'c2')
         rows = db.get_minigame_results_for_user(100, _GAME, 300)
         assert len(rows) == 1
         assert rows[0].message_id == '1'
 
     def test_result_for_user_puzzle(self, db):
-        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True)
+        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True, 'c')
         row = db.get_minigame_result_for_user_puzzle(100, _GAME, 300, 445)
         assert row is not None
         assert row.message_id == '1'
 
     def test_imported_results_are_included_in_queries(self, db):
-        db.save_imported_minigame_result(10, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True)
+        db.save_imported_minigame_result(10, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True, 'c')
         rows = db.get_minigame_results_for_user(100, _GAME, 300)
         assert len(rows) == 1
         assert rows[0].message_id == '10'
 
     def test_first_message_across_live_and_imported_wins(self, db):
-        db.save_minigame_result(20, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 60, True)
-        db.save_imported_minigame_result(10, 100, _GAME, 200, 300, 445, '2026-03-26', 96, 50, False)
+        db.save_minigame_result(20, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 60, True, 'c1')
+        db.save_imported_minigame_result(10, 100, _GAME, 200, 300, 445, '2026-03-26', 96, 50, False, 'c2')
         row = db.get_minigame_result_for_user_puzzle(100, _GAME, 300, 445)
         assert row is not None
         assert row.message_id == '10'
@@ -263,11 +266,18 @@ class TestDbMixin:
         assert rows[0].message_id == '10'
 
     def test_delete_result_for_user_puzzle(self, db):
-        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True)
-        db.save_imported_minigame_result(2, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 90, True)
+        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True, 'c1')
+        db.save_imported_minigame_result(2, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 90, True, 'c2')
         rc = db.delete_minigame_result_for_user_puzzle(100, _GAME, 300, 445)
         assert rc == 2
         assert db.get_minigame_result_for_user_puzzle(100, _GAME, 300, 445) is None
+
+    def test_raw_content_updated_on_replace(self, db):
+        """INSERT OR REPLACE should update raw_content when re-saving same message_id."""
+        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True, 'original')
+        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 100, 89, True, 'edited')
+        row = db.get_minigame_result(1)
+        assert row.raw_content == 'edited'
 
 
 class _FakeGuild:
@@ -353,6 +363,27 @@ class TestCogIngest:
         assert row is not None
         assert row.message_id == '123'
 
+    def test_edit_updates_raw_content(self, db, monkeypatch):
+        """Editing a message should update the stored raw_content."""
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(1, 'akari', '1')
+        db.set_minigame_channel(1, _GAME, 10)
+
+        cog = Minigames(bot=None)
+        original = 'Daily Akari 445\n\u27052026-03-26\u2705\n\U0001f31f \U0001f553 1:29\nhttps://dailyakari.com/'
+        edited = 'Daily Akari 445\n\u27052026-03-26\u2705\n\U0001f31f \U0001f553 2:00\nhttps://dailyakari.com/'
+
+        msg = _FakeMessage(123, 1, 10, 999, original)
+        asyncio.run(cog.on_message(msg))
+        row = db.get_minigame_result(123)
+        assert row.raw_content == original
+
+        before = _FakeMessage(123, 1, 10, 999, original)
+        after = _FakeMessage(123, 1, 10, 999, edited)
+        asyncio.run(cog.on_message_edit(before, after))
+        row = db.get_minigame_result(123)
+        assert row.raw_content == edited
+
     def test_edit_in_non_configured_channel_is_ignored(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         db.set_guild_config(1, 'akari', '1')
@@ -420,7 +451,7 @@ class TestCogSafety:
             asyncio.run(cog._run_import(1, 10, AKARI_GAME))
 
         # A subsequent operation that calls commit() should NOT leak the orphan rows
-        db.save_minigame_result(999, 1, 'akari', 10, 888, 999, '2026-04-01', 100, 50, 1)
+        db.save_minigame_result(999, 1, 'akari', 10, 888, 999, '2026-04-01', 100, 50, 1, 'c')
 
         rows = db.conn.execute('SELECT * FROM minigame_import_result').fetchall()
         assert len(rows) == 0

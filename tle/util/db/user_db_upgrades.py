@@ -380,7 +380,8 @@ def upgrade_1_14_0(db):
             puzzle_date    TEXT NOT NULL,
             accuracy       INTEGER NOT NULL,
             time_seconds   INTEGER NOT NULL,
-            is_perfect     INTEGER NOT NULL DEFAULT 0
+            is_perfect     INTEGER NOT NULL DEFAULT 0,
+            raw_content    TEXT NOT NULL DEFAULT ''
         )
     ''')
     db.execute('''
@@ -409,7 +410,8 @@ def upgrade_1_15_0(db):
             puzzle_date    TEXT NOT NULL,
             accuracy       INTEGER NOT NULL,
             time_seconds   INTEGER NOT NULL,
-            is_perfect     INTEGER NOT NULL DEFAULT 0
+            is_perfect     INTEGER NOT NULL DEFAULT 0,
+            raw_content    TEXT NOT NULL DEFAULT ''
         )
     ''')
     db.execute('''

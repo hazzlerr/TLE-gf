@@ -32,7 +32,8 @@ class MinigameDbMixin:
                 puzzle_date,
                 accuracy,
                 time_seconds,
-                is_perfect
+                is_perfect,
+                raw_content
             FROM {table_name}
         '''
 
@@ -115,36 +116,37 @@ class MinigameDbMixin:
     # ── Results ─────────────────────────────────────────────────────────
 
     def save_minigame_result(self, message_id, guild_id, game, channel_id, user_id,
-                             puzzle_number, puzzle_date, accuracy, time_seconds, is_perfect):
+                             puzzle_number, puzzle_date, accuracy, time_seconds, is_perfect,
+                             raw_content):
         self.conn.execute(
             '''
             INSERT OR REPLACE INTO minigame_result (
                 message_id, guild_id, game, channel_id, user_id, puzzle_number,
-                puzzle_date, accuracy, time_seconds, is_perfect
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                puzzle_date, accuracy, time_seconds, is_perfect, raw_content
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 str(message_id), str(guild_id), game, str(channel_id), str(user_id),
                 int(puzzle_number), str(puzzle_date), int(accuracy), int(time_seconds),
-                int(bool(is_perfect))
+                int(bool(is_perfect)), str(raw_content)
             )
         )
         self.conn.commit()
 
     def save_imported_minigame_result(self, message_id, guild_id, game, channel_id, user_id,
                                       puzzle_number, puzzle_date, accuracy, time_seconds,
-                                      is_perfect, commit=True):
+                                      is_perfect, raw_content, commit=True):
         self.conn.execute(
             '''
             INSERT OR REPLACE INTO minigame_import_result (
                 message_id, guild_id, game, channel_id, user_id, puzzle_number,
-                puzzle_date, accuracy, time_seconds, is_perfect
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                puzzle_date, accuracy, time_seconds, is_perfect, raw_content
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''',
             (
                 str(message_id), str(guild_id), game, str(channel_id), str(user_id),
                 int(puzzle_number), str(puzzle_date), int(accuracy), int(time_seconds),
-                int(bool(is_perfect))
+                int(bool(is_perfect)), str(raw_content)
             )
         )
         if commit:

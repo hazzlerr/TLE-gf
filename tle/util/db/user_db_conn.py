@@ -300,7 +300,8 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
                 puzzle_date    TEXT NOT NULL,
                 accuracy       INTEGER NOT NULL,
                 time_seconds   INTEGER NOT NULL,
-                is_perfect     INTEGER NOT NULL DEFAULT 0
+                is_perfect     INTEGER NOT NULL DEFAULT 0,
+                raw_content    TEXT NOT NULL DEFAULT ''
             )
         ''')
         self.conn.execute('''
@@ -322,7 +323,8 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
                 puzzle_date    TEXT NOT NULL,
                 accuracy       INTEGER NOT NULL,
                 time_seconds   INTEGER NOT NULL,
-                is_perfect     INTEGER NOT NULL DEFAULT 0
+                is_perfect     INTEGER NOT NULL DEFAULT 0,
+                raw_content    TEXT NOT NULL DEFAULT ''
             )
         ''')
         self.conn.execute('''
