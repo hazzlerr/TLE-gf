@@ -129,6 +129,12 @@ class Minigames(commands.Cog):
         game = self._game_for_channel(message)
         if game is not None:
             try:
+                # Save raw content for future reparse
+                cf_common.user_db.save_raw_message(
+                    message.id, message.guild.id, message.channel.id,
+                    message.author.id, message.created_at.isoformat(),
+                    message.content,
+                )
                 await self._ingest_message(message, game)
             except Exception:
                 logger.error('Error ingesting message %s', message.id, exc_info=True)
@@ -164,12 +170,44 @@ class Minigames(commands.Cog):
 
     # ── Import ──────────────────────────────────────────────────────────
 
+    _KVS_IMPORT_PREFIX = 'mg_import_reply:'
+
     async def _resolve_channel(self, channel_id):
         """Get a channel from cache, falling back to fetch_channel for threads."""
         ch = self.bot.get_channel(channel_id)
         if ch is not None:
             return ch
         return await self.bot.fetch_channel(channel_id)
+
+    async def _notify_import_complete(self, guild_id, game, status):
+        """Reply to the original import command message with the final result."""
+        kvs_key = f'{self._KVS_IMPORT_PREFIX}{guild_id}:{game.name}'
+        try:
+            reply_info = cf_common.user_db.kvs_get(kvs_key)
+            if reply_info is None:
+                return
+            cf_common.user_db.kvs_delete(kvs_key)
+            reply_channel_id, reply_message_id = reply_info.split(':')
+            reply_channel = await self._resolve_channel(int(reply_channel_id))
+            reply_message = await reply_channel.fetch_message(int(reply_message_id))
+
+            state = status['state']
+            skipped = status.get('skipped', [])
+            lines = [
+                f'**{game.display_name} import {state}.**',
+                f'Messages scanned: **{status["scanned"]}**',
+                f'Results imported: **{status["done"]}**',
+            ]
+            if skipped:
+                lines.append(f'Detected but unparseable: **{len(skipped)}**')
+            if status.get('error'):
+                lines.append(f'Error: `{status["error"]}`')
+
+            embed_fn = discord_common.embed_success if state == 'done' else discord_common.embed_alert
+            await reply_message.reply(embed=embed_fn('\n'.join(lines)))
+        except Exception:
+            logger.warning('Failed to send import completion reply for guild=%s game=%s',
+                           guild_id, game.name, exc_info=True)
 
     async def _run_import(self, guild_id, channel_id, game):
         key = (guild_id, game.name)
@@ -180,7 +218,7 @@ class Minigames(commands.Cog):
             except discord.NotFound:
                 raise MinigameCogError(f'Channel `{channel_id}` is not available.')
 
-            batch_count = 0
+            uncommitted = 0
             async for message in channel.history(oldest_first=True, limit=None):
                 status['scanned'] += 1
                 if message.author.bot or not message.content:
@@ -192,6 +230,7 @@ class Minigames(commands.Cog):
                     message.created_at.isoformat(), message.content,
                     commit=False,
                 )
+                uncommitted += 1
 
                 cleaned = strip_codeblock(message.content)
                 results = game.parse(cleaned)
@@ -203,33 +242,31 @@ class Minigames(commands.Cog):
                             game.display_name, message.id, message.author.id,
                             message.content[:200],
                         )
-                    continue
+                else:
+                    puzzle_date_fallback = message.created_at.date()
+                    for parsed in results:
+                        puzzle_date = parsed.puzzle_date or puzzle_date_fallback
+                        cf_common.user_db.save_imported_minigame_result(
+                            message.id, guild_id, game.name, channel_id,
+                            message.author.id, parsed.puzzle_number,
+                            puzzle_date.isoformat(), parsed.accuracy,
+                            parsed.time_seconds, parsed.is_perfect,
+                            message.content, commit=False,
+                        )
+                        status['done'] += 1
+                    status['latest_message_id'] = str(message.id)
 
-                puzzle_date_fallback = message.created_at.date()
-                for parsed in results:
-                    puzzle_date = parsed.puzzle_date or puzzle_date_fallback
-                    cf_common.user_db.save_imported_minigame_result(
-                        message.id, guild_id, game.name, channel_id,
-                        message.author.id, parsed.puzzle_number,
-                        puzzle_date.isoformat(), parsed.accuracy,
-                        parsed.time_seconds, parsed.is_perfect,
-                        message.content, commit=False,
-                    )
-                    status['done'] += 1
-                status['latest_message_id'] = str(message.id)
-                batch_count += 1
-
-                if batch_count >= _IMPORT_BATCH_SIZE:
+                if uncommitted >= _IMPORT_BATCH_SIZE:
                     cf_common.user_db.conn.commit()
                     logger.info(
                         '%s import progress: guild=%s channel=%s scanned=%d imported=%d latest_msg=%s',
                         game.display_name, guild_id, channel_id,
                         status['scanned'], status['done'], status['latest_message_id'],
                     )
-                    batch_count = 0
+                    uncommitted = 0
                     await asyncio.sleep(_IMPORT_RATE_DELAY)
 
-            if batch_count > 0:
+            if uncommitted > 0:
                 cf_common.user_db.conn.commit()
 
             status['state'] = 'done'
@@ -262,6 +299,7 @@ class Minigames(commands.Cog):
             )
         finally:
             self._import_tasks.pop(key, None)
+            await self._notify_import_complete(guild_id, game, status)
 
     # ── Shared command implementations ──────────────────────────────────
 
@@ -429,6 +467,10 @@ class Minigames(commands.Cog):
         }
         task = asyncio.create_task(self._run_import(ctx.guild.id, channel.id, game))
         self._import_tasks[key] = task
+
+        # Save reply target so the background task can reply when done
+        kvs_key = f'{self._KVS_IMPORT_PREFIX}{ctx.guild.id}:{game.name}'
+        cf_common.user_db.kvs_set(kvs_key, f'{ctx.channel.id}:{ctx.message.id}')
 
         logger.info(
             '%s import started: guild=%s channel=%s cleared=%d',
