@@ -278,6 +278,16 @@ class Starboard(BackfillMixin, commands.Cog):
         emoji_family = cf_common.user_db.get_emoji_family(payload.guild_id, emoji_str)
         reaction_count = cf_common.user_db.get_merged_reactor_count(message.id, emoji_family)
 
+        # Self-healing: if Discord shows more reactions than the DB knows about
+        # (e.g. reactions added while the bot had a bug), sync from Discord.
+        emoji_family_set = set(emoji_family)
+        discord_count = sum(r.count for r in message.reactions
+                            if _emoji_str(r) in emoji_family_set)
+        if discord_count > reaction_count:
+            logger.info(f'Reactor drift on new msg={message.id} emoji={emoji_str}: '
+                        f'db_count={reaction_count} discord_count={discord_count}, resyncing')
+            reaction_count = await self._resync_reactors(message, emoji_family)
+
         logger.debug(f'Message {message.id}: {emoji_str} (family={emoji_family}) '
                      f'union_count={reaction_count} threshold={threshold}')
         if reaction_count < threshold:
