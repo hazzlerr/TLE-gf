@@ -15,10 +15,12 @@ from tle.cogs._minigame_common import (
     format_duration, parse_date_args,
 )
 from tle.cogs._minigame_akari import AKARI_GAME
+from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
 
 logger = logging.getLogger(__name__)
 
 _IMPORT_BATCH_SIZE = 500
+_IMPORT_RATE_DELAY = 0.5
 
 
 class MinigameCogError(commands.CommandError):
@@ -170,6 +172,7 @@ class Minigames(commands.Cog):
 
             batch_count = 0
             async for message in channel.history(oldest_first=True, limit=None):
+                status['scanned'] += 1
                 if message.author.bot or not message.content:
                     continue
                 parsed = game.parse(message.content)
@@ -190,25 +193,36 @@ class Minigames(commands.Cog):
                 if batch_count >= _IMPORT_BATCH_SIZE:
                     cf_common.user_db.conn.commit()
                     logger.info(
-                        '%s import progress: guild=%s channel=%s imported=%d latest_msg=%s',
+                        '%s import progress: guild=%s channel=%s scanned=%d imported=%d latest_msg=%s',
                         game.display_name, guild_id, channel_id,
-                        status['done'], status['latest_message_id'],
+                        status['scanned'], status['done'], status['latest_message_id'],
                     )
                     batch_count = 0
+                    await asyncio.sleep(_IMPORT_RATE_DELAY)
 
             if batch_count > 0:
                 cf_common.user_db.conn.commit()
 
             status['state'] = 'done'
             logger.info(
-                '%s import complete: guild=%s channel=%s total=%d',
-                game.display_name, guild_id, channel_id, status['done'],
+                '%s import complete: guild=%s channel=%s scanned=%d imported=%d',
+                game.display_name, guild_id, channel_id,
+                status['scanned'], status['done'],
             )
         except asyncio.CancelledError:
             status['state'] = 'cancelled'
             cf_common.user_db.conn.rollback()
-            logger.info('%s import cancelled: guild=%s', game.display_name, guild_id)
+            logger.info('%s import cancelled: guild=%s scanned=%d imported=%d',
+                        game.display_name, guild_id, status['scanned'], status['done'])
             raise
+        except RetryExhaustedError as exc:
+            status['state'] = 'failed'
+            status['error'] = f'Discord API retries exhausted: {exc.last_exception}'
+            cf_common.user_db.conn.rollback()
+            logger.error(
+                '%s import failed (retries exhausted): guild=%s channel=%s',
+                game.display_name, guild_id, channel_id, exc_info=True,
+            )
         except Exception as exc:
             status['state'] = 'failed'
             status['error'] = str(exc)
@@ -373,6 +387,7 @@ class Minigames(commands.Cog):
         self._import_status[key] = {
             'state': 'running',
             'channel_id': channel.id,
+            'scanned': 0,
             'done': 0,
             'error': None,
             'latest_message_id': None,
@@ -397,10 +412,14 @@ class Minigames(commands.Cog):
             raise MinigameCogError(
                 f'No {game.display_name} import has been started.')
 
+        elapsed = dt.datetime.now() - status['started_at']
+        elapsed_str = str(elapsed).split('.')[0]  # drop microseconds
         lines = [
             f'state: `{status["state"]}`',
             f'channel: <#{status["channel_id"]}>',
-            f'imported rows: **{status["done"]}**',
+            f'messages scanned: **{status["scanned"]}**',
+            f'results imported: **{status["done"]}**',
+            f'elapsed: `{elapsed_str}`',
         ]
         if status['latest_message_id'] is not None:
             lines.append(f'latest message: `{status["latest_message_id"]}`')

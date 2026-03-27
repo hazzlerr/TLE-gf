@@ -443,7 +443,7 @@ class TestCogSafety:
         cog = Minigames(bot=_FakeBot())
         key = (1, 'akari')
         cog._import_status[key] = {
-            'state': 'running', 'done': 0,
+            'state': 'running', 'scanned': 0, 'done': 0,
             'latest_message_id': None, 'error': None,
         }
 
