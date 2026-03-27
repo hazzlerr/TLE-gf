@@ -371,7 +371,7 @@ def upgrade_1_14_0(db):
     ''')
     db.execute('''
         CREATE TABLE IF NOT EXISTS minigame_result (
-            message_id     TEXT PRIMARY KEY,
+            message_id     TEXT NOT NULL,
             guild_id       TEXT NOT NULL,
             game           TEXT NOT NULL,
             channel_id     TEXT NOT NULL,
@@ -381,7 +381,8 @@ def upgrade_1_14_0(db):
             accuracy       INTEGER NOT NULL,
             time_seconds   INTEGER NOT NULL,
             is_perfect     INTEGER NOT NULL DEFAULT 0,
-            raw_content    TEXT NOT NULL DEFAULT ''
+            raw_content    TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (message_id, game, puzzle_number)
         )
     ''')
     db.execute('''
@@ -401,7 +402,7 @@ def upgrade_1_15_0(db):
     logger.info('1.15.0: Creating minigame import table')
     db.execute('''
         CREATE TABLE IF NOT EXISTS minigame_import_result (
-            message_id     TEXT PRIMARY KEY,
+            message_id     TEXT NOT NULL,
             guild_id       TEXT NOT NULL,
             game           TEXT NOT NULL,
             channel_id     TEXT NOT NULL,
@@ -411,7 +412,8 @@ def upgrade_1_15_0(db):
             accuracy       INTEGER NOT NULL,
             time_seconds   INTEGER NOT NULL,
             is_perfect     INTEGER NOT NULL DEFAULT 0,
-            raw_content    TEXT NOT NULL DEFAULT ''
+            raw_content    TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (message_id, game, puzzle_number)
         )
     ''')
     db.execute('''

@@ -465,4 +465,5 @@ _load_module('tle.cogs.versus', os.path.join(_cogs_path, 'versus.py'))
 # minigame cog modules
 _load_module('tle.cogs._minigame_common', os.path.join(_cogs_path, '_minigame_common.py'))
 _load_module('tle.cogs._minigame_akari', os.path.join(_cogs_path, '_minigame_akari.py'))
+_load_module('tle.cogs._minigame_guessgame', os.path.join(_cogs_path, '_minigame_guessgame.py'))
 _load_module('tle.cogs.minigames', os.path.join(_cogs_path, 'minigames.py'))

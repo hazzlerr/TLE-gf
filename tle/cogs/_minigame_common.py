@@ -2,8 +2,8 @@
 
 import datetime as dt
 import time
-from dataclasses import dataclass
-from typing import Callable, Optional
+from dataclasses import dataclass, field
+from typing import Callable, List, Optional
 
 from tle.util import codeforces_common as cf_common
 
@@ -15,10 +15,10 @@ _TIMELINE_KEYWORDS = {'week', 'month', 'year'}
 class ParsedResult:
     """Parsed result from a daily puzzle game message."""
     puzzle_number: int
-    puzzle_date: dt.date
-    accuracy: int
-    time_seconds: int
-    is_perfect: bool
+    puzzle_date: Optional[dt.date] = None  # None = cog fills from message timestamp
+    accuracy: int = 0
+    time_seconds: int = 0
+    is_perfect: bool = False
 
 
 @dataclass(frozen=True)
@@ -26,15 +26,17 @@ class GameDef:
     """Definition of a daily puzzle minigame.
 
     To add a new game, create a ``GameDef`` with a parser that converts a
-    Discord message body into a ``ParsedResult`` (or ``None`` if the message
-    doesn't match).  Then register it in ``Minigames.GAMES`` and add thin
-    command wrappers in ``minigames.py``.
+    Discord message body into a list of ``ParsedResult`` (empty list if the
+    message doesn't match).  Then register it in ``Minigames.GAMES`` and add
+    thin command wrappers in ``minigames.py``.
     """
     name: str               # short key used in DB, e.g. 'akari'
     display_name: str       # human-readable, e.g. 'Daily Akari'
     feature_flag: str       # guild config key, e.g. 'akari'
-    aliases: tuple          # command aliases, e.g. ('dailyakari',)
-    parse: Callable[[str], Optional[ParsedResult]]
+    parse: Callable[[str], List[ParsedResult]]
+    # Optional per-game overrides (defaults = Akari-style scoring)
+    score_matchup: Optional[Callable] = None
+    is_eligible_winner: Optional[Callable] = None
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -78,7 +80,7 @@ def format_duration(total_seconds):
 
 # ── Scoring ─────────────────────────────────────────────────────────────
 
-def score_matchup(row1, row2):
+def default_score_matchup(row1, row2):
     """Default scoring: perfect beats non-perfect; among perfects, faster wins."""
     if row1.is_perfect and row2.is_perfect:
         if row1.time_seconds < row2.time_seconds:
@@ -93,7 +95,14 @@ def score_matchup(row1, row2):
     return 0.5, 0.5
 
 
-def compute_vs(rows1, rows2):
+def default_is_eligible_winner(row):
+    """Default eligibility for top leaderboard: only perfect results."""
+    return bool(row.is_perfect)
+
+
+def compute_vs(rows1, rows2, score_fn=None):
+    if score_fn is None:
+        score_fn = default_score_matchup
     best1 = pick_best_results(rows1)
     best2 = pick_best_results(rows2)
     common = sorted(set(best1) & set(best2))
@@ -102,7 +111,7 @@ def compute_vs(rows1, rows2):
     wins1, wins2, ties = 0, 0, 0
 
     for key in common:
-        pts1, pts2 = score_matchup(best1[key], best2[key])
+        pts1, pts2 = score_fn(best1[key], best2[key])
         score1 += pts1
         score2 += pts2
         if pts1 == pts2:
@@ -141,7 +150,9 @@ def compute_streak(rows):
     return streak
 
 
-def compute_top(rows):
+def compute_top(rows, is_eligible=None):
+    if is_eligible is None:
+        is_eligible = default_is_eligible_winner
     best_by_user_puzzle = {}
     for row in rows:
         key = (str(row.user_id), result_key(row))
@@ -151,12 +162,14 @@ def compute_top(rows):
 
     best_per_puzzle = {}
     for (_, puzzle_key), row in best_by_user_puzzle.items():
-        if not row.is_perfect:
+        if not is_eligible(row):
             continue
         entry = best_per_puzzle.get(puzzle_key)
-        if entry is None or row.time_seconds < entry['time_seconds']:
-            best_per_puzzle[puzzle_key] = {'time_seconds': row.time_seconds, 'rows': [row]}
-        elif row.time_seconds == entry['time_seconds']:
+        # Compare without message_id tiebreaker so tied results both count as winners
+        row_key = result_sort_key(row)[:3]
+        if entry is None or row_key > entry['sort_key']:
+            best_per_puzzle[puzzle_key] = {'sort_key': row_key, 'rows': [row]}
+        elif row_key == entry['sort_key']:
             entry['rows'].append(row)
 
     wins_by_user = {}
@@ -171,12 +184,17 @@ def compute_top(rows):
 # ── Argument parsing ────────────────────────────────────────────────────
 
 def parse_date_args(args):
-    """Parse timeline filter arguments.  Returns ``(dlo, dhi)`` timestamps.
+    """Parse timeline and puzzle-number filter arguments.
+
+    Returns ``(dlo, dhi, plo, phi)`` where dlo/dhi are timestamps and
+    plo/phi are puzzle-number bounds (0 = unbounded).
 
     Raises ``ValueError`` on unrecognized arguments.
     """
     dlo = 0
     dhi = _NO_TIME_BOUND
+    plo = 0
+    phi = 0
 
     for arg in args:
         lower = arg.lower()
@@ -193,6 +211,11 @@ def parse_date_args(args):
             dlo = max(dlo, cf_common.parse_date(arg[3:]))
         elif lower.startswith('d<'):
             dhi = min(dhi, cf_common.parse_date(arg[2:]))
+        elif lower.startswith('p>='):
+            plo = max(plo, int(arg[3:]))
+        elif lower.startswith('p<'):
+            val = int(arg[2:])
+            phi = min(phi, val) if phi > 0 else val
         else:
             raise ValueError(f'Unrecognized filter: `{arg}`.')
-    return dlo, dhi
+    return dlo, dhi, plo, phi

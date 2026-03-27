@@ -15,6 +15,7 @@ from tle.cogs._minigame_common import (
     format_duration, parse_date_args,
 )
 from tle.cogs._minigame_akari import AKARI_GAME
+from tle.cogs._minigame_guessgame import GUESSGAME_GAME
 from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,7 @@ def _safe_user_name(guild, user_id):
 class Minigames(commands.Cog):
     GAMES = {
         'akari': AKARI_GAME,
+        'guessgame': GUESSGAME_GAME,
     }
 
     def __init__(self, bot):
@@ -92,35 +94,32 @@ class Minigames(commands.Cog):
     # ── Listeners ───────────────────────────────────────────────────────
 
     async def _ingest_message(self, message, game):
-        parsed = game.parse(message.content)
-        if parsed is None:
+        results = game.parse(message.content)
+        if not results:
             return
 
-        existing = cf_common.user_db.get_minigame_result_for_user_puzzle(
-            message.guild.id, game.name, message.author.id, parsed.puzzle_number
-        )
-        if existing is not None and str(existing.message_id) != str(message.id):
-            logger.info(
-                '%s result ignored (duplicate): guild=%s msg=%s user=%s puzzle=%s first_msg=%s',
-                game.display_name, message.guild.id, message.id,
-                message.author.id, parsed.puzzle_number, existing.message_id,
+        puzzle_date_fallback = message.created_at.date()
+
+        for parsed in results:
+            existing = cf_common.user_db.get_minigame_result_for_user_puzzle(
+                message.guild.id, game.name, message.author.id, parsed.puzzle_number
             )
-            return
+            if existing is not None and str(existing.message_id) != str(message.id):
+                logger.info(
+                    '%s result ignored (duplicate): guild=%s msg=%s user=%s puzzle=%s first_msg=%s',
+                    game.display_name, message.guild.id, message.id,
+                    message.author.id, parsed.puzzle_number, existing.message_id,
+                )
+                continue
 
-        cf_common.user_db.save_minigame_result(
-            message.id, message.guild.id, game.name, message.channel.id,
-            message.author.id, parsed.puzzle_number,
-            parsed.puzzle_date.isoformat(), parsed.accuracy,
-            parsed.time_seconds, parsed.is_perfect, message.content,
-        )
-        logger.info(
-            '%s result stored: guild=%s channel=%s msg=%s user=%s puzzle=%s '
-            'date=%s accuracy=%s time=%s perfect=%s',
-            game.display_name, message.guild.id, message.channel.id,
-            message.id, message.author.id, parsed.puzzle_number,
-            parsed.puzzle_date.isoformat(), parsed.accuracy,
-            parsed.time_seconds, parsed.is_perfect,
-        )
+            puzzle_date = parsed.puzzle_date or puzzle_date_fallback
+
+            cf_common.user_db.save_minigame_result(
+                message.id, message.guild.id, game.name, message.channel.id,
+                message.author.id, parsed.puzzle_number,
+                puzzle_date.isoformat(), parsed.accuracy,
+                parsed.time_seconds, parsed.is_perfect, message.content,
+            )
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -141,11 +140,13 @@ class Minigames(commands.Cog):
         if game is None:
             return
         try:
-            parsed = game.parse(after.content)
-            if parsed is not None:
+            # Delete all existing live results for this message, then re-ingest.
+            # Handles the case where an edit removes some results from a multi-result message.
+            cf_common.user_db.delete_minigame_result(after.id)
+            results = game.parse(after.content)
+            if results:
                 await self._ingest_message(after, game)
             else:
-                cf_common.user_db.delete_minigame_result(after.id)
                 cf_common.user_db.delete_imported_minigame_result(after.id)
         except Exception:
             logger.error('Error handling message edit %s', after.id, exc_info=True)
@@ -175,18 +176,21 @@ class Minigames(commands.Cog):
                 status['scanned'] += 1
                 if message.author.bot or not message.content:
                     continue
-                parsed = game.parse(message.content)
-                if parsed is None:
+                results = game.parse(message.content)
+                if not results:
                     continue
 
-                cf_common.user_db.save_imported_minigame_result(
-                    message.id, guild_id, game.name, channel_id,
-                    message.author.id, parsed.puzzle_number,
-                    parsed.puzzle_date.isoformat(), parsed.accuracy,
-                    parsed.time_seconds, parsed.is_perfect,
-                    message.content, commit=False,
-                )
-                status['done'] += 1
+                puzzle_date_fallback = message.created_at.date()
+                for parsed in results:
+                    puzzle_date = parsed.puzzle_date or puzzle_date_fallback
+                    cf_common.user_db.save_imported_minigame_result(
+                        message.id, guild_id, game.name, channel_id,
+                        message.author.id, parsed.puzzle_number,
+                        puzzle_date.isoformat(), parsed.accuracy,
+                        parsed.time_seconds, parsed.is_perfect,
+                        message.content, commit=False,
+                    )
+                    status['done'] += 1
                 status['latest_message_id'] = str(message.id)
                 batch_count += 1
 
@@ -263,15 +267,15 @@ class Minigames(commands.Cog):
     async def _cmd_vs(self, ctx, game, member1, member2, *args):
         self._require_enabled(ctx.guild.id, game)
         try:
-            dlo, dhi = parse_date_args(args)
+            dlo, dhi, plo, phi = parse_date_args(args)
         except ValueError as e:
             raise MinigameCogError(str(e)) from e
 
         rows1 = cf_common.user_db.get_minigame_results_for_user(
-            ctx.guild.id, game.name, member1.id, dlo, dhi)
+            ctx.guild.id, game.name, member1.id, dlo, dhi, plo, phi)
         rows2 = cf_common.user_db.get_minigame_results_for_user(
-            ctx.guild.id, game.name, member2.id, dlo, dhi)
-        stats = compute_vs(rows1, rows2)
+            ctx.guild.id, game.name, member2.id, dlo, dhi, plo, phi)
+        stats = compute_vs(rows1, rows2, game.score_matchup)
         if stats['common_count'] == 0:
             raise MinigameCogError(
                 f'These users have no common {game.display_name} puzzles yet.')
@@ -301,12 +305,12 @@ class Minigames(commands.Cog):
                 member = ctx.author
 
         try:
-            dlo, dhi = parse_date_args(filter_args)
+            dlo, dhi, plo, phi = parse_date_args(filter_args)
         except ValueError as e:
             raise MinigameCogError(str(e)) from e
 
         rows = cf_common.user_db.get_minigame_results_for_user(
-            ctx.guild.id, game.name, member.id, dlo, dhi)
+            ctx.guild.id, game.name, member.id, dlo, dhi, plo, phi)
         streak = compute_streak(rows)
         if not rows:
             raise MinigameCogError(
@@ -328,13 +332,13 @@ class Minigames(commands.Cog):
     async def _cmd_top(self, ctx, game, *args):
         self._require_enabled(ctx.guild.id, game)
         try:
-            dlo, dhi = parse_date_args(args)
+            dlo, dhi, plo, phi = parse_date_args(args)
         except ValueError as e:
             raise MinigameCogError(str(e)) from e
 
         rows = cf_common.user_db.get_minigame_results_for_guild(
-            ctx.guild.id, game.name, dlo, dhi)
-        winners = compute_top(rows)
+            ctx.guild.id, game.name, dlo, dhi, plo, phi)
+        winners = compute_top(rows, game.is_eligible_winner)
         if not winners:
             raise MinigameCogError(
                 f'No {game.display_name} winners found for this range.')
@@ -481,17 +485,17 @@ class Minigames(commands.Cog):
         await self._cmd_show(ctx, AKARI_GAME)
 
     @akari.command(name='vs', brief='Head-to-head comparison',
-                   usage='@user1 @user2 [week|month|year] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
+                   usage='@user1 @user2 [filters...]')
     async def akari_vs(self, ctx, member1: discord.Member, member2: discord.Member, *args):
         await self._cmd_vs(ctx, AKARI_GAME, member1, member2, *args)
 
     @akari.command(name='streak', brief='Show current perfect streak',
-                   usage='[@user] [week|month|year] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
+                   usage='[@user] [filters...]')
     async def akari_streak(self, ctx, *args):
         await self._cmd_streak(ctx, AKARI_GAME, *args)
 
     @akari.command(name='top', brief='Show winners leaderboard',
-                   usage='[week|month|year] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
+                   usage='[filters...]')
     async def akari_top(self, ctx, *args):
         await self._cmd_top(ctx, AKARI_GAME, *args)
 
@@ -526,6 +530,75 @@ class Minigames(commands.Cog):
     @commands.has_role(constants.TLE_ADMIN)
     async def akari_import_clear(self, ctx):
         await self._cmd_import_clear(ctx, AKARI_GAME)
+
+    # ── GuessGame commands: ;minigames guessgame … ──────────────────────
+
+    @minigames.group(name='guessgame', aliases=['gg'], brief='GuessThe.Game commands',
+                     invoke_without_command=True)
+    async def guessgame(self, ctx):
+        """GuessThe.Game commands."""
+        await ctx.send_help(ctx.command)
+
+    @guessgame.command(name='here', brief='Set the GuessGame channel')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def gg_here(self, ctx):
+        await self._cmd_here(ctx, GUESSGAME_GAME)
+
+    @guessgame.command(name='clear', brief='Clear the GuessGame channel')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def gg_clear(self, ctx):
+        await self._cmd_clear(ctx, GUESSGAME_GAME)
+
+    @guessgame.command(name='show', brief='Show GuessGame settings')
+    async def gg_show(self, ctx):
+        await self._cmd_show(ctx, GUESSGAME_GAME)
+
+    @guessgame.command(name='vs', brief='Head-to-head comparison',
+                       usage='@user1 @user2 [p>=N] [p<N] [filters...]')
+    async def gg_vs(self, ctx, member1: discord.Member, member2: discord.Member, *args):
+        await self._cmd_vs(ctx, GUESSGAME_GAME, member1, member2, *args)
+
+    @guessgame.command(name='streak', brief='Show current win streak',
+                       usage='[@user] [filters...]')
+    async def gg_streak(self, ctx, *args):
+        await self._cmd_streak(ctx, GUESSGAME_GAME, *args)
+
+    @guessgame.command(name='top', brief='Show winners leaderboard',
+                       usage='[p>=N] [p<N] [filters...]')
+    async def gg_top(self, ctx, *args):
+        await self._cmd_top(ctx, GUESSGAME_GAME, *args)
+
+    @guessgame.command(name='remove', brief='Remove a user result for a puzzle',
+                       usage='@user puzzle_id')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def gg_remove(self, ctx, member: discord.Member, puzzle_id: int):
+        await self._cmd_remove(ctx, GUESSGAME_GAME, member, puzzle_id)
+
+    @guessgame.group(name='import', brief='Manage imported history',
+                     invoke_without_command=True)
+    @commands.has_role(constants.TLE_ADMIN)
+    async def gg_import(self, ctx):
+        await ctx.send_help(ctx.command)
+
+    @gg_import.command(name='start', brief='Rebuild imported history')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def gg_import_start(self, ctx, channel: discord.TextChannel = None):
+        await self._cmd_import_start(ctx, GUESSGAME_GAME, channel)
+
+    @gg_import.command(name='status', brief='Show import status')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def gg_import_status(self, ctx):
+        await self._cmd_import_status(ctx, GUESSGAME_GAME)
+
+    @gg_import.command(name='cancel', brief='Cancel a running import')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def gg_import_cancel(self, ctx):
+        await self._cmd_import_cancel(ctx, GUESSGAME_GAME)
+
+    @gg_import.command(name='clear', brief='Delete imported history')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def gg_import_clear(self, ctx):
+        await self._cmd_import_clear(ctx, GUESSGAME_GAME)
 
     # ── Error handler ───────────────────────────────────────────────────
 

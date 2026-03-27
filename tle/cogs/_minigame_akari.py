@@ -44,18 +44,18 @@ def _parse_date(date_text):
 
 
 def parse_akari_message(content):
-    """Parse a Daily Akari result message.  Returns ``ParsedResult`` or ``None``."""
+    """Parse a Daily Akari result message.  Returns a list with one ``ParsedResult``, or ``[]``."""
     lines = [line.strip() for line in content.splitlines() if line.strip()]
     if len(lines) < 3:
-        return None
+        return []
 
     first_match = _FIRST_LINE_RE.match(lines[0])
     if first_match is None:
-        return None
+        return []
 
     date_match = _DATE_RE.search(lines[1])
     if date_match is None:
-        return None
+        return []
 
     stats_line = None
     for line in lines[2:]:
@@ -63,11 +63,11 @@ def parse_akari_message(content):
             stats_line = line
             break
     if stats_line is None:
-        return None
+        return []
 
     time_match = _TIME_RE.search(stats_line)
     if time_match is None:
-        return None
+        return []
 
     is_perfect = 'perfect' in stats_line.lower() or '🌟' in stats_line
     accuracy_match = _ACCURACY_RE.search(stats_line)
@@ -76,27 +76,26 @@ def parse_akari_message(content):
     elif accuracy_match is not None:
         accuracy = int(accuracy_match.group(1))
     else:
-        return None
+        return []
 
     try:
         puzzle_date = _parse_date(date_match.group(1))
         time_seconds = _parse_time(time_match.group(1))
     except ValueError:
-        return None
+        return []
 
-    return ParsedResult(
+    return [ParsedResult(
         puzzle_number=int(first_match.group(1)),
         puzzle_date=puzzle_date,
         accuracy=accuracy,
         time_seconds=time_seconds,
         is_perfect=is_perfect,
-    )
+    )]
 
 
 AKARI_GAME = GameDef(
     name='akari',
     display_name='Daily Akari',
     feature_flag='akari',
-    aliases=('dailyakari',),
     parse=parse_akari_message,
 )

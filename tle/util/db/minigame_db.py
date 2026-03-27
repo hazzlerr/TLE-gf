@@ -37,22 +37,35 @@ class MinigameDbMixin:
             FROM {table_name}
         '''
 
-    def _minigame_filtered_union_query(self, guild_id, game, dlo=0, dhi=_NO_TIME_BOUND):
+    def _minigame_filtered_union_query(self, guild_id, game, dlo=0, dhi=_NO_TIME_BOUND,
+                                        plo=0, phi=0):
         guild_id = str(guild_id)
-        params = [guild_id, game, guild_id, game]
-        date_clauses = []
+        base_params = [guild_id, game]
+        extra_clauses = []
+        extra_params = []
+
         dlo_text = _timestamp_to_date_text(dlo)
         if dlo_text is not None:
-            date_clauses.append('puzzle_date >= ?')
-            params.extend([dlo_text, dlo_text])
+            extra_clauses.append('puzzle_date >= ?')
+            extra_params.append(dlo_text)
         dhi_text = _timestamp_to_date_text(dhi)
         if dhi_text is not None and dhi < _NO_TIME_BOUND:
-            date_clauses.append('puzzle_date < ?')
-            params.extend([dhi_text, dhi_text])
+            extra_clauses.append('puzzle_date < ?')
+            extra_params.append(dhi_text)
+        if plo > 0:
+            extra_clauses.append('puzzle_number >= ?')
+            extra_params.append(int(plo))
+        if phi > 0:
+            extra_clauses.append('puzzle_number < ?')
+            extra_params.append(int(phi))
 
         extra = ''
-        if date_clauses:
-            extra = ' AND ' + ' AND '.join(date_clauses)
+        if extra_clauses:
+            extra = ' AND ' + ' AND '.join(extra_clauses)
+
+        # Each UNION leg needs its own copy of (base + extra) params
+        leg_params = base_params + extra_params
+        params = leg_params + leg_params
 
         query = f'''
             WITH minigame_all AS (
@@ -65,6 +78,8 @@ class MinigameDbMixin:
                       SELECT 1
                       FROM minigame_result live
                       WHERE live.message_id = minigame_import_result.message_id
+                        AND live.game = minigame_import_result.game
+                        AND live.puzzle_number = minigame_import_result.puzzle_number
                   )
             ),
             first_per_user_puzzle AS (
@@ -194,8 +209,9 @@ class MinigameDbMixin:
             params + (str(user_id), int(puzzle_number))
         ).fetchone()
 
-    def get_minigame_results_for_user(self, guild_id, game, user_id, dlo=0, dhi=_NO_TIME_BOUND):
-        query, params = self._minigame_filtered_union_query(guild_id, game, dlo, dhi)
+    def get_minigame_results_for_user(self, guild_id, game, user_id,
+                                       dlo=0, dhi=_NO_TIME_BOUND, plo=0, phi=0):
+        query, params = self._minigame_filtered_union_query(guild_id, game, dlo, dhi, plo, phi)
         return self.conn.execute(
             f'''
             {query}
@@ -205,8 +221,9 @@ class MinigameDbMixin:
             params + (str(user_id),)
         ).fetchall()
 
-    def get_minigame_results_for_guild(self, guild_id, game, dlo=0, dhi=_NO_TIME_BOUND):
-        query, params = self._minigame_filtered_union_query(guild_id, game, dlo, dhi)
+    def get_minigame_results_for_guild(self, guild_id, game,
+                                        dlo=0, dhi=_NO_TIME_BOUND, plo=0, phi=0):
+        query, params = self._minigame_filtered_union_query(guild_id, game, dlo, dhi, plo, phi)
         return self.conn.execute(
             f'''
             {query}

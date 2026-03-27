@@ -17,6 +17,7 @@ from tle.cogs._minigame_common import (
     parse_date_args,
 )
 from tle.cogs._minigame_akari import parse_akari_message
+from tle.cogs._minigame_guessgame import parse_guessgame_message, guessgame_score_matchup
 from tle.cogs.minigames import Minigames
 
 
@@ -39,7 +40,7 @@ class FakeMinigameDb(MinigameDbMixin):
         ''')
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS minigame_result (
-                message_id     TEXT PRIMARY KEY,
+                message_id     TEXT NOT NULL,
                 guild_id       TEXT NOT NULL,
                 game           TEXT NOT NULL,
                 channel_id     TEXT NOT NULL,
@@ -49,12 +50,13 @@ class FakeMinigameDb(MinigameDbMixin):
                 accuracy       INTEGER NOT NULL,
                 time_seconds   INTEGER NOT NULL,
                 is_perfect     INTEGER NOT NULL DEFAULT 0,
-                raw_content    TEXT NOT NULL DEFAULT ''
+                raw_content    TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (message_id, game, puzzle_number)
             )
         ''')
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS minigame_import_result (
-                message_id     TEXT PRIMARY KEY,
+                message_id     TEXT NOT NULL,
                 guild_id       TEXT NOT NULL,
                 game           TEXT NOT NULL,
                 channel_id     TEXT NOT NULL,
@@ -64,7 +66,8 @@ class FakeMinigameDb(MinigameDbMixin):
                 accuracy       INTEGER NOT NULL,
                 time_seconds   INTEGER NOT NULL,
                 is_perfect     INTEGER NOT NULL DEFAULT 0,
-                raw_content    TEXT NOT NULL DEFAULT ''
+                raw_content    TEXT NOT NULL DEFAULT '',
+                PRIMARY KEY (message_id, game, puzzle_number)
             )
         ''')
         self.conn.execute('''
@@ -104,13 +107,14 @@ def db():
 
 class TestParsing:
     def test_parse_perfect_result(self):
-        parsed = parse_akari_message(
+        results = parse_akari_message(
             'Daily Akari 😊 445\n'
             '✅2026-03-26 (Thu)✅\n'
             '🌟 Perfect!   🕓 1:29\n'
             'https://dailyakari.com/'
         )
-        assert parsed is not None
+        assert len(results) == 1
+        parsed = results[0]
         assert parsed.puzzle_number == 445
         assert parsed.puzzle_date == dt.date(2026, 3, 26)
         assert parsed.is_perfect is True
@@ -118,31 +122,32 @@ class TestParsing:
         assert parsed.time_seconds == 89
 
     def test_parse_partial_result(self):
-        parsed = parse_akari_message(
+        results = parse_akari_message(
             'Daily Akari 445\n'
             '✅03/26/2026✅\n'
             '🎯 96%   🕓 1:00\n'
             'https://dailyakari.com/'
         )
-        assert parsed is not None
+        assert len(results) == 1
+        parsed = results[0]
         assert parsed.puzzle_date == dt.date(2026, 3, 26)
         assert parsed.is_perfect is False
         assert parsed.accuracy == 96
         assert parsed.time_seconds == 60
 
     def test_parse_perfect_word(self):
-        parsed = parse_akari_message(
+        results = parse_akari_message(
             'Daily Akari 500\n'
             '✅March 26, 2026✅\n'
             'Perfect   🕓 2:15\n'
             'https://dailyakari.com/'
         )
-        assert parsed is not None
-        assert parsed.is_perfect is True
-        assert parsed.accuracy == 100
+        assert len(results) == 1
+        assert results[0].is_perfect is True
+        assert results[0].accuracy == 100
 
     def test_parse_rejects_invalid_message(self):
-        assert parse_akari_message('hello world') is None
+        assert parse_akari_message('hello world') == []
 
 
 def _row(message_id, user_id, puzzle_date, is_perfect, time_seconds, accuracy=100, number=1):
@@ -213,9 +218,16 @@ class TestComputation:
 
 class TestArgs:
     def test_parse_date_filters(self):
-        dlo, dhi = parse_date_args(('d>=26032026', 'd<28032026'))
+        dlo, dhi, plo, phi = parse_date_args(('d>=26032026', 'd<28032026'))
         assert dt.datetime.fromtimestamp(dlo).date() == dt.date(2026, 3, 26)
         assert dt.datetime.fromtimestamp(dhi).date() == dt.date(2026, 3, 28)
+        assert plo == 0
+        assert phi == 0
+
+    def test_parse_puzzle_number_filters(self):
+        dlo, dhi, plo, phi = parse_date_args(('p>=1300', 'p<1500'))
+        assert plo == 1300
+        assert phi == 1500
 
 
 class TestDbMixin:
@@ -304,6 +316,7 @@ class _FakeMessage:
         self.channel = _FakeChannel(channel_id)
         self.author = _FakeAuthor(user_id)
         self.content = content
+        self.created_at = dt.datetime(2026, 3, 26, tzinfo=dt.timezone.utc)
 
 
 class TestCogIngest:
@@ -521,3 +534,130 @@ class TestUpgrade:
         upgrade_1_15_0(conn)
         conn.execute('SELECT * FROM minigame_import_result').fetchall()
         conn.close()
+
+
+class TestGuessGameParsing:
+    def test_parse_single_result_green(self):
+        results = parse_guessgame_message(
+            '<#123> #1412\n\n'
+            '\U0001f3ae \U0001f7e5 \U0001f7e8 \U0001f7e9 \u2b1c \u2b1c \u2b1c\n\n'
+            '#Gamer\nhttps://GuessThe.Game/p/1412'
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.puzzle_number == 1412
+        assert r.is_perfect is False
+        assert r.accuracy == 4   # 7 - green_pos(3) = 4
+        assert r.time_seconds == 2  # yellow at pos 2
+
+    def test_parse_perfect_first_guess(self):
+        results = parse_guessgame_message(
+            '<#123> #1412\n'
+            '\U0001f3ae \U0001f7e9 \u2b1c \u2b1c \u2b1c \u2b1c \u2b1c\n'
+            'https://GuessThe.Game/p/1412'
+        )
+        assert len(results) == 1
+        assert results[0].is_perfect is True
+        assert results[0].accuracy == 6  # 7 - 1
+
+    def test_parse_no_green(self):
+        results = parse_guessgame_message(
+            '<#123> #1411\n\n'
+            '\U0001f3ae \U0001f7e5 \U0001f7e5 \U0001f7e5 \U0001f7e5 \U0001f7e8 \U0001f7e8\n\n'
+            '#ScreenshotSleuth\nhttps://GuessThe.Game/p/1411'
+        )
+        assert len(results) == 1
+        r = results[0]
+        assert r.accuracy == 0       # no green
+        assert r.time_seconds == 5   # first yellow at pos 5
+        assert r.is_perfect is False
+
+    def test_parse_multi_result_message(self):
+        content = (
+            '<#123> #1407\n'
+            '\U0001f3ae \U0001f7e5 \U0001f7e5 \U0001f7e5 \U0001f7e9 \u2b1c \u2b1c\n'
+            'https://GuessThe.Game/p/1407\n\n'
+            '<#123> #1412\n'
+            '\U0001f3ae \U0001f7e9 \u2b1c \u2b1c \u2b1c \u2b1c \u2b1c\n'
+            'https://GuessThe.Game/p/1412'
+        )
+        results = parse_guessgame_message(content)
+        assert len(results) == 2
+        assert results[0].puzzle_number == 1407
+        assert results[0].accuracy == 3  # 7-4
+        assert results[1].puzzle_number == 1412
+        assert results[1].accuracy == 6  # 7-1
+        assert results[1].is_perfect is True
+
+    def test_parse_rejects_non_guessgame(self):
+        assert parse_guessgame_message('hello world') == []
+        assert parse_guessgame_message('#1234\n\U0001f3ae \U0001f7e9') == []
+
+    def test_no_yellow_gives_time_7(self):
+        results = parse_guessgame_message(
+            '<#123> #100\n'
+            '\U0001f3ae \U0001f7e5 \U0001f7e5 \U0001f7e9 \u2b1c \u2b1c \u2b1c\n'
+            'https://GuessThe.Game/p/100'
+        )
+        assert len(results) == 1
+        assert results[0].time_seconds == 7  # no yellow
+
+
+class TestGuessGameScoring:
+    def _row(self, accuracy, time_seconds):
+        Row = namedtuple('Row', 'accuracy time_seconds is_perfect')
+        return Row(accuracy, time_seconds, accuracy == 6)
+
+    def test_earlier_green_wins(self):
+        # green_pos=2 (acc=5) vs green_pos=4 (acc=3)
+        s1, s2 = guessgame_score_matchup(self._row(5, 7), self._row(3, 7))
+        assert s1 == 1.0 and s2 == 0.0
+
+    def test_same_green_earlier_yellow_wins(self):
+        # Both green_pos=3 (acc=4), yellow_pos=1 vs 2
+        s1, s2 = guessgame_score_matchup(self._row(4, 1), self._row(4, 2))
+        assert s1 == 1.0 and s2 == 0.0
+
+    def test_no_green_vs_green_loses(self):
+        s1, s2 = guessgame_score_matchup(self._row(0, 5), self._row(3, 7))
+        assert s1 == 0.0 and s2 == 1.0
+
+    def test_identical_results_tie(self):
+        s1, s2 = guessgame_score_matchup(self._row(4, 2), self._row(4, 2))
+        assert s1 == 0.5 and s2 == 0.5
+
+    def test_both_no_green_tiebreak_by_yellow(self):
+        # Both no green (acc=0), yellow_pos=2 vs 5
+        s1, s2 = guessgame_score_matchup(self._row(0, 2), self._row(0, 5))
+        assert s1 == 1.0 and s2 == 0.0
+
+    def test_compute_vs_with_guessgame_scoring(self):
+        Row = namedtuple('Row', 'message_id user_id puzzle_date puzzle_number is_perfect time_seconds accuracy')
+        rows1 = [Row('1', '10', '2026-03-26', 1412, 1, 7, 6)]   # perfect (green pos 1)
+        rows2 = [Row('2', '20', '2026-03-26', 1412, 0, 2, 4)]   # green pos 3
+        stats = compute_vs(rows1, rows2, guessgame_score_matchup)
+        assert stats['wins1'] == 1
+        assert stats['wins2'] == 0
+
+    def test_multi_result_ingestion(self, db, monkeypatch):
+        """Multi-result message stores all results under the same message_id."""
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(1, 'guessgame', '1')
+        db.set_minigame_channel(1, 'guessgame', 10)
+
+        content = (
+            '<#123> #1407\n'
+            '\U0001f3ae \U0001f7e5 \U0001f7e5 \U0001f7e5 \U0001f7e9 \u2b1c \u2b1c\n'
+            'https://GuessThe.Game/p/1407\n\n'
+            '<#123> #1412\n'
+            '\U0001f3ae \U0001f7e9 \u2b1c \u2b1c \u2b1c \u2b1c \u2b1c\n'
+            'https://GuessThe.Game/p/1412'
+        )
+        cog = Minigames(bot=None)
+        msg = _FakeMessage(500, 1, 10, 999, content)
+        asyncio.run(cog.on_message(msg))
+
+        rows = db.get_minigame_results_for_user(1, 'guessgame', 999)
+        assert len(rows) == 2
+        puzzles = {r.puzzle_number for r in rows}
+        assert puzzles == {1407, 1412}
