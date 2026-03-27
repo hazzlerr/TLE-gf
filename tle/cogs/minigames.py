@@ -1,6 +1,7 @@
 import asyncio
 import datetime as dt
 import logging
+from typing import Union
 
 import discord
 from discord.ext import commands
@@ -593,7 +594,7 @@ class Minigames(commands.Cog):
 
     @akari_import.command(name='start', brief='Rebuild imported history')
     @commands.has_role(constants.TLE_ADMIN)
-    async def akari_import_start(self, ctx, channel: discord.TextChannel = None):
+    async def akari_import_start(self, ctx, channel: Union[discord.TextChannel, discord.Thread] = None):
         await self._cmd_import_start(ctx, AKARI_GAME, channel)
 
     @akari_import.command(name='status', brief='Show import status')
@@ -667,7 +668,7 @@ class Minigames(commands.Cog):
 
     @gg_import.command(name='start', brief='Rebuild imported history')
     @commands.has_role(constants.TLE_ADMIN)
-    async def gg_import_start(self, ctx, channel: discord.TextChannel = None):
+    async def gg_import_start(self, ctx, channel: Union[discord.TextChannel, discord.Thread] = None):
         await self._cmd_import_start(ctx, GUESSGAME_GAME, channel)
 
     @gg_import.command(name='status', brief='Show import status')
