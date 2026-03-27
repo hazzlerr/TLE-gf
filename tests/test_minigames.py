@@ -15,6 +15,7 @@ from tle.cogs._minigame_common import (
     compute_streak,
     compute_top,
     parse_date_args,
+    strip_codeblock,
 )
 from tle.cogs._minigame_akari import parse_akari_message
 from tle.cogs._minigame_guessgame import parse_guessgame_message, guessgame_score_matchup
@@ -780,3 +781,63 @@ class TestGuessGameScoring:
         assert len(rows) == 2
         puzzles = {r.puzzle_number for r in rows}
         assert puzzles == {1407, 1412}
+
+
+class TestStripCodeblock:
+    def test_plain_text_unchanged(self):
+        text = 'Daily Akari 436\n2026-03-17\n\U0001f31f Perfect!   \U0001f553 1:26'
+        assert strip_codeblock(text) == text
+
+    def test_triple_backtick_block(self):
+        text = '```\nDaily Akari 436\n2026-03-17\n\U0001f31f Perfect!   \U0001f553 1:26\n```'
+        assert '`' not in strip_codeblock(text)
+        assert 'Daily Akari 436' in strip_codeblock(text)
+
+    def test_triple_backtick_with_language_tag(self):
+        text = '```txt\nDaily Akari 436\n```'
+        result = strip_codeblock(text)
+        assert '`' not in result
+        assert 'Daily Akari 436' in result
+
+    def test_single_backtick_per_line(self):
+        text = '`Daily Akari 436`\n`2026-03-17`\n`\U0001f31f Perfect!   \U0001f553 1:26`'
+        result = strip_codeblock(text)
+        assert '`' not in result
+        assert 'Daily Akari 436' in result
+
+    def test_single_backtick_whole_message(self):
+        text = '`Daily Akari 436\n2026-03-17\n\U0001f31f Perfect!   \U0001f553 1:26`'
+        result = strip_codeblock(text)
+        assert '`' not in result
+        assert 'Daily Akari 436' in result
+
+
+class TestAkariCodeblockParsing:
+    """Akari parser should handle messages wrapped in Discord monospace."""
+
+    _PLAIN = 'Daily Akari \U0001f60a 436\n\u2705 2026-03-17 (Tue)\u2705\n\U0001f31f Perfect!   \U0001f553 1:26'
+
+    def _parse(self, text):
+        return parse_akari_message(strip_codeblock(text))
+
+    def test_plain(self):
+        r = self._parse(self._PLAIN)
+        assert len(r) == 1
+        assert r[0].puzzle_number == 436
+        assert r[0].is_perfect
+
+    def test_triple_backtick(self):
+        r = self._parse('```\n' + self._PLAIN + '\n```')
+        assert len(r) == 1
+        assert r[0].puzzle_number == 436
+
+    def test_single_backtick_per_line(self):
+        wrapped = '\n'.join(f'`{line}`' for line in self._PLAIN.splitlines())
+        r = self._parse(wrapped)
+        assert len(r) == 1
+        assert r[0].puzzle_number == 436
+
+    def test_single_backtick_whole(self):
+        r = self._parse('`' + self._PLAIN + '`')
+        assert len(r) == 1
+        assert r[0].puzzle_number == 436

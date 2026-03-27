@@ -12,7 +12,7 @@ from tle.util import paginator
 
 from tle.cogs._minigame_common import (
     compute_vs, compute_streak, compute_top, pick_best_results,
-    format_duration, parse_date_args,
+    format_duration, parse_date_args, strip_codeblock,
 )
 from tle.cogs._minigame_akari import AKARI_GAME
 from tle.cogs._minigame_guessgame import GUESSGAME_GAME
@@ -94,7 +94,7 @@ class Minigames(commands.Cog):
     # ── Listeners ───────────────────────────────────────────────────────
 
     async def _ingest_message(self, message, game):
-        results = game.parse(message.content)
+        results = game.parse(strip_codeblock(message.content))
         if not results:
             return
 
@@ -143,7 +143,7 @@ class Minigames(commands.Cog):
             # Delete all existing live results for this message, then re-ingest.
             # Handles the case where an edit removes some results from a multi-result message.
             cf_common.user_db.delete_minigame_result(after.id)
-            results = game.parse(after.content)
+            results = game.parse(strip_codeblock(after.content))
             if results:
                 await self._ingest_message(after, game)
             else:
@@ -176,7 +176,7 @@ class Minigames(commands.Cog):
                 status['scanned'] += 1
                 if message.author.bot or not message.content:
                     continue
-                results = game.parse(message.content)
+                results = game.parse(strip_codeblock(message.content))
                 if not results:
                     continue
 

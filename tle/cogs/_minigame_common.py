@@ -1,6 +1,7 @@
 """Shared types and computation functions for the minigames system."""
 
 import datetime as dt
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Callable, List, Optional
@@ -9,6 +10,21 @@ from tle.util import codeforces_common as cf_common
 
 _NO_TIME_BOUND = 10 ** 10
 _TIMELINE_KEYWORDS = {'week', 'month', 'year'}
+
+_CODEBLOCK_RE = re.compile(r'^```[^\n]*\n?(.*?)```\s*$', re.DOTALL)
+
+
+def strip_codeblock(text):
+    """Remove Discord code-block / inline-code markers from *text*.
+
+    Handles triple-backtick blocks (with optional language tag) and
+    per-line or whole-message single backticks so that parsers always
+    see clean content.
+    """
+    m = _CODEBLOCK_RE.match(text.strip())
+    if m:
+        return m.group(1)
+    return text.replace('`', '')
 
 
 @dataclass(frozen=True)
