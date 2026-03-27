@@ -163,12 +163,20 @@ class Minigames(commands.Cog):
 
     # ── Import ──────────────────────────────────────────────────────────
 
+    async def _resolve_channel(self, channel_id):
+        """Get a channel from cache, falling back to fetch_channel for threads."""
+        ch = self.bot.get_channel(channel_id)
+        if ch is not None:
+            return ch
+        return await self.bot.fetch_channel(channel_id)
+
     async def _run_import(self, guild_id, channel_id, game):
         key = (guild_id, game.name)
         status = self._import_status[key]
         try:
-            channel = self.bot.get_channel(channel_id)
-            if channel is None:
+            try:
+                channel = await self._resolve_channel(channel_id)
+            except discord.NotFound:
                 raise MinigameCogError(f'Channel `{channel_id}` is not available.')
 
             batch_count = 0
@@ -383,7 +391,10 @@ class Minigames(commands.Cog):
 
         configured_channel_id = self._get_channel(ctx.guild.id, game.name)
         if channel is None and configured_channel_id is not None:
-            channel = ctx.guild.get_channel(int(configured_channel_id))
+            try:
+                channel = await self._resolve_channel(int(configured_channel_id))
+            except discord.NotFound:
+                pass
         channel = channel or ctx.channel
 
         deleted = cf_common.user_db.clear_imported_minigame_results(
