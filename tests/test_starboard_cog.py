@@ -326,6 +326,36 @@ class TestBuildStarboardMessage:
         assert len(embeds) == 1
         assert embeds[0].description == 'Check this out'
 
+    def test_audio_as_file_attachment(self):
+        """Audio files are uploaded as file attachments for native playback."""
+        att = _FakeAttachment('song.mp3', url='https://cdn.example.com/song.mp3')
+        msg = _FakeMessage(attachments=[att])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert len(files) == 1
+        assert files[0] == 'File:song.mp3'
+
+    def test_audio_author_in_content_header(self):
+        """For audio messages, author name goes in content (above file attachment)."""
+        att = _FakeAttachment('song.ogg', url='https://cdn.example.com/song.ogg')
+        msg = _FakeMessage(attachments=[att])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert 'TestUser' in content
+
+    def test_audio_only_no_empty_embed(self):
+        """Audio-only messages (no text) should not have a main embed."""
+        att = _FakeAttachment('song.flac', url='https://cdn.example.com/song.flac')
+        msg = _FakeMessage(content='', attachments=[att])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert len(embeds) == 0
+
+    def test_audio_with_text_has_embed(self):
+        """Audio + text content should still have a text embed."""
+        att = _FakeAttachment('song.wav', url='https://cdn.example.com/song.wav')
+        msg = _FakeMessage(content='Listen to this', attachments=[att])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert len(embeds) == 1
+        assert embeds[0].description == 'Listen to this'
+
     def test_other_attachment_as_field_link(self):
         att = _FakeAttachment('document.pdf')
         msg = _FakeMessage(attachments=[att])

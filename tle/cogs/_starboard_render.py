@@ -30,6 +30,9 @@ _IMAGE_EXTENSIONS = ('png', 'jpeg', 'jpg', 'gif', 'webp')
 # Video extensions that need to be re-uploaded as files
 _VIDEO_EXTENSIONS = ('mp4', 'mov', 'webm')
 
+# Audio extensions that need to be re-uploaded as files for the player
+_AUDIO_EXTENSIONS = ('mp3', 'ogg', 'wav', 'flac', 'm4a', 'aac', 'wma')
+
 
 def _starboard_content(emoji_str, count, jump_url):
     """Build the header line for a starboard message.
@@ -99,6 +102,7 @@ async def build_starboard_message(message, emoji_str, count, color):
     # Scan attachments to categorise them
     image_url = None
     video_attachments = []
+    audio_attachments = []
     other_attachments = []
     for att in message.attachments:
         ext = att.filename.lower().rsplit('.', 1)[-1] if '.' in att.filename else ''
@@ -107,25 +111,29 @@ async def build_starboard_message(message, emoji_str, count, color):
                 image_url = att.url
         elif ext in _VIDEO_EXTENSIONS:
             video_attachments.append(att)
+        elif ext in _AUDIO_EXTENSIONS:
+            audio_attachments.append(att)
         else:
             other_attachments.append(att)
 
     has_video = bool(video_attachments)
+    has_audio = bool(audio_attachments)
+    has_media_files = has_video or has_audio
 
-    # For video messages, put author in the content header so it
-    # appears above the video player (file attachments render after
-    # content but before embeds).
-    if has_video:
+    # For video/audio messages, put author in the content header so it
+    # appears above the player (file attachments render after content
+    # but before embeds).
+    if has_media_files:
         safe_name = discord.utils.escape_mentions(message.author.display_name)
         content = (
             f'{emoji_str} **{count}** \u00b7 **{safe_name}** '
             f'| {message.jump_url}'
         )
-        for att in video_attachments:
+        for att in video_attachments + audio_attachments:
             try:
                 files.append(await att.to_file())
             except Exception:
-                logger.debug(f'Failed to download video attachment {att.filename}')
+                logger.debug(f'Failed to download attachment {att.filename}')
 
     # --- Reply context embed (goes first / above main embed) ---
     if message.reference and message.reference.message_id:
@@ -205,14 +213,14 @@ async def build_starboard_message(message, emoji_str, count, color):
             logger.debug(f'Could not fetch referenced message {message.reference.message_id}')
 
     # --- Main embed ---
-    # For video-only messages (no text), skip the main embed entirely.
+    # For media-only messages (no text), skip the main embed entirely.
     has_text = bool(message.content)
     has_other = bool(other_attachments)
-    need_embed = not has_video or has_text or has_other or image_url
+    need_embed = not has_media_files or has_text or has_other or image_url
 
     if need_embed:
         embed = discord.Embed(color=color, timestamp=message.created_at)
-        if not has_video:
+        if not has_media_files:
             embed.set_author(
                 name=message.author.display_name,
                 icon_url=message.author.display_avatar.url,
