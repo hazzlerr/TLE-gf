@@ -689,7 +689,7 @@ class Handles(commands.Cog):
         rankings = self._make_gudgitter_image_rankings(ctx, rows)
         await ctx.send(file=get_gudgitters_image(rankings))
 
-    @commands.command(brief="Show gudgitters of the month", aliases=["monthlygitgudders","monthlygg","monthlygitbadders", "mgg"], usage="[div1|div2|div3] [d=mmyyyy] [+all]")
+    @commands.command(brief="Show gudgitters of the month", aliases=["monthlygg","monthlygitbadders", "mgg"], usage="[div1|div2|div3] [d=mmyyyy] [+all]")
     async def monthlygitgudders(self, ctx, *args):
         """Show the top monthly gitgudders as a color-coded image."""
         now = datetime.datetime.now()

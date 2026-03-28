@@ -121,7 +121,7 @@ def test_monthlygudgitters_uses_paginator_and_month_start_rating(monkeypatch):
 
     monkeypatch.setattr(handles_module.paginator, 'paginate', fake_paginate)
     try:
-        asyncio.run(Handles.monthlygudgitters(_make_handles_cog(), ctx, 'div2', 'd=032025'))
+        asyncio.run(Handles.monthlygudgitters_all(_make_handles_cog(), ctx, 'div2', 'd=032025'))
     finally:
         cf_common.user_db = original_user_db
         cf_common.cache2 = original_cache2
@@ -174,7 +174,7 @@ def test_ggimg_sends_top_20_color_image_rankings(monkeypatch):
     assert captured['rankings'][-1] == (19, 'user20', 'h20', 1520, 180)
 
 
-def test_mggimg_sends_monthly_image_rankings(monkeypatch):
+def test_monthlygitgudders_sends_monthly_image_rankings(monkeypatch):
     User = namedtuple('User', 'rating')
     RatingChange = namedtuple('RatingChange', 'ratingUpdateTimeSeconds newRating')
     members = [_FakeMember(1, 'u1'), _FakeMember(2, 'u2')]
@@ -212,7 +212,7 @@ def test_mggimg_sends_monthly_image_rankings(monkeypatch):
 
     monkeypatch.setattr(handles_module, 'get_gudgitters_image', fake_get_gudgitters_image)
     try:
-        asyncio.run(Handles.mggimg(_make_handles_cog(), ctx, 'div2', 'd=032025'))
+        asyncio.run(Handles.monthlygitgudders(_make_handles_cog(), ctx, 'div2', 'd=032025'))
     finally:
         cf_common.user_db = original_user_db
         cf_common.cache2 = original_cache2
