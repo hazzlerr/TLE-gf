@@ -351,6 +351,20 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
             CREATE INDEX IF NOT EXISTS idx_minigame_raw_message_guild
                 ON minigame_raw_message (guild_id)
         ''')
+        # Complaints
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS complaint (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                created_at  REAL NOT NULL
+            )
+        ''')
+        self.conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_complaint_guild
+                ON complaint (guild_id, created_at DESC)
+        ''')
         self.conn.execute(
             'CREATE TABLE IF NOT EXISTS rankup ('
             'guild_id     TEXT PRIMARY KEY,'
@@ -1652,6 +1666,55 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
             'SELECT option_index, rating FROM rpoll_vote WHERE poll_id = ?',
             params=(poll_id,), row_factory=namedtuple_factory
         )
+
+    # ── Complaints ──────────────────────────────────────────────────────
+
+    def add_complaint(self, guild_id, user_id, text):
+        """Insert a complaint and return its id."""
+        import time
+        guild_id, user_id = str(guild_id), str(user_id)
+        cur = self.conn.execute(
+            'INSERT INTO complaint (guild_id, user_id, text, created_at) VALUES (?, ?, ?, ?)',
+            (guild_id, user_id, text, time.time())
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_complaints(self, guild_id):
+        """Return all complaints for a guild, newest first."""
+        guild_id = str(guild_id)
+        return self.conn.execute(
+            'SELECT id, guild_id, user_id, text, created_at '
+            'FROM complaint WHERE guild_id = ? ORDER BY created_at DESC',
+            (guild_id,)
+        ).fetchall()
+
+    def get_complaint(self, complaint_id):
+        """Return a single complaint by id, or None."""
+        row = self.conn.execute(
+            'SELECT id, guild_id, user_id, text, created_at '
+            'FROM complaint WHERE id = ?',
+            (complaint_id,)
+        ).fetchone()
+        return row
+
+    def delete_complaint(self, complaint_id):
+        """Delete a complaint by id. Returns True if a row was deleted."""
+        cur = self.conn.execute(
+            'DELETE FROM complaint WHERE id = ?', (complaint_id,)
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def count_recent_complaints(self, guild_id, user_id, since):
+        """Count complaints by a user in a guild since a timestamp."""
+        guild_id, user_id = str(guild_id), str(user_id)
+        row = self.conn.execute(
+            'SELECT COUNT(*) AS cnt FROM complaint '
+            'WHERE guild_id = ? AND user_id = ? AND created_at >= ?',
+            (guild_id, user_id, since)
+        ).fetchone()
+        return row.cnt
 
     # ── General key-value store ──────────────────────────────────────────
 

@@ -446,3 +446,23 @@ def upgrade_1_16_0(db):
     ''')
     db.commit()
     logger.info('1.16.0: Minigame raw message table created')
+
+
+@registry.register('1.17.0', 'Complaint table')
+def upgrade_1_17_0(db):
+    logger.info('1.17.0: Creating complaint table')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS complaint (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id    TEXT NOT NULL,
+            user_id     TEXT NOT NULL,
+            text        TEXT NOT NULL,
+            created_at  REAL NOT NULL
+        )
+    ''')
+    db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_complaint_guild
+            ON complaint (guild_id, created_at DESC)
+    ''')
+    db.commit()
+    logger.info('1.17.0: Complaint table created')

@@ -1,0 +1,158 @@
+"""Tests for the complaint feature — DB layer and upgrade."""
+import sqlite3
+import time
+
+import pytest
+
+from tle.util.db.user_db_conn import UserDbConn, namedtuple_factory
+
+
+class FakeComplainDb:
+    """Minimal in-memory DB with complaint table for testing."""
+
+    def __init__(self):
+        self.conn = sqlite3.connect(':memory:')
+        self.conn.row_factory = namedtuple_factory
+        self.conn.execute('''
+            CREATE TABLE complaint (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id    TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                text        TEXT NOT NULL,
+                created_at  REAL NOT NULL
+            )
+        ''')
+        self.conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_complaint_guild
+                ON complaint (guild_id, created_at DESC)
+        ''')
+        self.conn.commit()
+
+    add_complaint = UserDbConn.add_complaint
+    get_complaints = UserDbConn.get_complaints
+    get_complaint = UserDbConn.get_complaint
+    delete_complaint = UserDbConn.delete_complaint
+    count_recent_complaints = UserDbConn.count_recent_complaints
+
+
+@pytest.fixture
+def db():
+    return FakeComplainDb()
+
+
+GUILD = '111'
+USER_A = '100'
+USER_B = '200'
+
+
+class TestAddComplaint:
+    def test_add_returns_id(self, db):
+        cid = db.add_complaint(GUILD, USER_A, 'test complaint')
+        assert cid is not None and cid >= 1
+
+    def test_add_multiple_increments_id(self, db):
+        id1 = db.add_complaint(GUILD, USER_A, 'first')
+        id2 = db.add_complaint(GUILD, USER_A, 'second')
+        assert id2 > id1
+
+    def test_add_stores_text(self, db):
+        cid = db.add_complaint(GUILD, USER_A, 'my complaint text')
+        row = db.get_complaint(cid)
+        assert row.text == 'my complaint text'
+        assert row.user_id == USER_A
+        assert row.guild_id == GUILD
+
+
+class TestGetComplaints:
+    def test_empty_guild(self, db):
+        assert db.get_complaints(GUILD) == []
+
+    def test_returns_newest_first(self, db):
+        db.add_complaint(GUILD, USER_A, 'old')
+        db.add_complaint(GUILD, USER_A, 'new')
+        complaints = db.get_complaints(GUILD)
+        assert len(complaints) == 2
+        assert complaints[0].text == 'new'
+        assert complaints[1].text == 'old'
+
+    def test_guild_isolation(self, db):
+        db.add_complaint('111', USER_A, 'guild1')
+        db.add_complaint('222', USER_A, 'guild2')
+        assert len(db.get_complaints('111')) == 1
+        assert len(db.get_complaints('222')) == 1
+        assert db.get_complaints('111')[0].text == 'guild1'
+
+
+class TestGetComplaint:
+    def test_existing(self, db):
+        cid = db.add_complaint(GUILD, USER_A, 'hello')
+        row = db.get_complaint(cid)
+        assert row is not None
+        assert row.id == cid
+
+    def test_nonexistent(self, db):
+        assert db.get_complaint(9999) is None
+
+
+class TestDeleteComplaint:
+    def test_delete_existing(self, db):
+        cid = db.add_complaint(GUILD, USER_A, 'to delete')
+        assert db.delete_complaint(cid) is True
+        assert db.get_complaint(cid) is None
+
+    def test_delete_nonexistent(self, db):
+        assert db.delete_complaint(9999) is False
+
+    def test_delete_preserves_others(self, db):
+        id1 = db.add_complaint(GUILD, USER_A, 'keep')
+        id2 = db.add_complaint(GUILD, USER_A, 'remove')
+        db.delete_complaint(id2)
+        assert db.get_complaint(id1) is not None
+        assert db.get_complaint(id2) is None
+
+
+class TestCountRecentComplaints:
+    def test_no_complaints(self, db):
+        assert db.count_recent_complaints(GUILD, USER_A, 0) == 0
+
+    def test_counts_within_window(self, db):
+        db.add_complaint(GUILD, USER_A, 'one')
+        db.add_complaint(GUILD, USER_A, 'two')
+        db.add_complaint(GUILD, USER_B, 'other user')
+        since = time.time() - 10
+        assert db.count_recent_complaints(GUILD, USER_A, since) == 2
+        assert db.count_recent_complaints(GUILD, USER_B, since) == 1
+
+    def test_excludes_old(self, db):
+        # Manually insert an old complaint
+        old_time = time.time() - 99999
+        db.conn.execute(
+            'INSERT INTO complaint (guild_id, user_id, text, created_at) VALUES (?, ?, ?, ?)',
+            (GUILD, USER_A, 'old', old_time)
+        )
+        db.conn.commit()
+        db.add_complaint(GUILD, USER_A, 'recent')
+        since = time.time() - 10
+        assert db.count_recent_complaints(GUILD, USER_A, since) == 1
+
+
+class TestUpgrade1170:
+    def test_creates_complaint_table(self):
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = namedtuple_factory
+        from tle.util.db.user_db_upgrades import upgrade_1_17_0
+        upgrade_1_17_0(conn)
+        conn.execute(
+            "INSERT INTO complaint (guild_id, user_id, text, created_at) VALUES ('1','2','t',0)"
+        )
+        row = conn.execute('SELECT text FROM complaint').fetchone()
+        assert row[0] == 't'
+        conn.close()
+
+    def test_idempotent(self):
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = namedtuple_factory
+        from tle.util.db.user_db_upgrades import upgrade_1_17_0
+        upgrade_1_17_0(conn)
+        upgrade_1_17_0(conn)  # should not raise
+        conn.close()
