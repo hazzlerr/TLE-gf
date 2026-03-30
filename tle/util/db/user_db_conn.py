@@ -365,6 +365,14 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
             CREATE INDEX IF NOT EXISTS idx_complaint_guild
                 ON complaint (guild_id, created_at DESC)
         ''')
+        # Great Day signups
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS greatday_signup (
+                guild_id    TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
         self.conn.execute(
             'CREATE TABLE IF NOT EXISTS rankup ('
             'guild_id     TEXT PRIMARY KEY,'
@@ -1717,6 +1725,33 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
         return row.cnt
 
     # ── General key-value store ──────────────────────────────────────────
+
+    # ── Great Day ───────────────────────────────────────────────────────
+
+    def greatday_signup(self, guild_id, user_id):
+        """Add a user to the great day list. Returns True if newly added."""
+        try:
+            self.conn.execute(
+                'INSERT INTO greatday_signup (guild_id, user_id) VALUES (?, ?)',
+                (str(guild_id), str(user_id)))
+            self.conn.commit()
+            return True
+        except Exception:
+            return False
+
+    def greatday_remove(self, guild_id, user_id):
+        """Remove a user from the great day list. Returns True if removed."""
+        rc = self.conn.execute(
+            'DELETE FROM greatday_signup WHERE guild_id = ? AND user_id = ?',
+            (str(guild_id), str(user_id))).rowcount
+        self.conn.commit()
+        return rc > 0
+
+    def greatday_get_signups(self, guild_id):
+        """Return all signed-up user IDs for a guild."""
+        return self.conn.execute(
+            'SELECT user_id FROM greatday_signup WHERE guild_id = ?',
+            (str(guild_id),)).fetchall()
 
     def kvs_set(self, key, value):
         """Set a key-value pair. Overwrites if key exists."""

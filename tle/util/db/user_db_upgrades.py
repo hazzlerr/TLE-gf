@@ -466,3 +466,17 @@ def upgrade_1_17_0(db):
     ''')
     db.commit()
     logger.info('1.17.0: Complaint table created')
+
+
+@registry.register('1.18.0', 'Great Day signup table')
+def upgrade_1_18_0(db):
+    logger.info('1.18.0: Creating greatday_signup table')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS greatday_signup (
+            guild_id    TEXT NOT NULL,
+            user_id     TEXT NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    ''')
+    db.commit()
+    logger.info('1.18.0: greatday_signup table created')

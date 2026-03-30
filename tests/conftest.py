@@ -505,3 +505,4 @@ _load_module('tle.cogs._minigame_common', os.path.join(_cogs_path, '_minigame_co
 _load_module('tle.cogs._minigame_akari', os.path.join(_cogs_path, '_minigame_akari.py'))
 _load_module('tle.cogs._minigame_guessgame', os.path.join(_cogs_path, '_minigame_guessgame.py'))
 _load_module('tle.cogs.minigames', os.path.join(_cogs_path, 'minigames.py'))
+_load_module('tle.cogs.greatday', os.path.join(_cogs_path, 'greatday.py'))
