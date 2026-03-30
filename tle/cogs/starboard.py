@@ -677,7 +677,7 @@ class Starboard(BackfillMixin, commands.Cog):
                 jump_url = f'https://discord.com/channels/{ctx.guild.id}/{row.channel_id}/{row.original_msg_id}'
                 member = ctx.guild.get_member(int(row.author_id))
                 name = member.mention if member else f'<@{row.author_id}>'
-                lines.append(f'**#{rank}** {name} — **{row.star_count}** {emoji} — [Jump]({jump_url})')
+                lines.append(f'**#{rank}** {name} — **{row.star_count}** {emoji} — {jump_url}')
             embed = discord.Embed(
                 title=f'{emoji} Top Starred Messages',
                 description='\n'.join(lines),
