@@ -32,6 +32,7 @@ class FakeComplainDb:
     get_complaints = UserDbConn.get_complaints
     get_complaint = UserDbConn.get_complaint
     delete_complaint = UserDbConn.delete_complaint
+    delete_complaints = UserDbConn.delete_complaints
     count_recent_complaints = UserDbConn.count_recent_complaints
 
 
@@ -109,6 +110,39 @@ class TestDeleteComplaint:
         db.delete_complaint(id2)
         assert db.get_complaint(id1) is not None
         assert db.get_complaint(id2) is None
+
+
+class TestDeleteComplaints:
+    def test_bulk_delete(self, db):
+        id1 = db.add_complaint(GUILD, USER_A, 'one')
+        id2 = db.add_complaint(GUILD, USER_A, 'two')
+        id3 = db.add_complaint(GUILD, USER_A, 'three')
+        deleted = db.delete_complaints([id1, id3], GUILD)
+        assert deleted == 2
+        assert db.get_complaint(id1) is None
+        assert db.get_complaint(id2) is not None
+        assert db.get_complaint(id3) is None
+
+    def test_bulk_delete_wrong_guild(self, db):
+        cid = db.add_complaint(GUILD, USER_A, 'complaint')
+        deleted = db.delete_complaints([cid], '999')
+        assert deleted == 0
+        assert db.get_complaint(cid) is not None
+
+    def test_bulk_delete_empty_list(self, db):
+        assert db.delete_complaints([], GUILD) == 0
+
+    def test_bulk_delete_nonexistent_ids(self, db):
+        cid = db.add_complaint(GUILD, USER_A, 'keep')
+        deleted = db.delete_complaints([9998, 9999], GUILD)
+        assert deleted == 0
+        assert db.get_complaint(cid) is not None
+
+    def test_bulk_delete_partial_match(self, db):
+        id1 = db.add_complaint(GUILD, USER_A, 'exists')
+        deleted = db.delete_complaints([id1, 9999], GUILD)
+        assert deleted == 1
+        assert db.get_complaint(id1) is None
 
 
 class TestCountRecentComplaints:

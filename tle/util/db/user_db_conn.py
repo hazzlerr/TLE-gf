@@ -1714,6 +1714,22 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
         self.conn.commit()
         return cur.rowcount > 0
 
+    def delete_complaints(self, complaint_ids, guild_id):
+        """Delete multiple complaints by id, scoped to a guild.
+
+        Returns the number of rows deleted.
+        """
+        if not complaint_ids:
+            return 0
+        guild_id = str(guild_id)
+        placeholders = ','.join('?' for _ in complaint_ids)
+        cur = self.conn.execute(
+            f'DELETE FROM complaint WHERE id IN ({placeholders}) AND guild_id = ?',
+            [*complaint_ids, guild_id]
+        )
+        self.conn.commit()
+        return cur.rowcount
+
     def count_recent_complaints(self, guild_id, user_id, since):
         """Count complaints by a user in a guild since a timestamp."""
         guild_id, user_id = str(guild_id), str(user_id)
