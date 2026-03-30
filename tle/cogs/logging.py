@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 
+import discord
 from discord.ext import commands
 
 from tle.util import discord_common
@@ -42,9 +43,11 @@ class Logging(commands.Cog, logging.Handler):
                 msg = self.format(record)
                 # Not all errors will have message_contents or jump urls.
                 try:
-                    await channel.send(
-                        'Original Command: {}\nJump Url: {}'.format(
-                            record.message_content, record.jump_url))
+                    embed = discord.Embed(
+                        description=f'**Original Command:** {record.message_content}\n'
+                                    f'**Jump URL:** {record.jump_url}',
+                    )
+                    await channel.send(embed=embed)
                 except AttributeError:
                     pass
                 discord_msg_char_limit = 2000
