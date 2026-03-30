@@ -86,6 +86,33 @@ class _StubGroupResult:
 
 _commands_mod.group = lambda **kw: (lambda f: _StubGroupResult(f))
 
+# Stub discord.app_commands for slash command support
+_app_commands = types.ModuleType('discord.app_commands')
+_app_commands.__path__ = []
+
+class _StubAppGroup:
+    """Fake app_commands.Group — supports .command() decorator and class-var use."""
+    def __init__(self, *, name='', description='', parent=None, guild_only=False):
+        self.name = name
+        self.description = description
+    def command(self, **kw):
+        return lambda f: f
+
+class _StubChoice:
+    def __init__(self, *, name, value):
+        self.name = name
+        self.value = value
+    def __class_getitem__(cls, item):
+        return cls
+
+_app_commands.Group = _StubAppGroup
+_app_commands.Choice = _StubChoice
+_app_commands.describe = lambda **kw: (lambda f: f)
+_app_commands.choices = lambda **kw: (lambda f: f)
+
+sys.modules['discord.app_commands'] = _app_commands
+sys.modules['discord'].app_commands = _app_commands
+
 # Stub discord module attributes used by starboard.py
 _discord_mod = sys.modules['discord']
 class _StubEmbed:

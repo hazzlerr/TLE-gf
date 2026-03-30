@@ -1,8 +1,10 @@
 import asyncio
 import datetime as dt
 import logging
+from typing import Optional
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from tle import constants
@@ -75,6 +77,60 @@ class CaseInsensitiveMember(commands.MemberConverter):
 
 def _safe_member_name(member):
     return discord.utils.escape_mentions(member.display_name)
+
+
+# ── Slash command helpers ──────────────────────────────────────────────
+
+_TIMEFRAME_CHOICES = [
+    app_commands.Choice(name='This week', value='week'),
+    app_commands.Choice(name='This month', value='month'),
+    app_commands.Choice(name='This year', value='year'),
+]
+
+_MODE_CHOICES = [
+    app_commands.Choice(name='Raw (time only)', value='raw'),
+]
+
+
+class _FollowupChannel:
+    """Channel-like wrapper that sends via interaction followups.
+
+    Lets code that reads ``ctx.channel.id`` / ``.mention`` or calls
+    ``ctx.channel.send()`` (e.g. the paginator) work unchanged.
+    """
+
+    def __init__(self, interaction):
+        self._interaction = interaction
+        self.id = interaction.channel_id
+        self.mention = f'<#{interaction.channel_id}>'
+
+    async def send(self, content=None, *, embed=None, view=None,
+                   delete_after=None, **kw):
+        return await self._interaction.followup.send(
+            content, embed=embed, view=view, wait=True)
+
+
+class _SlashCtx:
+    """Adapter that wraps a *deferred* ``Interaction`` to look like ``commands.Context``.
+
+    Create this **after** calling ``interaction.response.defer()`` so that
+    ``followup.send()`` works immediately.
+    """
+
+    def __init__(self, interaction):
+        self.interaction = interaction
+        self.guild = interaction.guild
+        self.author = interaction.user
+        self.channel = _FollowupChannel(interaction)
+        self.bot = interaction.client
+        self.message = type('_Msg', (), {'id': 0})()
+
+    async def send(self, content=None, *, embed=None, **kw):
+        return await self.interaction.followup.send(
+            content, embed=embed, wait=True)
+
+    async def send_help(self, command=None):
+        pass
 
 
 def _safe_user_name(guild, user_id):
@@ -800,6 +856,188 @@ class Minigames(commands.Cog):
     @commands.has_role(constants.TLE_ADMIN)
     async def gg_reparse(self, ctx):
         await self._cmd_reparse(ctx, GUESSGAME_GAME)
+
+    # ── Slash commands: /akari ─────────────────────────────────────────
+
+    akari_slash = app_commands.Group(
+        name='akari', description='Daily Akari commands', guild_only=True)
+
+    def _has_admin_role(self, interaction):
+        return any(r.name == constants.TLE_ADMIN for r in interaction.user.roles)
+
+    async def _slash_send_error(self, interaction, error):
+        await interaction.followup.send(
+            embed=discord_common.embed_alert(str(error)))
+
+    @akari_slash.command(name='show', description='Show Daily Akari settings')
+    async def slash_akari_show(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        try:
+            await self._cmd_show(_SlashCtx(interaction), AKARI_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='vs', description='Head-to-head comparison')
+    @app_commands.describe(
+        member1='First player', member2='Second player',
+        timeframe='Time period filter', mode='Scoring mode')
+    @app_commands.choices(timeframe=_TIMEFRAME_CHOICES, mode=_MODE_CHOICES)
+    async def slash_akari_vs(
+        self, interaction: discord.Interaction,
+        member1: discord.Member, member2: discord.Member,
+        timeframe: Optional[app_commands.Choice[str]] = None,
+        mode: Optional[app_commands.Choice[str]] = None,
+    ):
+        await interaction.response.defer()
+        args = []
+        if timeframe:
+            args.append(timeframe.value)
+        if mode:
+            args.append(mode.value)
+        try:
+            await self._cmd_vs(
+                _SlashCtx(interaction), AKARI_GAME, member1, member2, *args)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='streak', description='Show current perfect streak')
+    @app_commands.describe(member='Player to check', timeframe='Time period filter')
+    @app_commands.choices(timeframe=_TIMEFRAME_CHOICES)
+    async def slash_akari_streak(
+        self, interaction: discord.Interaction,
+        member: Optional[discord.Member] = None,
+        timeframe: Optional[app_commands.Choice[str]] = None,
+    ):
+        await interaction.response.defer()
+        ctx = _SlashCtx(interaction)
+        if member:
+            ctx.author = member
+        args = []
+        if timeframe:
+            args.append(timeframe.value)
+        try:
+            await self._cmd_streak(ctx, AKARI_GAME, *args)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='top', description='Show winners leaderboard')
+    @app_commands.describe(timeframe='Time period filter', mode='Scoring mode')
+    @app_commands.choices(timeframe=_TIMEFRAME_CHOICES, mode=_MODE_CHOICES)
+    async def slash_akari_top(
+        self, interaction: discord.Interaction,
+        timeframe: Optional[app_commands.Choice[str]] = None,
+        mode: Optional[app_commands.Choice[str]] = None,
+    ):
+        await interaction.response.defer()
+        args = []
+        if timeframe:
+            args.append(timeframe.value)
+        if mode:
+            args.append(mode.value)
+        try:
+            await self._cmd_top(_SlashCtx(interaction), AKARI_GAME, *args)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='here', description='Set the Daily Akari channel')
+    async def slash_akari_here(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_admin_role(interaction):
+            return await self._slash_send_error(
+                interaction, f'You need the `{constants.TLE_ADMIN}` role.')
+        try:
+            await self._cmd_here(_SlashCtx(interaction), AKARI_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='clear', description='Clear the Daily Akari channel')
+    async def slash_akari_clear(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_admin_role(interaction):
+            return await self._slash_send_error(
+                interaction, f'You need the `{constants.TLE_ADMIN}` role.')
+        try:
+            await self._cmd_clear(_SlashCtx(interaction), AKARI_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='remove', description='Remove a user result')
+    @app_commands.describe(member='Player', puzzle_id='Puzzle number')
+    async def slash_akari_remove(
+        self, interaction: discord.Interaction,
+        member: discord.Member, puzzle_id: int,
+    ):
+        await interaction.response.defer()
+        if not self._has_admin_role(interaction):
+            return await self._slash_send_error(
+                interaction, f'You need the `{constants.TLE_ADMIN}` role.')
+        try:
+            await self._cmd_remove(
+                _SlashCtx(interaction), AKARI_GAME, member, puzzle_id)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='reparse', description='Reparse all stored raw messages')
+    async def slash_akari_reparse(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_admin_role(interaction):
+            return await self._slash_send_error(
+                interaction, f'You need the `{constants.TLE_ADMIN}` role.')
+        try:
+            await self._cmd_reparse(_SlashCtx(interaction), AKARI_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='import-start', description='Rebuild imported history')
+    @app_commands.describe(channel='Channel to import from')
+    async def slash_akari_import_start(
+        self, interaction: discord.Interaction,
+        channel: Optional[discord.TextChannel] = None,
+    ):
+        await interaction.response.defer()
+        if not self._has_admin_role(interaction):
+            return await self._slash_send_error(
+                interaction, f'You need the `{constants.TLE_ADMIN}` role.')
+        ctx = _SlashCtx(interaction)
+        try:
+            original = await interaction.original_response()
+            ctx.message = original
+            await self._cmd_import_start(ctx, AKARI_GAME, channel)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='import-status', description='Show import status')
+    async def slash_akari_import_status(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_admin_role(interaction):
+            return await self._slash_send_error(
+                interaction, f'You need the `{constants.TLE_ADMIN}` role.')
+        try:
+            await self._cmd_import_status(_SlashCtx(interaction), AKARI_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='import-cancel', description='Cancel a running import')
+    async def slash_akari_import_cancel(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_admin_role(interaction):
+            return await self._slash_send_error(
+                interaction, f'You need the `{constants.TLE_ADMIN}` role.')
+        try:
+            await self._cmd_import_cancel(_SlashCtx(interaction), AKARI_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='import-clear', description='Delete imported history')
+    async def slash_akari_import_clear(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_admin_role(interaction):
+            return await self._slash_send_error(
+                interaction, f'You need the `{constants.TLE_ADMIN}` role.')
+        try:
+            await self._cmd_import_clear(_SlashCtx(interaction), AKARI_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
 
     # ── Error handler ───────────────────────────────────────────────────
 

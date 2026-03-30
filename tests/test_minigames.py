@@ -1140,3 +1140,81 @@ class TestCaseInsensitiveMember:
         from tle.cogs.minigames import CaseInsensitiveMember
         with pytest.raises(Exception):
             asyncio.run(CaseInsensitiveMember().convert(ctx, 'alice'))
+
+
+# ── Slash command adapter tests ────────────────────────────────────────
+
+class _FakeFollowup:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content=None, *, embed=None, view=None, wait=False, **kw):
+        msg = type('Msg', (), {'id': len(self.sent) + 1})()
+        self.sent.append({'content': content, 'embed': embed, 'view': view})
+        return msg
+
+
+class _FakeResponse:
+    def __init__(self):
+        self.deferred = False
+
+    async def defer(self, **kw):
+        self.deferred = True
+
+
+class _FakeInteraction:
+    def __init__(self, guild_id=1, user_id=10, channel_id=100):
+        self.guild = _FakeGuild(guild_id)
+        self.user = _FakeAuthor(user_id)
+        self.channel_id = channel_id
+        self.client = None
+        self.id = 999
+        self.response = _FakeResponse()
+        self.followup = _FakeFollowup()
+
+
+class TestSlashCtx:
+    """_SlashCtx adapter maps Interaction to a ctx-like object."""
+
+    def test_maps_guild_author_channel(self):
+        from tle.cogs.minigames import _SlashCtx
+        inter = _FakeInteraction(guild_id=42, user_id=7, channel_id=99)
+        ctx = _SlashCtx(inter)
+        assert ctx.guild.id == 42
+        assert ctx.author.id == 7
+        assert ctx.channel.id == 99
+        assert ctx.channel.mention == '<#99>'
+
+    def test_send_uses_followup(self):
+        from tle.cogs.minigames import _SlashCtx
+        inter = _FakeInteraction()
+        ctx = _SlashCtx(inter)
+        asyncio.run(ctx.send('hello', embed='test_embed'))
+        assert len(inter.followup.sent) == 1
+        assert inter.followup.sent[0]['content'] == 'hello'
+        assert inter.followup.sent[0]['embed'] == 'test_embed'
+
+    def test_channel_send_uses_followup(self):
+        from tle.cogs.minigames import _FollowupChannel
+        inter = _FakeInteraction()
+        ch = _FollowupChannel(inter)
+        asyncio.run(ch.send('msg', embed='e', view='v'))
+        assert len(inter.followup.sent) == 1
+        assert inter.followup.sent[0]['embed'] == 'e'
+        assert inter.followup.sent[0]['view'] == 'v'
+
+    def test_author_override_for_streak(self):
+        from tle.cogs.minigames import _SlashCtx
+        inter = _FakeInteraction(user_id=10)
+        ctx = _SlashCtx(inter)
+        assert ctx.author.id == 10
+        other = _FakeAuthor(20)
+        ctx.author = other
+        assert ctx.author.id == 20
+
+    def test_channel_send_returns_message(self):
+        from tle.cogs.minigames import _FollowupChannel
+        inter = _FakeInteraction()
+        ch = _FollowupChannel(inter)
+        msg = asyncio.run(ch.send('hi'))
+        assert hasattr(msg, 'id')
