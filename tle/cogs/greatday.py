@@ -50,26 +50,29 @@ class GreatDay(commands.Cog):
             if last_sent == today:
                 continue
 
-            cf_common.user_db.kvs_set(kvs_key, today)
-            await self._send_greatday(guild)
+            if await self._send_greatday(guild):
+                cf_common.user_db.kvs_set(kvs_key, today)
 
     async def _send_greatday(self, guild):
+        """Pick random users and send a great day message. Returns True if sent."""
         channel_id = cf_common.user_db.get_guild_config(
             guild.id, 'greatday_channel')
         if not channel_id:
-            return
+            return False
         channel = guild.get_channel(int(channel_id))
         if channel is None:
-            return
+            return False
 
         rows = cf_common.user_db.greatday_get_signups(guild.id)
         if not rows:
-            return
+            return False
 
         user_ids = [r.user_id for r in rows]
         picked = random.sample(user_ids, min(_PICK_COUNT, len(user_ids)))
         mentions = ' '.join(f'<@{uid}>' for uid in picked)
-        await channel.send(f'I hope {mentions} are having a great day!')
+        verb = 'is' if len(picked) == 1 else 'are'
+        await channel.send(f'I hope {mentions} {verb} having a great day!')
+        return True
 
     # ── Commands ───────────────────────────────────────────────────────
 
@@ -98,6 +101,32 @@ class GreatDay(commands.Cog):
             await ctx.send(embed=discord_common.embed_alert(
                 'You are not signed up.'))
 
+    @greatday.command(name='add', brief='Add a user to the list (admin)',
+                      usage='@user')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def add_user(self, ctx, member: discord.Member):
+        added = cf_common.user_db.greatday_signup(ctx.guild.id, member.id)
+        name = discord.utils.escape_mentions(member.display_name)
+        if added:
+            await ctx.send(embed=discord_common.embed_success(
+                f'`{name}` has been added to great day pings.'))
+        else:
+            await ctx.send(embed=discord_common.embed_alert(
+                f'`{name}` is already signed up.'))
+
+    @greatday.command(name='kick', brief='Remove a user from the list (admin)',
+                      usage='@user')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def kick_user(self, ctx, member: discord.Member):
+        removed = cf_common.user_db.greatday_remove(ctx.guild.id, member.id)
+        name = discord.utils.escape_mentions(member.display_name)
+        if removed:
+            await ctx.send(embed=discord_common.embed_success(
+                f'`{name}` has been removed from great day pings.'))
+        else:
+            await ctx.send(embed=discord_common.embed_alert(
+                f'`{name}` is not signed up.'))
+
     @greatday.command(name='here', brief='Set the great day channel')
     @commands.has_role(constants.TLE_ADMIN)
     async def here(self, ctx):
@@ -117,8 +146,12 @@ class GreatDay(commands.Cog):
         rows = cf_common.user_db.greatday_get_signups(ctx.guild.id)
         if not rows:
             raise GreatDayCogError('No one has signed up yet.')
-        await self._send_greatday(ctx.guild)
-        await ctx.send(embed=discord_common.embed_success('Great day message sent!'))
+        sent = await self._send_greatday(ctx.guild)
+        if sent:
+            await ctx.send(embed=discord_common.embed_success(
+                'Great day message sent!'))
+        else:
+            raise GreatDayCogError('Could not send great day message.')
 
     @greatday.command(name='time', brief='Set the daily time (HH:MM US/Eastern)',
                       usage='HH:MM')

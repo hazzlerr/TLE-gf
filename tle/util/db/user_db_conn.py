@@ -1730,14 +1730,11 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
 
     def greatday_signup(self, guild_id, user_id):
         """Add a user to the great day list. Returns True if newly added."""
-        try:
-            self.conn.execute(
-                'INSERT INTO greatday_signup (guild_id, user_id) VALUES (?, ?)',
-                (str(guild_id), str(user_id)))
-            self.conn.commit()
-            return True
-        except Exception:
-            return False
+        rc = self.conn.execute(
+            'INSERT OR IGNORE INTO greatday_signup (guild_id, user_id) VALUES (?, ?)',
+            (str(guild_id), str(user_id))).rowcount
+        self.conn.commit()
+        return rc > 0
 
     def greatday_remove(self, guild_id, user_id):
         """Remove a user from the great day list. Returns True if removed."""

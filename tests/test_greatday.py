@@ -151,6 +151,118 @@ class TestSendGreatDay:
         assert len(picked) == 2
 
 
+# ── _send_greatday integration tests ──────────────────────────────────
+
+import asyncio
+from tle.util import codeforces_common as cf_common
+
+
+class _FakeChannel:
+    def __init__(self):
+        self.sent = []
+
+    async def send(self, content):
+        self.sent.append(content)
+
+
+class _FakeGuild:
+    def __init__(self, guild_id, channel=None):
+        self.id = guild_id
+        self._channel = channel
+
+    def get_channel(self, cid):
+        return self._channel
+
+
+class TestSendGreatDayIntegration:
+    """Test the actual _send_greatday method on the cog."""
+
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def _make_cog(self, db):
+        from tle.cogs.greatday import GreatDay
+        cog = GreatDay(bot=None)
+        return cog
+
+    def test_singular_verb_for_one_user(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        db.greatday_signup(GUILD, USER_A)
+
+        channel = _FakeChannel()
+        guild = _FakeGuild(int(GUILD), channel)
+
+        cog = self._make_cog(db)
+        result = self._run(cog._send_greatday(guild))
+        assert result is True
+        assert len(channel.sent) == 1
+        assert ' is having a great day!' in channel.sent[0]
+
+    def test_plural_verb_for_multiple_users(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        db.greatday_signup(GUILD, USER_A)
+        db.greatday_signup(GUILD, USER_B)
+
+        channel = _FakeChannel()
+        guild = _FakeGuild(int(GUILD), channel)
+
+        cog = self._make_cog(db)
+        result = self._run(cog._send_greatday(guild))
+        assert result is True
+        assert ' are having a great day!' in channel.sent[0]
+
+    def test_no_channel_returns_false(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        # No greatday_channel config set
+        db.greatday_signup(GUILD, USER_A)
+
+        guild = _FakeGuild(int(GUILD))
+        cog = self._make_cog(db)
+        result = self._run(cog._send_greatday(guild))
+        assert result is False
+
+    def test_deleted_channel_returns_false(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        db.greatday_signup(GUILD, USER_A)
+
+        guild = _FakeGuild(int(GUILD), channel=None)  # get_channel returns None
+        cog = self._make_cog(db)
+        result = self._run(cog._send_greatday(guild))
+        assert result is False
+
+    def test_no_signups_returns_false(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        # No signups
+
+        channel = _FakeChannel()
+        guild = _FakeGuild(int(GUILD), channel)
+        cog = self._make_cog(db)
+        result = self._run(cog._send_greatday(guild))
+        assert result is False
+        assert len(channel.sent) == 0
+
+    def test_mentions_all_picked_users(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        db.greatday_signup(GUILD, USER_A)
+        db.greatday_signup(GUILD, USER_B)
+        db.greatday_signup(GUILD, USER_C)
+
+        channel = _FakeChannel()
+        guild = _FakeGuild(int(GUILD), channel)
+        cog = self._make_cog(db)
+        self._run(cog._send_greatday(guild))
+        msg = channel.sent[0]
+        # All 3 users should be mentioned (fewer than 5)
+        assert f'<@{USER_A}>' in msg
+        assert f'<@{USER_B}>' in msg
+        assert f'<@{USER_C}>' in msg
+
+
 class TestUpgrade:
     def test_upgrade_creates_table(self):
         conn = sqlite3.connect(':memory:')
