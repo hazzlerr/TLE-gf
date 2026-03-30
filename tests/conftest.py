@@ -59,7 +59,14 @@ _commands_mod.has_role = lambda role: (lambda f: f)
 _commands_mod.has_any_role = lambda *roles: (lambda f: f)
 _commands_mod.command = lambda **kw: (lambda f: f)
 _commands_mod.Converter = type('Converter', (), {})
-_commands_mod.MemberConverter = type('MemberConverter', (), {'__call__': lambda self, *a, **kw: None})
+def _member_converter_convert(self, ctx, argument):
+    """Stub convert — tries guild.get_member_named (case-sensitive like real discord.py)."""
+    raise _commands_mod.BadArgument(f'Member "{argument}" not found.')
+
+_commands_mod.MemberConverter = type('MemberConverter', (), {
+    '__call__': lambda self, *a, **kw: None,
+    'convert': _member_converter_convert,
+})
 _commands_mod.TextChannelConverter = type('TextChannelConverter', (), {'convert': lambda self, *a, **kw: None})
 _commands_mod.ThreadConverter = type('ThreadConverter', (), {'convert': lambda self, *a, **kw: None})
 _commands_mod.BadArgument = type('BadArgument', (Exception,), {})

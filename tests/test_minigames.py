@@ -1093,3 +1093,50 @@ class TestAkariCodeblockParsing:
         r = self._parse('`' + self._PLAIN + '`')
         assert len(r) == 1
         assert r[0].puzzle_number == 436
+
+
+class _FakeMember:
+    def __init__(self, name, display_name=None):
+        self.name = name
+        self.display_name = display_name or name
+
+
+class TestCaseInsensitiveMember:
+    """CaseInsensitiveMember falls back to case-insensitive name matching."""
+
+    def _make_ctx(self, members):
+        class Ctx:
+            pass
+        ctx = Ctx()
+        guild = _FakeGuild(1)
+        guild.members = members
+        ctx.guild = guild
+        ctx.bot = type('Bot', (), {'get_guild': lambda self, gid: guild})()
+        return ctx
+
+    def test_exact_case_matches(self):
+        m = _FakeMember('Alice')
+        ctx = self._make_ctx([m])
+        from tle.cogs.minigames import CaseInsensitiveMember
+        result = asyncio.run(CaseInsensitiveMember().convert(ctx, 'Alice'))
+        assert result is m
+
+    def test_different_case_matches(self):
+        m = _FakeMember('Alice')
+        ctx = self._make_ctx([m])
+        from tle.cogs.minigames import CaseInsensitiveMember
+        result = asyncio.run(CaseInsensitiveMember().convert(ctx, 'alice'))
+        assert result is m
+
+    def test_display_name_case_insensitive(self):
+        m = _FakeMember('alice123', display_name='BigAlice')
+        ctx = self._make_ctx([m])
+        from tle.cogs.minigames import CaseInsensitiveMember
+        result = asyncio.run(CaseInsensitiveMember().convert(ctx, 'bigalice'))
+        assert result is m
+
+    def test_no_match_raises(self):
+        ctx = self._make_ctx([_FakeMember('Bob')])
+        from tle.cogs.minigames import CaseInsensitiveMember
+        with pytest.raises(Exception):
+            asyncio.run(CaseInsensitiveMember().convert(ctx, 'alice'))

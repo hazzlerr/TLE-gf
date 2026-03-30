@@ -58,6 +58,21 @@ class ChannelOrThread(commands.Converter):
             raise commands.BadArgument(f'I don\'t have access to channel "{argument}".')
 
 
+class CaseInsensitiveMember(commands.MemberConverter):
+    """MemberConverter with a case-insensitive fallback on name/display_name."""
+
+    async def convert(self, ctx, argument):
+        try:
+            return await super().convert(ctx, argument)
+        except commands.BadArgument:
+            pass
+        lowered = argument.lower()
+        for member in ctx.guild.members:
+            if member.name.lower() == lowered or member.display_name.lower() == lowered:
+                return member
+        raise commands.BadArgument(f'Member "{argument}" not found.')
+
+
 def _safe_member_name(member):
     return discord.utils.escape_mentions(member.display_name)
 
@@ -117,7 +132,7 @@ class Minigames(commands.Cog):
 
     async def _resolve_member(self, ctx, member_text):
         try:
-            return await commands.MemberConverter().convert(ctx, member_text)
+            return await CaseInsensitiveMember().convert(ctx, member_text)
         except commands.BadArgument as exc:
             raise MinigameCogError(str(exc)) from exc
 
@@ -662,7 +677,7 @@ class Minigames(commands.Cog):
 
     @akari.command(name='vs', brief='Head-to-head comparison',
                    usage='@user1 @user2 [filters...] [raw]')
-    async def akari_vs(self, ctx, member1: discord.Member, member2: discord.Member, *args):
+    async def akari_vs(self, ctx, member1: CaseInsensitiveMember, member2: CaseInsensitiveMember, *args):
         await self._cmd_vs(ctx, AKARI_GAME, member1, member2, *args)
 
     @akari.command(name='streak', brief='Show current perfect streak',
@@ -678,7 +693,7 @@ class Minigames(commands.Cog):
     @akari.command(name='remove', brief='Remove a user result for a puzzle',
                    usage='@user puzzle_id')
     @commands.has_role(constants.TLE_ADMIN)
-    async def akari_remove(self, ctx, member: discord.Member, puzzle_id: int):
+    async def akari_remove(self, ctx, member: CaseInsensitiveMember, puzzle_id: int):
         await self._cmd_remove(ctx, AKARI_GAME, member, puzzle_id)
 
     @akari.group(name='import', brief='Manage imported history',
@@ -736,7 +751,7 @@ class Minigames(commands.Cog):
 
     @guessgame.command(name='vs', brief='Head-to-head comparison',
                        usage='@user1 @user2 [p>=N] [p<N] [filters...]')
-    async def gg_vs(self, ctx, member1: discord.Member, member2: discord.Member, *args):
+    async def gg_vs(self, ctx, member1: CaseInsensitiveMember, member2: CaseInsensitiveMember, *args):
         await self._cmd_vs(ctx, GUESSGAME_GAME, member1, member2, *args)
 
     @guessgame.command(name='streak', brief='Show current win streak',
@@ -752,7 +767,7 @@ class Minigames(commands.Cog):
     @guessgame.command(name='remove', brief='Remove a user result for a puzzle',
                        usage='@user puzzle_id')
     @commands.has_role(constants.TLE_ADMIN)
-    async def gg_remove(self, ctx, member: discord.Member, puzzle_id: int):
+    async def gg_remove(self, ctx, member: CaseInsensitiveMember, puzzle_id: int):
         await self._cmd_remove(ctx, GUESSGAME_GAME, member, puzzle_id)
 
     @guessgame.group(name='import', brief='Manage imported history',
