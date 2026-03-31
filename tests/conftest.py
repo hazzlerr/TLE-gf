@@ -16,6 +16,7 @@ _STUB_MODULES = [
     'aiohttp', 'aiohttp.web',
     'discord', 'discord.ext', 'discord.ext.commands',
     'seaborn', 'matplotlib', 'matplotlib.pyplot', 'matplotlib.ticker',
+    'matplotlib.dates', 'matplotlib.font_manager',
     'numpy', 'pandas', 'pandas.plotting',
     'lxml', 'lxml.html',
     'PIL', 'PIL.Image', 'PIL.ImageFont', 'PIL.ImageDraw',
@@ -34,6 +35,9 @@ for mod_name in _STUB_MODULES:
 _np = sys.modules['numpy']
 _np.arange = lambda *a, **kw: []
 _np.linspace = lambda *a, **kw: []
+_np.convolve = lambda *a, **kw: []
+_np.median = lambda *a, **kw: 0
+_np.ones = lambda *a, **kw: []
 
 # pandas stubs
 _pd = sys.modules['pandas']

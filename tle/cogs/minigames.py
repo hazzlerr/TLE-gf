@@ -19,6 +19,7 @@ from tle.cogs._minigame_common import (
 )
 from tle.cogs._minigame_akari import AKARI_GAME
 from tle.cogs._minigame_guessgame import GUESSGAME_GAME
+from tle.cogs._minigame_stats import plot_akari_stats, plot_guessgame_stats
 from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
 
 logger = logging.getLogger(__name__)
@@ -560,6 +561,40 @@ class Minigames(commands.Cog):
             f'Removed {game.display_name} result for '
             f'`{_safe_member_name(member)}` on puzzle `{puzzle_id}`.'))
 
+    _STATS_PLOTTERS = {
+        'akari': plot_akari_stats,
+        'guessgame': plot_guessgame_stats,
+    }
+
+    async def _cmd_stats(self, ctx, game, *args):
+        self._require_enabled(ctx.guild.id, game)
+        filter_args = list(args)
+        member = ctx.author
+        if filter_args:
+            try:
+                member = await self._resolve_member(ctx, filter_args[0])
+                filter_args = filter_args[1:]
+            except MinigameCogError:
+                member = ctx.author
+
+        try:
+            dlo, dhi, plo, phi = parse_date_args(filter_args)
+        except ValueError as e:
+            raise MinigameCogError(str(e)) from e
+
+        rows = cf_common.user_db.get_minigame_results_for_user(
+            ctx.guild.id, game.name, member.id, dlo, dhi, plo, phi)
+        if not rows:
+            raise MinigameCogError(
+                f'No {game.display_name} results found for `{_safe_member_name(member)}`.')
+
+        plotter = self._STATS_PLOTTERS.get(game.name)
+        if plotter is None:
+            raise MinigameCogError(f'Stats are not available for {game.display_name}.')
+
+        discord_file = plotter(rows, _safe_member_name(member))
+        await ctx.send(file=discord_file)
+
     async def _cmd_import_start(self, ctx, game, channel=None):
         key = (ctx.guild.id, game.name)
         if key in self._import_tasks:
@@ -746,6 +781,11 @@ class Minigames(commands.Cog):
     async def akari_top(self, ctx, *args):
         await self._cmd_top(ctx, AKARI_GAME, *args)
 
+    @akari.command(name='stats', brief='Show personal stats with graphs',
+                   usage='[@user] [filters...]')
+    async def akari_stats(self, ctx, *args):
+        await self._cmd_stats(ctx, AKARI_GAME, *args)
+
     @akari.command(name='remove', brief='Remove a user result for a puzzle',
                    usage='@user puzzle_id')
     @commands.has_role(constants.TLE_ADMIN)
@@ -819,6 +859,11 @@ class Minigames(commands.Cog):
                        usage='[p>=N] [p<N] [filters...]')
     async def gg_top(self, ctx, *args):
         await self._cmd_top(ctx, GUESSGAME_GAME, *args)
+
+    @guessgame.command(name='stats', brief='Show personal stats with graphs',
+                       usage='[@user] [filters...]')
+    async def gg_stats(self, ctx, *args):
+        await self._cmd_stats(ctx, GUESSGAME_GAME, *args)
 
     @guessgame.command(name='remove', brief='Remove a user result for a puzzle',
                        usage='@user puzzle_id')
@@ -936,6 +981,26 @@ class Minigames(commands.Cog):
             args.append(mode.value)
         try:
             await self._cmd_top(_SlashCtx(interaction), AKARI_GAME, *args)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+
+    @akari_slash.command(name='stats', description='Show personal stats with graphs')
+    @app_commands.describe(member='Player to check', timeframe='Time period filter')
+    @app_commands.choices(timeframe=_TIMEFRAME_CHOICES)
+    async def slash_akari_stats(
+        self, interaction: discord.Interaction,
+        member: Optional[discord.Member] = None,
+        timeframe: Optional[app_commands.Choice[str]] = None,
+    ):
+        await interaction.response.defer()
+        ctx = _SlashCtx(interaction)
+        if member:
+            ctx.author = member
+        args = []
+        if timeframe:
+            args.append(timeframe.value)
+        try:
+            await self._cmd_stats(ctx, AKARI_GAME, *args)
         except MinigameCogError as e:
             await self._slash_send_error(interaction, e)
 
