@@ -470,7 +470,8 @@ class Contests(commands.Cog):
         """
         Shows ranklist for the contest with given contest id. If handles contains
         '+server', all server members are included. No handles defaults to '+server'.
-        Use '+official' for only showing rated participants for the round
+        Use '+official' for only showing rated participants for the round.
+        Prefix -c to force a Codeforces handle (e.g. -ctourist).
         """
         (show_official,), handles = cf_common.filter_flags(args, ['+official'])
         handles = await cf_common.resolve_handles(ctx, self.member_converter, handles, maxcnt=None,

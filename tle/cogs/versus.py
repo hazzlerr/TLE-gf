@@ -216,7 +216,7 @@ class Versus(commands.Cog):
                       usage='[+all] handle1 handle2 [handle3 ...]')
     async def plotversus(self, ctx, *args: str):
         """Plot how often each user placed 1st, 2nd, 3rd, etc. among the group
-        across all shared contests. Use ! prefix for Discord users.
+        across all shared contests. Use ! prefix for Discord users, -c to force CF handle.
         Use +all to only count contests where every listed user participated."""
         (strict,), handles = cf_common.filter_flags(args, ['+all'])
 

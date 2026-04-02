@@ -254,8 +254,8 @@ class Codeforces(commands.Cog):
     @commands.command(brief='Create a mashup', usage='[handles] [+tag..] [~tag..] [+divX] [~divX] [?[-]delta]')
     async def mashup(self, ctx, *args):
         """Create a mashup contest using problems within -200 and +400 of average rating of handles provided.
-        Add tags with "+" before them.
-        Ban tags with "~" before them.
+        Add tags with "+" before them. Ban tags with "~" before them.
+        Prefix -c to force a Codeforces handle (e.g. -ctourist).
         """
         delta = 100
         handles = [arg for arg in args if arg[0] not in '+~?']
@@ -526,6 +526,7 @@ class Codeforces(commands.Cog):
     @commands.command(brief='Recommend a contest', usage='[handles...] [+pattern...]')
     async def vc(self, ctx, *args: str):
         """Recommends a contest based on Codeforces rating of the handle provided.
+        Prefix -c to force a Codeforces handle (e.g. -ctourist).
         e.g ;vc mblazev c1729 +global +hello +goodbye +avito"""
         markers = [x for x in args if x[0] == '+']
         handles = [x for x in args if x[0] != '+'] or ('!' + str(ctx.author.id),)
@@ -643,7 +644,8 @@ class Codeforces(commands.Cog):
     async def teamrate(self, ctx, *args: str):
         """Provides the combined rating of the entire team.
         If +server is provided as the only handle, will display the rating of the entire server.
-        Supports multipliers. e.g: ;teamrate gamegame*1000"""
+        Supports multipliers. e.g: ;teamrate gamegame*1000
+        Prefix -c to force a Codeforces handle (e.g. -ctourist)."""
 
         (is_entire_server, peak), handles = cf_common.filter_flags(args, ['+server', '+peak'])
         handles = handles or ('!' + str(ctx.author.id),)

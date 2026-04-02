@@ -227,8 +227,8 @@ class Graphs(commands.Cog):
                     invoke_without_command=True)
     async def plot(self, ctx):
         """Plot various graphs. Wherever Codeforces handles are accepted it is possible to
-        use a server member's name instead by prefixing it with '!',
-        for name with spaces use "!name with spaces" (with quotes)."""
+        use a server member's Discord name or @mention directly.
+        Prefix -c to force a Codeforces handle (e.g. -ctourist)."""
         await ctx.send_help('plot')
 
     @plot.command(brief='Plot Codeforces rating graph', usage='[+zoom] [+number] [+peak] [handles...] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
