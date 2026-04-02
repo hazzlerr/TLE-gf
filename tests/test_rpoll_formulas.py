@@ -27,16 +27,16 @@ class TestApplyFormula:
         assert _apply_formula('exp', []) == 0
 
     def test_exp_single_zero_rating(self):
-        assert _apply_formula('exp', [0]) == 100
+        assert _apply_formula('exp', [0]) == 1
 
     def test_exp_single_800(self):
-        assert _apply_formula('exp', [800]) == 400
+        assert _apply_formula('exp', [800]) == 4
 
     def test_exp_single_2000(self):
-        assert _apply_formula('exp', [2000]) == 3200
+        assert _apply_formula('exp', [2000]) == 32
 
     def test_exp_multiple(self):
-        assert _apply_formula('exp', [800, 2000]) == 3600
+        assert _apply_formula('exp', [800, 2000]) == 36
 
     def test_exp_higher_rating_weighs_more(self):
         single_high = _apply_formula('exp', [2400])
