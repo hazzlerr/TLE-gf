@@ -2,6 +2,7 @@ import functools
 import json
 import logging
 import math
+import re
 import time
 import datetime
 from collections import defaultdict
@@ -237,8 +238,15 @@ def days_ago(t):
     return f'{math.floor(days)} days ago'
 
 async def resolve_handles(ctx, converter, handles, *, mincnt=1, maxcnt=5, default_to_all_server=False):
-    """Convert an iterable of strings to CF handles. A string beginning with ! indicates Discord username,
-     otherwise it is a raw CF handle to be left unchanged."""
+    """Convert an iterable of strings to CF handles.
+
+    Resolution rules:
+      !<digits>   — Discord user by ID (internal, used for self-lookup)
+      !<name>     — Discord user by name via converter (user-facing, e.g. ;versus !user)
+      <@id>       — Discord mention
+      -c<handle>  — Force raw Codeforces handle (skip Discord lookup)
+      plain text  — Try Discord username → display name → raw CF handle
+    """
     handles = set(handles)
     if default_to_all_server and not handles:
         handles.add('+server')
@@ -251,24 +259,60 @@ async def resolve_handles(ctx, converter, handles, *, mincnt=1, maxcnt=5, defaul
         raise HandleCountOutOfBoundsError(mincnt, maxcnt)
     resolved_handles = []
     for handle in handles:
-        if handle.startswith('!'):
-            # ! denotes Discord user
+        if handle.startswith('-c'):
+            # -c prefix: force raw CF handle
+            handle = handle[2:]
+        elif handle.startswith('!'):
+            # ! prefix: Discord user lookup
             member_identifier = handle[1:]
-            # suffix removal as quickfix for new username changes
-            if member_identifier[-2:] == '#0':
-                member_identifier = member_identifier[:-2]
-
-            try:
-                member = await converter.convert(ctx, member_identifier)
-            except commands.errors.CommandError:
-                raise FindMemberFailedError(member_identifier)
+            if member_identifier.isdigit():
+                # Numeric — direct ID lookup (guaranteed unique)
+                member = ctx.guild.get_member(int(member_identifier))
+                if member is None:
+                    raise FindMemberFailedError(member_identifier)
+            else:
+                # Non-numeric — name-based lookup via converter (backward compat)
+                if member_identifier.endswith('#0'):
+                    member_identifier = member_identifier[:-2]
+                try:
+                    member = await converter.convert(ctx, member_identifier)
+                except commands.errors.CommandError:
+                    raise FindMemberFailedError(member_identifier)
             handle = user_db.get_handle(member.id, ctx.guild.id)
             if handle is None:
                 raise HandleNotRegisteredError(member)
+        elif (mention_match := re.match(r'<@!?(\d+)>', handle)):
+            # Discord mention — extract user ID
+            member_id = int(mention_match.group(1))
+            member = ctx.guild.get_member(member_id)
+            if member is None:
+                raise FindMemberFailedError(handle)
+            handle = user_db.get_handle(member.id, ctx.guild.id)
+            if handle is None:
+                raise HandleNotRegisteredError(member)
+        else:
+            # Plain text: try Discord username → display name → CF handle
+            resolved_member = _resolve_member_by_name(ctx.guild, handle)
+            if resolved_member is not None:
+                cf_handle = user_db.get_handle(resolved_member.id, ctx.guild.id)
+                if cf_handle is not None:
+                    handle = cf_handle
         if handle in HandleIsVjudgeError.HANDLES:
             raise HandleIsVjudgeError(handle)
         resolved_handles.append(handle)
     return resolved_handles
+
+
+def _resolve_member_by_name(guild, name):
+    """Find a guild member by username first, then display name (case-insensitive)."""
+    lowered = name.lower()
+    for m in guild.members:
+        if m.name.lower() == lowered:
+            return m
+    for m in guild.members:
+        if m.display_name.lower() == lowered:
+            return m
+    return None
 
 def members_to_handles(members: [discord.Member], guild_id):
     handles = []

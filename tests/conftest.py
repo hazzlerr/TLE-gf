@@ -73,7 +73,12 @@ _commands_mod.MemberConverter = type('MemberConverter', (), {
 })
 _commands_mod.TextChannelConverter = type('TextChannelConverter', (), {'convert': lambda self, *a, **kw: None})
 _commands_mod.ThreadConverter = type('ThreadConverter', (), {'convert': lambda self, *a, **kw: None})
-_commands_mod.BadArgument = type('BadArgument', (Exception,), {})
+_commands_mod.BadArgument = type('BadArgument', (_commands_mod.CommandError,), {})
+# commands.errors.CommandError is used by resolve_handles
+_commands_errors = types.ModuleType('discord.ext.commands.errors')
+_commands_errors.CommandError = _commands_mod.CommandError
+_commands_mod.errors = _commands_errors
+sys.modules['discord.ext.commands.errors'] = _commands_errors
 
 class _StubGroupResult:
     """Fake return value of @commands.group() — supports chained .command() and .group()."""

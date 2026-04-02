@@ -217,7 +217,7 @@ class Dueling(commands.Cog):
         challenger_id = ctx.author.id
         challengee_id = opponent.id
 
-        await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author), '!' + str(opponent)))
+        await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id), '!' + str(opponent.id)))
         userids = [challenger_id, challengee_id]
         handles = [cf_common.user_db.get_handle(
             userid, ctx.guild.id) for userid in userids]

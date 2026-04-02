@@ -552,7 +552,7 @@ class Training(commands.Cog):
         self._checkIfCorrectChannel(ctx)
 
         # get cf handle
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         # get user submissions
         submissions = await cf.user.status(handle=handle)
 
@@ -580,7 +580,7 @@ class Training(commands.Cog):
         self._checkIfCorrectChannel(ctx)
 
         # get cf handle
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         # get user submissions
         submissions = await cf.user.status(handle=handle)
 
@@ -619,7 +619,7 @@ class Training(commands.Cog):
         self._checkIfCorrectChannel(ctx)
 
         # get cf handle
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         # get user submissions
         submissions = await cf.user.status(handle=handle)
 
@@ -654,7 +654,7 @@ class Training(commands.Cog):
         """
         # check if we are in the correct channel
         self._checkIfCorrectChannel(ctx)
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
 
         # check game running
         active = await self._getActiveTraining(ctx.author.id)
@@ -683,7 +683,7 @@ class Training(commands.Cog):
         member = member or ctx.author
         # check if we are in the correct channel
         self._checkIfCorrectChannel(ctx)
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(member),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(member.id),))
 
         # check game running
         active = await self._getActiveTraining(member.id)

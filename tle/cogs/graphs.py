@@ -238,7 +238,7 @@ class Graphs(commands.Cog):
         (zoom, number, peak), args = cf_common.filter_flags(args, ['+zoom' , '+number', '+peak'])
         filt = cf_common.SubFilter()
         args = filt.parse(args)
-        handles = args or ('!' + str(ctx.author),)
+        handles = args or ('!' + str(ctx.author.id),)
         handles = await cf_common.resolve_handles(ctx, self.converter, handles)
         resp = [await cf.user.rating(handle=handle) for handle in handles]
         resp = [filt.filter_rating_changes(rating_changes) for rating_changes in resp]
@@ -299,7 +299,7 @@ class Graphs(commands.Cog):
         (zoom, peak), args = cf_common.filter_flags(args, ['+zoom' , '+peak'])
         filt = cf_common.SubFilter()
         args = filt.parse(args)
-        handles = args or ('!' + str(ctx.author),)
+        handles = args or ('!' + str(ctx.author.id),)
         handles = await cf_common.resolve_handles(ctx, self.converter, handles)
         resp = [await cf.user.rating(handle=handle) for handle in handles]
         # extract last rating before corrections
@@ -365,7 +365,7 @@ class Graphs(commands.Cog):
         filt = cf_common.SubFilter()
         args = filt.parse(args)
 
-        handles = args or ('!' + str(ctx.author),)
+        handles = args or ('!' + str(ctx.author.id),)
         handle, = await cf_common.resolve_handles(ctx, self.converter, handles)
         ratingchanges = await cf.user.rating(handle=handle)
         if not ratingchanges:
@@ -402,7 +402,7 @@ class Graphs(commands.Cog):
         e.g. ;plot solved meooow +contest +virtual +outof +dp"""
         filt = cf_common.SubFilter()
         args = filt.parse(args)
-        handles = args or ('!' + str(ctx.author),)
+        handles = args or ('!' + str(ctx.author.id),)
         handles = await cf_common.resolve_handles(ctx, self.converter, handles)
         resp = [await cf.user.status(handle=handle) for handle in handles]
         all_solved_subs = [filt.filter_subs(submissions) for submissions in resp]
@@ -465,7 +465,7 @@ class Graphs(commands.Cog):
             raise GraphCogError('Invalid parameters')
         phase_time = dt.timedelta(days=phase_days)
 
-        handles = handles or ['!' + str(ctx.author)]
+        handles = handles or ['!' + str(ctx.author.id)]
         handles = await cf_common.resolve_handles(ctx, self.converter, handles)
         resp = [await cf.user.status(handle=handle) for handle in handles]
         all_solved_subs = [filt.filter_subs(submissions) for submissions in resp]
@@ -535,7 +535,7 @@ class Graphs(commands.Cog):
         """Plots the count of problems solved over time on Codeforces for the handles provided."""
         filt = cf_common.SubFilter()
         args = filt.parse(args)
-        handles = args or ('!' + str(ctx.author),)
+        handles = args or ('!' + str(ctx.author.id),)
         handles = await cf_common.resolve_handles(ctx, self.converter, handles)
         resp = [await cf.user.status(handle=handle) for handle in handles]
         all_solved_subs = [filt.filter_subs(submissions) for submissions in resp]
@@ -589,7 +589,7 @@ class Graphs(commands.Cog):
         if bin_size < 1 or point_size < 1 or point_size > 100:
             raise GraphCogError('Invalid parameters')
 
-        handle = handle or '!' + str(ctx.author)
+        handle = handle or '!' + str(ctx.author.id)
         handle, = await cf_common.resolve_handles(ctx, self.converter, (handle,))
         rating_resp = [await cf.user.rating(handle=handle)]
         rating_resp = [filt.filter_rating_changes(rating_changes) for rating_changes in rating_resp]
@@ -743,7 +743,7 @@ class Graphs(commands.Cog):
 
         users_to_mark = {}
         if not nomarker:
-            handles = args or ('!' + str(ctx.author),)
+            handles = args or ('!' + str(ctx.author.id),)
             handles = await cf_common.resolve_handles(ctx,
                                                       self.converter,
                                                       handles,
@@ -1050,7 +1050,7 @@ class Graphs(commands.Cog):
             else:
                 handles.append(arg)
 
-        handles = handles or ['!' + str(ctx.author)]
+        handles = handles or ['!' + str(ctx.author.id)]
         handles = await cf_common.resolve_handles(ctx, self.converter, handles)
         resp = [await cf.user.status(handle=handle) for handle in handles]
         all_solved_subs = [filt.filter_subs(submissions) for submissions in resp]

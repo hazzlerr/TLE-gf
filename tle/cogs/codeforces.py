@@ -109,7 +109,7 @@ class Codeforces(commands.Cog):
         delta  | <-300| -300 | -200 | -100 |  0  |  100 |  200 |>=300
         points |   1  |   2  |   3  |   5  |  8  |  12  |  17  |  23 
         """
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         user = cf_common.user_db.fetch_cf_user(handle)
         rating = round(user.effective_rating, -2)
         rating = max(1100, rating)
@@ -150,7 +150,7 @@ class Codeforces(commands.Cog):
                       usage='[+tag..] [~tag..] [+divX] [~divX] [rating|rating1-rating2] [d>=[[dd]mm]yyyy] [d<[[dd]mm]yyyy]')
     @cf_common.user_guard(group='gitgud')
     async def gimme(self, ctx, *args):
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         rating = round(cf_common.user_db.fetch_cf_user(handle).effective_rating, -2)
         tags = cf_common.parse_tags(args, prefix='+')
         bantags = cf_common.parse_tags(args, prefix='~')
@@ -207,7 +207,7 @@ class Codeforces(commands.Cog):
         (hardest,), args = cf_common.filter_flags(args, ['+hardest'])
         filt = cf_common.SubFilter(False)
         args = filt.parse(args)
-        handles = args or ('!' + str(ctx.author),)
+        handles = args or ('!' + str(ctx.author.id),)
         handles = await cf_common.resolve_handles(ctx, self.converter, handles)
         # +rated: fetch rating change history to know which contests were rated
         if filt.only_rated:
@@ -269,7 +269,7 @@ class Codeforces(commands.Cog):
             except ValueError:
                 raise CodeforcesCogError('delta could not be interpreted as number')
 
-        handles = handles or ('!' + str(ctx.author),)
+        handles = handles or ('!' + str(ctx.author.id),)
         handles = await cf_common.resolve_handles(ctx, self.converter, handles)
         resp = [await cf.user.status(handle=handle) for handle in handles]
         submissions = [sub for user in resp for sub in user]
@@ -328,7 +328,7 @@ class Codeforces(commands.Cog):
         rating diff | <-100| -100 |   0  |  100 |  200 |  300 |  400 |>=500
         tags        |   1  |   2  |   3  |   5  |   8  |  12  |  17  |  23 
         """
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         user = cf_common.user_db.fetch_cf_user(handle)
         user_rating = round(user.effective_rating, -2)
         user_rating = max(800, user_rating)
@@ -459,7 +459,7 @@ class Codeforces(commands.Cog):
     @commands.command(brief='Report challenge completion', aliases=['gotbad'])
     @cf_common.user_guard(group='gitgud')
     async def gotgud(self, ctx):
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         user_id = ctx.message.author.id
         active = cf_common.user_db.check_challenge(user_id)
         if not active:
@@ -493,7 +493,7 @@ class Codeforces(commands.Cog):
     @commands.command(brief='Skip challenge', aliases=['toobad'])
     @cf_common.user_guard(group='gitgud')
     async def nogud(self, ctx):
-        await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         user_id = ctx.message.author.id
         active = cf_common.user_db.check_challenge(user_id)
         if not active:
@@ -527,7 +527,7 @@ class Codeforces(commands.Cog):
         """Recommends a contest based on Codeforces rating of the handle provided.
         e.g ;vc mblazev c1729 +global +hello +goodbye +avito"""
         markers = [x for x in args if x[0] == '+']
-        handles = [x for x in args if x[0] != '+'] or ('!' + str(ctx.author),)
+        handles = [x for x in args if x[0] != '+'] or ('!' + str(ctx.author.id),)
         handles = await cf_common.resolve_handles(ctx, self.converter, handles, maxcnt=25)
         info = await cf.user.info(handles=handles)
         contests = cf_common.cache2.contest_cache.get_contests_in_phase('FINISHED')
@@ -571,7 +571,7 @@ class Codeforces(commands.Cog):
     async def fullsolve(self, ctx, *args: str):
         """Displays a list of contests, sorted by number of unsolved problems.
         Contest names matching any of the provided tags will be considered. e.g ;fullsolve +edu"""
-        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author),))
+        handle, = await cf_common.resolve_handles(ctx, self.converter, ('!' + str(ctx.author.id),))
         tags = [x for x in args if x[0] == '+']
 
         problem_to_contests = cf_common.cache2.problemset_cache.problem_to_contests
@@ -645,7 +645,7 @@ class Codeforces(commands.Cog):
         Supports multipliers. e.g: ;teamrate gamegame*1000"""
 
         (is_entire_server, peak), handles = cf_common.filter_flags(args, ['+server', '+peak'])
-        handles = handles or ('!' + str(ctx.author),)
+        handles = handles or ('!' + str(ctx.author.id),)
 
         def rating(user):
             return user.maxRating if peak else user.rating
