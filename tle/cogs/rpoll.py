@@ -29,7 +29,7 @@ _DURATION_RE = re.compile(r'^\+(\d+)([mhd])$')
 _VALID_FORMULAS = ('sum', 'exp', 'team', 'osu', 'gg', 'mgg', 'fffff')
 _FORMULA_LABELS = {
     'sum': 'sum of ratings',
-    'exp': 'exponential: `2^(rating/400)`',
+    'exp': 'exponential: `2^(rating/400) * 100`',
     'team': 'team Elo: solo rating with 50% win vs all voters',
     'osu': 'osu-style: top vote full, then `0.67x`, `0.67^2x`, ...',
     'gg': 'gitgud: all-time gg score',
@@ -67,7 +67,7 @@ def _parse_duration(token):
 def _apply_formula(formula, ratings):
     """Apply a scoring formula to a list of individual ratings. Returns total score."""
     if formula == 'exp':
-        return round(sum(2 ** (r / 400) for r in ratings))
+        return round(sum(2 ** (r / 400) * 100 for r in ratings))
     if formula == 'team':
         if not ratings:
             return 0
@@ -504,7 +504,7 @@ class Rpoll(commands.Cog):
 
         Flags: +anon (hide voters), +Nm/+Nh/+Nd (duration, default 24h).
         Scoring (default +exp):
-          +exp: exponential `2^(rating/400)`
+          +exp: exponential `2^(rating/400) * 100`
           +sum: sum of ratings
           +team: team Elo (solo rating with 50% win vs all)
           +osu: top vote full, then 0.67x decay
