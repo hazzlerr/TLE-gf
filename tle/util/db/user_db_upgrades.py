@@ -494,7 +494,7 @@ def upgrade_1_19_0(db):
     logger.info('1.19.0: active column added to complaint table')
 
 
-@registry.register('1.20.0', 'CF virtual contest performance cache')
+@registry.register('1.20.0', 'CF virtual contest rank cache')
 def upgrade_1_20_0(db):
     logger.info('1.20.0: Creating cfvc_cache table')
     db.execute('''
@@ -502,7 +502,6 @@ def upgrade_1_20_0(db):
             handle       TEXT NOT NULL,
             contest_id   INTEGER NOT NULL,
             rank         INTEGER NOT NULL,
-            perf         INTEGER NOT NULL,
             PRIMARY KEY (handle, contest_id)
         )
     ''')

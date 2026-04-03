@@ -304,11 +304,15 @@ def _estimate_perf_from_cache(contest_id, virtual_rank):
 async def _build_cfvc_rows(handle, dlo=0, dhi=10**10):
     """Build performance rows for CF virtual participations (not TLE VCs).
 
-    Uses cfvc_cache DB table to avoid re-fetching standings for already-known
-    contests. Only calls contest.standings for new virtual participations.
+    Caching strategy:
+      - cfvc_cache stores (handle, contest_id, rank) — the per-user data that
+        requires an API call to contest.standings.
+      - Performance is computed on-the-fly from the shared rating_changes_cache,
+        so all users benefit from the same cached rating data.
+      - Only contest.standings calls for NEW virtual participations are made;
+        already-cached ranks are reused instantly.
 
-    Returns (rows, missing_count) where missing_count is the number of contests
-    with no cached rating data.
+    Returns (rows, missing_count).
     """
     submissions = await cf.user.status(handle=handle)
     virtual_cids = set()
@@ -321,21 +325,20 @@ async def _build_cfvc_rows(handle, dlo=0, dhi=10**10):
     if not virtual_cids:
         return [], 0
 
-    # Load cached results
+    # Load cached ranks (per-user)
     cached_cids = cf_common.user_db.get_cfvc_cached_contest_ids(handle)
-    cached_rows = cf_common.user_db.get_cfvc_cache(handle)
-    cached_by_cid = {cid: (rank, perf) for cid, rank, perf in cached_rows}
+    cached_ranks = cf_common.user_db.get_cfvc_cache(handle)
+    rank_by_cid = {cid: rank for cid, rank in cached_ranks}
 
     # Only fetch standings for contests not yet cached
     uncached_cids = sorted(virtual_cids - cached_cids)
-    new_entries = []  # (contest_id, rank, perf) to save
+    new_entries = []  # (contest_id, rank) to save
 
-    rows = []
     missing = 0
 
     for cid in uncached_cids:
         try:
-            contest_, _problems, ranklist = await cf.contest.standings(
+            _contest, _problems, ranklist = await cf.contest.standings(
                 contest_id=cid, handles=[handle], show_unofficial=True)
         except Exception:
             missing += 1
@@ -350,23 +353,20 @@ async def _build_cfvc_rows(handle, dlo=0, dhi=10**10):
             missing += 1
             continue
 
-        perf = _estimate_perf_from_cache(cid, virtual_row.rank)
-        if perf is None:
-            missing += 1
-            continue
+        new_entries.append((cid, virtual_row.rank))
+        rank_by_cid[cid] = virtual_row.rank
 
-        new_entries.append((cid, virtual_row.rank, perf))
-        cached_by_cid[cid] = (virtual_row.rank, perf)
-
-    # Persist newly fetched entries
+    # Persist newly fetched ranks
     if new_entries:
         cf_common.user_db.save_cfvc_cache(handle, new_entries)
 
-    # Build rows from all cached data, applying date filter
+    # Build rows — compute perf on-the-fly from shared rating changes cache
+    rows = []
     for cid in sorted(virtual_cids):
-        if cid not in cached_by_cid:
+        if cid not in rank_by_cid:
             continue
-        rank, perf = cached_by_cid[cid]
+        rank = rank_by_cid[cid]
+
         # Date filter using contest start time from contest cache
         try:
             contest = cf_common.cache2.contest_cache.get_contest(cid)
@@ -376,6 +376,12 @@ async def _build_cfvc_rows(handle, dlo=0, dhi=10**10):
             contest_name = contest.name
         except Exception:
             contest_name = f'Contest {cid}'
+
+        # Perf from shared rating changes cache (benefits all users)
+        perf = _estimate_perf_from_cache(cid, rank)
+        if perf is None:
+            missing += 1
+            continue
 
         rows.append({
             'idx': len(rows) + 1,

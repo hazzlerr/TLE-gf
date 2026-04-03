@@ -576,7 +576,6 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
                 handle       TEXT NOT NULL,
                 contest_id   INTEGER NOT NULL,
                 rank         INTEGER NOT NULL,
-                perf         INTEGER NOT NULL,
                 PRIMARY KEY (handle, contest_id)
             )
         ''')
@@ -1801,21 +1800,21 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
     # CFVC cache methods
 
     def get_cfvc_cache(self, handle):
-        """Return cached CF virtual contest performances for a handle.
-        Returns list of (contest_id, rank, perf) sorted by contest_id.
+        """Return cached CF virtual contest ranks for a handle.
+        Returns list of (contest_id, rank) sorted by contest_id.
         """
-        query = ('SELECT contest_id, rank, perf FROM cfvc_cache '
+        query = ('SELECT contest_id, rank FROM cfvc_cache '
                  'WHERE handle = ? ORDER BY contest_id')
         return self.conn.execute(query, (handle.lower(),)).fetchall()
 
     def save_cfvc_cache(self, handle, entries):
-        """Save CF virtual contest performances. entries: list of (contest_id, rank, perf)."""
+        """Save CF virtual contest ranks. entries: list of (contest_id, rank)."""
         with self.conn:
-            for contest_id, rank, perf in entries:
+            for contest_id, rank in entries:
                 self.conn.execute(
-                    'INSERT OR REPLACE INTO cfvc_cache (handle, contest_id, rank, perf) '
-                    'VALUES (?, ?, ?, ?)',
-                    (handle.lower(), contest_id, rank, perf))
+                    'INSERT OR REPLACE INTO cfvc_cache (handle, contest_id, rank) '
+                    'VALUES (?, ?, ?)',
+                    (handle.lower(), contest_id, rank))
 
     def get_cfvc_cached_contest_ids(self, handle):
         """Return set of contest_ids already cached for a handle."""

@@ -475,9 +475,9 @@ class TestBuildCfvcRows:
         return asyncio.run(coro)
 
     def _setup_empty_db_cache(self, mock_common):
-        """Set up mock user_db with empty cfvc cache."""
+        """Set up mock user_db with empty cfvc rank cache."""
         mock_common.user_db.get_cfvc_cached_contest_ids.return_value = set()
-        mock_common.user_db.get_cfvc_cache.return_value = []
+        mock_common.user_db.get_cfvc_cache.return_value = []  # (contest_id, rank) tuples
         mock_common.user_db.save_cfvc_cache = MagicMock()
 
     def test_basic_virtual_contest(self):
@@ -768,21 +768,24 @@ class TestBuildCfvcRows:
         """Already-cached contests should not trigger standings API calls."""
         subs = [_make_submission(100, 'user', 'VIRTUAL')]
         contest = _make_contest(100, 'Round 100')
+        rc_cache = [_make_rc(100, 'Round 100', 'other', 48, 1000, 1600, 1650)]
 
         with patch('tle.cogs.graphs.cf') as mock_cf, \
              patch('tle.cogs.graphs.cf_common') as mock_common:
             mock_cf.user.status = AsyncMock(return_value=subs)
             mock_cf.contest.standings = AsyncMock()  # should not be called
             mock_cf.GYM_ID_THRESHOLD = 100000
-            # Already cached
+            # Already cached — only rank, perf computed on-the-fly
             mock_common.user_db.get_cfvc_cached_contest_ids.return_value = {100}
-            mock_common.user_db.get_cfvc_cache.return_value = [(100, 50, 1800)]
+            mock_common.user_db.get_cfvc_cache.return_value = [(100, 50)]
             mock_common.cache2.contest_cache.get_contest.return_value = contest
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = rc_cache
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
         assert len(rows) == 1
         assert rows[0]['rank'] == 50
+        # perf computed from shared cache: 1600 + 4*50 = 1800
         assert rows[0]['perf'] == 1800
         # No standings API calls needed
         mock_cf.contest.standings.assert_not_called()
