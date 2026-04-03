@@ -304,6 +304,9 @@ def _estimate_perf_from_cache(contest_id, virtual_rank):
 async def _build_cfvc_rows(handle, dlo=0, dhi=10**10):
     """Build performance rows for CF virtual participations (not TLE VCs).
 
+    Uses cfvc_cache DB table to avoid re-fetching standings for already-known
+    contests. Only calls contest.standings for new virtual participations.
+
     Returns (rows, missing_count) where missing_count is the number of contests
     with no cached rating data.
     """
@@ -318,20 +321,25 @@ async def _build_cfvc_rows(handle, dlo=0, dhi=10**10):
     if not virtual_cids:
         return [], 0
 
+    # Load cached results
+    cached_cids = cf_common.user_db.get_cfvc_cached_contest_ids(handle)
+    cached_rows = cf_common.user_db.get_cfvc_cache(handle)
+    cached_by_cid = {cid: (rank, perf) for cid, rank, perf in cached_rows}
+
+    # Only fetch standings for contests not yet cached
+    uncached_cids = sorted(virtual_cids - cached_cids)
+    new_entries = []  # (contest_id, rank, perf) to save
+
     rows = []
     missing = 0
-    for cid in sorted(virtual_cids):
+
+    for cid in uncached_cids:
         try:
             contest_, _problems, ranklist = await cf.contest.standings(
                 contest_id=cid, handles=[handle], show_unofficial=True)
         except Exception:
             missing += 1
             continue
-
-        # Filter by contest start time
-        if contest_.startTimeSeconds is not None:
-            if not (dlo <= contest_.startTimeSeconds < dhi):
-                continue
 
         virtual_row = None
         for row in ranklist:
@@ -347,10 +355,32 @@ async def _build_cfvc_rows(handle, dlo=0, dhi=10**10):
             missing += 1
             continue
 
+        new_entries.append((cid, virtual_row.rank, perf))
+        cached_by_cid[cid] = (virtual_row.rank, perf)
+
+    # Persist newly fetched entries
+    if new_entries:
+        cf_common.user_db.save_cfvc_cache(handle, new_entries)
+
+    # Build rows from all cached data, applying date filter
+    for cid in sorted(virtual_cids):
+        if cid not in cached_by_cid:
+            continue
+        rank, perf = cached_by_cid[cid]
+        # Date filter using contest start time from contest cache
+        try:
+            contest = cf_common.cache2.contest_cache.get_contest(cid)
+            if contest.startTimeSeconds is not None:
+                if not (dlo <= contest.startTimeSeconds < dhi):
+                    continue
+            contest_name = contest.name
+        except Exception:
+            contest_name = f'Contest {cid}'
+
         rows.append({
             'idx': len(rows) + 1,
-            'contest': _truncate_name(contest_.name),
-            'rank': virtual_row.rank,
+            'contest': _truncate_name(contest_name),
+            'rank': rank,
             'old': None,
             'new': None,
             'delta': None,

@@ -474,6 +474,12 @@ class TestBuildCfvcRows:
     def _run(self, coro):
         return asyncio.run(coro)
 
+    def _setup_empty_db_cache(self, mock_common):
+        """Set up mock user_db with empty cfvc cache."""
+        mock_common.user_db.get_cfvc_cached_contest_ids.return_value = set()
+        mock_common.user_db.get_cfvc_cache.return_value = []
+        mock_common.user_db.save_cfvc_cache = MagicMock()
+
     def test_basic_virtual_contest(self):
         subs = [_make_submission(100, 'user', 'VIRTUAL')]
         contest = _make_contest(100, 'Round 100')
@@ -486,6 +492,8 @@ class TestBuildCfvcRows:
             mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
             mock_cf.GYM_ID_THRESHOLD = 100000
             mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache_changes
+            mock_common.cache2.contest_cache.get_contest.return_value = contest
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
@@ -495,6 +503,8 @@ class TestBuildCfvcRows:
         # perf from closest rank (48): 1600 + 4*50 = 1800
         assert rows[0]['perf'] == 1800
         assert missing == 0
+        # Verify it was saved to DB cache
+        mock_common.user_db.save_cfvc_cache.assert_called_once()
 
     def test_gym_contests_excluded(self):
         subs = [
@@ -511,6 +521,8 @@ class TestBuildCfvcRows:
             mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
             mock_cf.GYM_ID_THRESHOLD = 100000
             mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache_changes
+            mock_common.cache2.contest_cache.get_contest.return_value = contest
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
@@ -550,8 +562,8 @@ class TestBuildCfvcRows:
             mock_cf.user.status = AsyncMock(return_value=subs)
             mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
             mock_cf.GYM_ID_THRESHOLD = 100000
-            # Empty cache — no rating changes for this contest
             mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = []
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
@@ -561,10 +573,12 @@ class TestBuildCfvcRows:
     def test_standings_api_error_increments_missing(self):
         subs = [_make_submission(100, 'user', 'VIRTUAL')]
 
-        with patch('tle.cogs.graphs.cf') as mock_cf:
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
             mock_cf.user.status = AsyncMock(return_value=subs)
             mock_cf.contest.standings = AsyncMock(side_effect=Exception('API error'))
             mock_cf.GYM_ID_THRESHOLD = 100000
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
@@ -577,10 +591,12 @@ class TestBuildCfvcRows:
         contest = _make_contest(100, 'Round 100')
         ranklist = [_make_ranklist_row('user', 0, ptype='PRACTICE')]
 
-        with patch('tle.cogs.graphs.cf') as mock_cf:
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
             mock_cf.user.status = AsyncMock(return_value=subs)
             mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
             mock_cf.GYM_ID_THRESHOLD = 100000
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
@@ -608,15 +624,20 @@ class TestBuildCfvcRows:
             else:
                 return (contest300, [], ranklist300)
 
-        def mock_cache(cid):
+        def mock_rc_cache(cid):
             return {100: cache100, 300: cache300}.get(cid, [])
+
+        def mock_contest_cache(cid):
+            return {100: contest100, 300: contest300}[cid]
 
         with patch('tle.cogs.graphs.cf') as mock_cf, \
              patch('tle.cogs.graphs.cf_common') as mock_common:
             mock_cf.user.status = AsyncMock(return_value=subs)
             mock_cf.contest.standings = AsyncMock(side_effect=mock_standings)
             mock_cf.GYM_ID_THRESHOLD = 100000
-            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.side_effect = mock_cache
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.side_effect = mock_rc_cache
+            mock_common.cache2.contest_cache.get_contest.side_effect = mock_contest_cache
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
@@ -643,6 +664,8 @@ class TestBuildCfvcRows:
             mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
             mock_cf.GYM_ID_THRESHOLD = 100000
             mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache
+            mock_common.cache2.contest_cache.get_contest.return_value = contest
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
@@ -662,6 +685,8 @@ class TestBuildCfvcRows:
             mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
             mock_cf.GYM_ID_THRESHOLD = 100000
             mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache
+            mock_common.cache2.contest_cache.get_contest.return_value = contest
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user'))
 
@@ -675,20 +700,28 @@ class TestBuildCfvcRows:
         ]
         contest100 = _make_contest(100, 'Old Round')._replace(startTimeSeconds=1000)
         contest200 = _make_contest(200, 'New Round')._replace(startTimeSeconds=5000)
-        ranklist200 = [_make_ranklist_row('user', 30)]
-        cache = [_make_rc(200, 'New Round', 'x', 30, 5000, 1600, 1650)]
+        cache100 = [_make_rc(100, 'Old Round', 'x', 50, 1000, 1500, 1550)]
+        cache200 = [_make_rc(200, 'New Round', 'x', 30, 5000, 1600, 1650)]
 
         async def mock_standings(*, contest_id, handles, show_unofficial):
             if contest_id == 100:
                 return (contest100, [], [_make_ranklist_row('user', 50)])
-            return (contest200, [], ranklist200)
+            return (contest200, [], [_make_ranklist_row('user', 30)])
+
+        def mock_rc_cache(cid):
+            return {100: cache100, 200: cache200}.get(cid, [])
+
+        def mock_contest_cache(cid):
+            return {100: contest100, 200: contest200}[cid]
 
         with patch('tle.cogs.graphs.cf') as mock_cf, \
              patch('tle.cogs.graphs.cf_common') as mock_common:
             mock_cf.user.status = AsyncMock(return_value=subs)
             mock_cf.contest.standings = AsyncMock(side_effect=mock_standings)
             mock_cf.GYM_ID_THRESHOLD = 100000
-            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.side_effect = mock_rc_cache
+            mock_common.cache2.contest_cache.get_contest.side_effect = mock_contest_cache
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user', dlo=3000))
 
@@ -703,22 +736,53 @@ class TestBuildCfvcRows:
         ]
         contest100 = _make_contest(100, 'Old Round')._replace(startTimeSeconds=1000)
         contest200 = _make_contest(200, 'New Round')._replace(startTimeSeconds=5000)
-        ranklist100 = [_make_ranklist_row('user', 50)]
-        cache = [_make_rc(100, 'Old Round', 'x', 50, 1000, 1500, 1550)]
+        cache100 = [_make_rc(100, 'Old Round', 'x', 50, 1000, 1500, 1550)]
+        cache200 = [_make_rc(200, 'New Round', 'x', 30, 5000, 1600, 1650)]
 
         async def mock_standings(*, contest_id, handles, show_unofficial):
             if contest_id == 100:
-                return (contest100, [], ranklist100)
+                return (contest100, [], [_make_ranklist_row('user', 50)])
             return (contest200, [], [_make_ranklist_row('user', 30)])
+
+        def mock_rc_cache(cid):
+            return {100: cache100, 200: cache200}.get(cid, [])
+
+        def mock_contest_cache(cid):
+            return {100: contest100, 200: contest200}[cid]
 
         with patch('tle.cogs.graphs.cf') as mock_cf, \
              patch('tle.cogs.graphs.cf_common') as mock_common:
             mock_cf.user.status = AsyncMock(return_value=subs)
             mock_cf.contest.standings = AsyncMock(side_effect=mock_standings)
             mock_cf.GYM_ID_THRESHOLD = 100000
-            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.side_effect = mock_rc_cache
+            mock_common.cache2.contest_cache.get_contest.side_effect = mock_contest_cache
+            self._setup_empty_db_cache(mock_common)
 
             rows, missing = self._run(_build_cfvc_rows('user', dhi=3000))
 
         assert len(rows) == 1
         assert rows[0]['contest'] == 'Old Round'
+
+    def test_cached_results_skip_api_calls(self):
+        """Already-cached contests should not trigger standings API calls."""
+        subs = [_make_submission(100, 'user', 'VIRTUAL')]
+        contest = _make_contest(100, 'Round 100')
+
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock()  # should not be called
+            mock_cf.GYM_ID_THRESHOLD = 100000
+            # Already cached
+            mock_common.user_db.get_cfvc_cached_contest_ids.return_value = {100}
+            mock_common.user_db.get_cfvc_cache.return_value = [(100, 50, 1800)]
+            mock_common.cache2.contest_cache.get_contest.return_value = contest
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert len(rows) == 1
+        assert rows[0]['rank'] == 50
+        assert rows[0]['perf'] == 1800
+        # No standings API calls needed
+        mock_cf.contest.standings.assert_not_called()
