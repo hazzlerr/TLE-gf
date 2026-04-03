@@ -1,19 +1,22 @@
 """Tests for the perftable pure functions: _build_rated_rows, _build_vc_rows,
-_format_perftable, _format_cfvc_table, _estimate_perf_from_cache, and _truncate_name."""
+_format_perftable, _format_cfvc_table, _estimate_perf_from_cache,
+_build_cfvc_rows, and _truncate_name."""
+import asyncio
 import pytest
 from collections import namedtuple
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 
 from tle.cogs.graphs import (
     _build_rated_rows,
     _build_vc_rows,
+    _build_cfvc_rows,
     _format_perftable,
     _format_cfvc_table,
     _estimate_perf_from_cache,
     _truncate_name,
     _CONTEST_NAME_MAX,
 )
-from tle.util.codeforces_api import RatingChange
+from tle.util.codeforces_api import RatingChange, Contest, Party, Member, Submission
 
 
 # =====================================================================
@@ -433,3 +436,233 @@ class TestFormatCfvcTable:
         assert '#' in result
         lines = result.strip().split('\n')
         assert len(lines) == 2  # header + sep only
+
+
+# =====================================================================
+# _build_cfvc_rows (async, needs mocking)
+# =====================================================================
+
+# Minimal RanklistRow-like namedtuple for tests
+_RanklistRow = namedtuple('RanklistRow', 'party rank points penalty problemResults')
+_Party = namedtuple('Party', 'contestId members participantType teamId teamName ghost room startTimeSeconds')
+_Member = namedtuple('Member', 'handle')
+
+
+def _make_party(handle, ptype='VIRTUAL'):
+    return _Party(contestId=1, members=[_Member(handle)], participantType=ptype,
+                  teamId=None, teamName=None, ghost=False, room=None, startTimeSeconds=None)
+
+
+def _make_ranklist_row(handle, rank, ptype='VIRTUAL'):
+    return _RanklistRow(party=_make_party(handle, ptype), rank=rank,
+                        points=1000.0, penalty=0, problemResults=[])
+
+
+def _make_submission(contest_id, handle, ptype='VIRTUAL'):
+    return Submission(id=1, contestId=contest_id,
+                      problem=None, author=_make_party(handle, ptype),
+                      programmingLanguage='C++', verdict='OK',
+                      creationTimeSeconds=0, relativeTimeSeconds=0)
+
+
+def _make_contest(cid, name):
+    return Contest(id=cid, name=name, startTimeSeconds=1000,
+                   durationSeconds=7200, type='CF', phase='FINISHED', preparedBy=None)
+
+
+class TestBuildCfvcRows:
+    def _run(self, coro):
+        return asyncio.run(coro)
+
+    def test_basic_virtual_contest(self):
+        subs = [_make_submission(100, 'user', 'VIRTUAL')]
+        contest = _make_contest(100, 'Round 100')
+        ranklist = [_make_ranklist_row('user', 50)]
+        cache_changes = [_make_rc(100, 'Round 100', 'other', 48, 1000, 1600, 1650)]
+
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
+            mock_cf.GYM_ID_THRESHOLD = 100000
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache_changes
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert len(rows) == 1
+        assert rows[0]['rank'] == 50
+        assert rows[0]['contest'] == 'Round 100'
+        # perf from closest rank (48): 1600 + 4*50 = 1800
+        assert rows[0]['perf'] == 1800
+        assert missing == 0
+
+    def test_gym_contests_excluded(self):
+        subs = [
+            _make_submission(100, 'user', 'VIRTUAL'),
+            _make_submission(100500, 'user', 'VIRTUAL'),  # gym
+        ]
+        contest = _make_contest(100, 'Round 100')
+        ranklist = [_make_ranklist_row('user', 50)]
+        cache_changes = [_make_rc(100, 'R', 'x', 50, 1000, 1500, 1550)]
+
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
+            mock_cf.GYM_ID_THRESHOLD = 100000
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache_changes
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        # Only contest 100, not gym 100500
+        assert len(rows) == 1
+        assert mock_cf.contest.standings.call_count == 1
+
+    def test_no_virtual_contests(self):
+        subs = [_make_submission(100, 'user', 'CONTESTANT')]
+
+        with patch('tle.cogs.graphs.cf') as mock_cf:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.GYM_ID_THRESHOLD = 100000
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert rows == []
+        assert missing == 0
+
+    def test_empty_submissions(self):
+        with patch('tle.cogs.graphs.cf') as mock_cf:
+            mock_cf.user.status = AsyncMock(return_value=[])
+            mock_cf.GYM_ID_THRESHOLD = 100000
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert rows == []
+        assert missing == 0
+
+    def test_missing_cache_data_increments_missing(self):
+        subs = [_make_submission(100, 'user', 'VIRTUAL')]
+        contest = _make_contest(100, 'Round 100')
+        ranklist = [_make_ranklist_row('user', 50)]
+
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
+            mock_cf.GYM_ID_THRESHOLD = 100000
+            # Empty cache — no rating changes for this contest
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = []
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert rows == []
+        assert missing == 1
+
+    def test_standings_api_error_increments_missing(self):
+        subs = [_make_submission(100, 'user', 'VIRTUAL')]
+
+        with patch('tle.cogs.graphs.cf') as mock_cf:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock(side_effect=Exception('API error'))
+            mock_cf.GYM_ID_THRESHOLD = 100000
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert rows == []
+        assert missing == 1
+
+    def test_no_virtual_row_in_standings(self):
+        """Standings returned but no VIRTUAL row (e.g., only PRACTICE)."""
+        subs = [_make_submission(100, 'user', 'VIRTUAL')]
+        contest = _make_contest(100, 'Round 100')
+        ranklist = [_make_ranklist_row('user', 0, ptype='PRACTICE')]
+
+        with patch('tle.cogs.graphs.cf') as mock_cf:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
+            mock_cf.GYM_ID_THRESHOLD = 100000
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert rows == []
+        assert missing == 1
+
+    def test_multiple_contests_mixed_success(self):
+        subs = [
+            _make_submission(100, 'user', 'VIRTUAL'),
+            _make_submission(200, 'user', 'VIRTUAL'),
+            _make_submission(300, 'user', 'VIRTUAL'),
+        ]
+        contest100 = _make_contest(100, 'R100')
+        contest300 = _make_contest(300, 'R300')
+        ranklist100 = [_make_ranklist_row('user', 50)]
+        ranklist300 = [_make_ranklist_row('user', 10)]
+        cache100 = [_make_rc(100, 'R100', 'x', 50, 1000, 1500, 1550)]
+        cache300 = [_make_rc(300, 'R300', 'x', 10, 1000, 1800, 1850)]
+
+        async def mock_standings(*, contest_id, handles, show_unofficial):
+            if contest_id == 100:
+                return (contest100, [], ranklist100)
+            elif contest_id == 200:
+                raise Exception('API error')
+            else:
+                return (contest300, [], ranklist300)
+
+        def mock_cache(cid):
+            return {100: cache100, 300: cache300}.get(cid, [])
+
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock(side_effect=mock_standings)
+            mock_cf.GYM_ID_THRESHOLD = 100000
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.side_effect = mock_cache
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert len(rows) == 2
+        assert rows[0]['contest'] == 'R100'
+        assert rows[1]['contest'] == 'R300'
+        assert rows[0]['idx'] == 1
+        assert rows[1]['idx'] == 2
+        assert missing == 1  # contest 200 failed
+
+    def test_deduplicates_contest_ids(self):
+        """Multiple submissions in same virtual contest should only query once."""
+        subs = [
+            _make_submission(100, 'user', 'VIRTUAL'),
+            _make_submission(100, 'user', 'VIRTUAL'),  # duplicate
+        ]
+        contest = _make_contest(100, 'Round 100')
+        ranklist = [_make_ranklist_row('user', 50)]
+        cache = [_make_rc(100, 'R', 'x', 50, 1000, 1500, 1550)]
+
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
+            mock_cf.GYM_ID_THRESHOLD = 100000
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert len(rows) == 1
+        assert mock_cf.contest.standings.call_count == 1
+
+    def test_long_contest_name_truncated(self):
+        subs = [_make_submission(100, 'user', 'VIRTUAL')]
+        long_name = 'A' * 50
+        contest = _make_contest(100, long_name)
+        ranklist = [_make_ranklist_row('user', 50)]
+        cache = [_make_rc(100, long_name, 'x', 50, 1000, 1500, 1550)]
+
+        with patch('tle.cogs.graphs.cf') as mock_cf, \
+             patch('tle.cogs.graphs.cf_common') as mock_common:
+            mock_cf.user.status = AsyncMock(return_value=subs)
+            mock_cf.contest.standings = AsyncMock(return_value=(contest, [], ranklist))
+            mock_cf.GYM_ID_THRESHOLD = 100000
+            mock_common.cache2.rating_changes_cache.get_rating_changes_for_contest.return_value = cache
+
+            rows, missing = self._run(_build_cfvc_rows('user'))
+
+        assert len(rows[0]['contest']) == _CONTEST_NAME_MAX
