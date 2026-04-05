@@ -44,6 +44,7 @@ class ScoringDef:
     is_eligible_winner: Optional[Callable] = None
     best_result_sort_key: Optional[Callable] = None
     winner_result_sort_key: Optional[Callable] = None
+    result_group_key: Optional[Callable] = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +66,7 @@ class GameDef:
     is_eligible_winner: Optional[Callable] = None
     best_result_sort_key: Optional[Callable] = None
     winner_result_sort_key: Optional[Callable] = None
+    result_group_key: Optional[Callable] = None
     missing_is_loss: bool = False  # if True, missing puzzle = automatic loss in VS
     scoring_variants: Dict[str, ScoringDef] = field(default_factory=dict)
 
@@ -94,12 +96,14 @@ def winner_result_sort_key(row):
     return result_sort_key(row)[:3]
 
 
-def pick_best_results(rows, sort_key_fn=None):
+def pick_best_results(rows, sort_key_fn=None, group_key_fn=None):
     if sort_key_fn is None:
         sort_key_fn = result_sort_key
+    if group_key_fn is None:
+        group_key_fn = result_key
     best = {}
     for row in rows:
-        key = result_key(row)
+        key = group_key_fn(row)
         prev = best.get(key)
         if prev is None or sort_key_fn(row) > sort_key_fn(prev):
             best[key] = row
@@ -143,6 +147,7 @@ def resolve_scoring(game, args):
         is_eligible_winner=game.is_eligible_winner,
         best_result_sort_key=game.best_result_sort_key,
         winner_result_sort_key=game.winner_result_sort_key,
+        result_group_key=game.result_group_key,
     )
     if args:
         mode = args[-1].lower()
@@ -153,26 +158,27 @@ def resolve_scoring(game, args):
                 is_eligible_winner=override.is_eligible_winner or variant.is_eligible_winner,
                 best_result_sort_key=override.best_result_sort_key or variant.best_result_sort_key,
                 winner_result_sort_key=override.winner_result_sort_key or variant.winner_result_sort_key,
+                result_group_key=override.result_group_key or variant.result_group_key,
             )
             return args[:-1], mode, variant
     return args, None, variant
 
 
-def compute_vs(rows1, rows2, score_fn=None, missing_is_loss=False, best_result_sort_key_fn=None):
+def compute_vs_matchups(rows1, rows2, score_fn=None, missing_is_loss=False,
+                        best_result_sort_key_fn=None, group_key_fn=None):
     if score_fn is None:
         score_fn = default_score_matchup
-    if best_result_sort_key_fn is None:
-        best_result_sort_key_fn = result_sort_key
-    best1 = pick_best_results(rows1, sort_key_fn=best_result_sort_key_fn)
-    best2 = pick_best_results(rows2, sort_key_fn=best_result_sort_key_fn)
+    best1 = pick_best_results(
+        rows1, sort_key_fn=best_result_sort_key_fn, group_key_fn=group_key_fn)
+    best2 = pick_best_results(
+        rows2, sort_key_fn=best_result_sort_key_fn, group_key_fn=group_key_fn)
 
     if missing_is_loss:
         puzzles = sorted(set(best1) | set(best2))
     else:
         puzzles = sorted(set(best1) & set(best2))
 
-    score1, score2 = 0.0, 0.0
-    wins1, wins2, ties = 0, 0, 0
+    matchups = []
 
     for key in puzzles:
         r1 = best1.get(key)
@@ -183,6 +189,33 @@ def compute_vs(rows1, rows2, score_fn=None, missing_is_loss=False, best_result_s
             pts1, pts2 = 1.0, 0.0
         else:
             pts1, pts2 = score_fn(r1, r2)
+        matchups.append({
+            'key': key,
+            'row1': r1,
+            'row2': r2,
+            'score1': pts1,
+            'score2': pts2,
+        })
+
+    return matchups
+
+
+def compute_vs(rows1, rows2, score_fn=None, missing_is_loss=False,
+               best_result_sort_key_fn=None, group_key_fn=None):
+    matchups = compute_vs_matchups(
+        rows1, rows2,
+        score_fn=score_fn,
+        missing_is_loss=missing_is_loss,
+        best_result_sort_key_fn=best_result_sort_key_fn,
+        group_key_fn=group_key_fn,
+    )
+
+    score1, score2 = 0.0, 0.0
+    wins1, wins2, ties = 0, 0, 0
+
+    for matchup in matchups:
+        pts1 = matchup['score1']
+        pts2 = matchup['score2']
         score1 += pts1
         score2 += pts2
         if pts1 == pts2:
@@ -193,7 +226,7 @@ def compute_vs(rows1, rows2, score_fn=None, missing_is_loss=False, best_result_s
             wins2 += 1
 
     return {
-        'common_count': len(puzzles),
+        'common_count': len(matchups),
         'score1': score1, 'score2': score2,
         'wins1': wins1, 'wins2': wins2, 'ties': ties,
     }
@@ -249,16 +282,19 @@ def compute_longest_streak(rows):
     return longest
 
 
-def compute_top(rows, is_eligible=None, best_result_sort_key_fn=None, winner_result_sort_key_fn=None):
+def compute_top(rows, is_eligible=None, best_result_sort_key_fn=None,
+                winner_result_sort_key_fn=None, group_key_fn=None):
     if is_eligible is None:
         is_eligible = default_is_eligible_winner
     if best_result_sort_key_fn is None:
         best_result_sort_key_fn = result_sort_key
     if winner_result_sort_key_fn is None:
         winner_result_sort_key_fn = winner_result_sort_key
+    if group_key_fn is None:
+        group_key_fn = result_key
     best_by_user_puzzle = {}
     for row in rows:
-        key = (str(row.user_id), result_key(row))
+        key = (str(row.user_id), group_key_fn(row))
         prev = best_by_user_puzzle.get(key)
         if prev is None or best_result_sort_key_fn(row) > best_result_sort_key_fn(prev):
             best_by_user_puzzle[key] = row

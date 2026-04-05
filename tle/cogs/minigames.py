@@ -13,7 +13,7 @@ from tle.util import discord_common
 from tle.util import paginator
 
 from tle.cogs._minigame_common import (
-    compute_vs, compute_streak, compute_longest_streak, compute_top,
+    compute_vs, compute_vs_matchups, compute_streak, compute_longest_streak, compute_top,
     pick_best_results, format_duration, parse_date_args, resolve_scoring,
     strip_codeblock,
 )
@@ -139,6 +139,10 @@ def _safe_user_name(guild, user_id):
     if member is not None:
         return _safe_member_name(member)
     return f'user `{user_id}`'
+
+
+def _format_score(score):
+    return f'{score:.3f}'.rstrip('0').rstrip('.')
 
 
 class Minigames(commands.Cog):
@@ -436,6 +440,80 @@ class Minigames(commands.Cog):
             lines.append(f'Enable it with `;meta config enable {game.feature_flag}`.')
         await ctx.send(embed=discord_common.embed_neutral('\n'.join(lines)))
 
+    @staticmethod
+    def _guessgame_puzzle_url(puzzle_number):
+        return f'https://guessthe.game/p/{int(puzzle_number)}'
+
+    @staticmethod
+    def _format_guessgame_result(row):
+        if row is None:
+            return 'no result'
+
+        accuracy = int(getattr(row, 'accuracy', 0))
+        yellow_pos = int(getattr(row, 'time_seconds', 7))
+        if accuracy > 0:
+            green_pos = 7 - accuracy
+            if green_pos == 1:
+                return 'perfect'
+            return f'green {green_pos}'
+        if yellow_pos < 7:
+            return f'yellow {yellow_pos}'
+        return 'no green'
+
+    def _make_guessgame_vs_pages(self, ctx, game, member1, member2, stats, matchups, scoring_name):
+        title_suffix = ' (Raw)' if scoring_name else ''
+        summary_lines = [
+            f'`{_safe_member_name(member1)}`: **{_format_score(stats["score1"])}** points, **{stats["wins1"]}** wins',
+            f'`{_safe_member_name(member2)}`: **{_format_score(stats["score2"])}** points, **{stats["wins2"]}** wins',
+            f'Ties: **{stats["ties"]}**',
+            f'Puzzles: **{stats["common_count"]}**',
+        ]
+
+        pages = []
+        per_page = 10
+        ordered_matchups = list(reversed(matchups))
+        for chunk in paginator.chunkify(ordered_matchups, per_page):
+            embed = discord.Embed(
+                title=f'{game.display_name} Head to Head{title_suffix}',
+                description='\n'.join(summary_lines),
+                color=discord_common.random_cf_color(),
+            )
+
+            col1 = []
+            col2 = []
+            for matchup in chunk:
+                row1 = matchup['row1']
+                row2 = matchup['row2']
+                puzzle_number = int(
+                    row1.puzzle_number if row1 is not None else row2.puzzle_number
+                )
+                puzzle_link = f'[#{puzzle_number}]({self._guessgame_puzzle_url(puzzle_number)})'
+                col1.append(
+                    f'{puzzle_link} {self._format_guessgame_result(row1)}'
+                    f' · {_format_score(matchup["score1"])} pts'
+                )
+                col2.append(
+                    f'{puzzle_link} {self._format_guessgame_result(row2)}'
+                    f' · {_format_score(matchup["score2"])} pts'
+                )
+
+            embed.add_field(
+                name=_safe_member_name(member1),
+                value='\n'.join(col1),
+                inline=True,
+            )
+            embed.add_field(
+                name=_safe_member_name(member2),
+                value='\n'.join(col2),
+                inline=True,
+            )
+            pages.append((None, embed))
+
+        paginator.paginate(
+            self.bot, ctx.channel, pages, wait_time=300,
+            set_pagenum_footers=True, author_id=ctx.author.id,
+        )
+
     async def _cmd_vs(self, ctx, game, member1, member2, *args):
         self._require_enabled(ctx.guild.id, game)
         try:
@@ -453,6 +531,7 @@ class Minigames(commands.Cog):
             score_fn=scoring.score_matchup,
             missing_is_loss=game.missing_is_loss,
             best_result_sort_key_fn=scoring.best_result_sort_key,
+            group_key_fn=scoring.result_group_key,
         )
         if stats['common_count'] == 0:
             raise MinigameCogError(
@@ -471,6 +550,40 @@ class Minigames(commands.Cog):
             color=discord_common.random_cf_color(),
         )
         await ctx.send(embed=embed)
+
+    async def _cmd_guessgame_matchups(self, ctx, member1, member2, *args):
+        game = GUESSGAME_GAME
+        self._require_enabled(ctx.guild.id, game)
+        try:
+            args, scoring_name, scoring = resolve_scoring(game, args)
+            dlo, dhi, plo, phi = parse_date_args(args)
+        except ValueError as e:
+            raise MinigameCogError(str(e)) from e
+
+        rows1 = cf_common.user_db.get_minigame_results_for_user(
+            ctx.guild.id, game.name, member1.id, dlo, dhi, plo, phi)
+        rows2 = cf_common.user_db.get_minigame_results_for_user(
+            ctx.guild.id, game.name, member2.id, dlo, dhi, plo, phi)
+        stats = compute_vs(
+            rows1, rows2,
+            score_fn=scoring.score_matchup,
+            missing_is_loss=game.missing_is_loss,
+            best_result_sort_key_fn=scoring.best_result_sort_key,
+            group_key_fn=scoring.result_group_key,
+        )
+        if stats['common_count'] == 0:
+            raise MinigameCogError(
+                f'These users have no {game.display_name} puzzles to compare.')
+
+        matchups = compute_vs_matchups(
+            rows1, rows2,
+            score_fn=scoring.score_matchup,
+            missing_is_loss=game.missing_is_loss,
+            best_result_sort_key_fn=scoring.best_result_sort_key,
+            group_key_fn=scoring.result_group_key,
+        )
+        self._make_guessgame_vs_pages(
+            ctx, game, member1, member2, stats, matchups, scoring_name)
 
     async def _cmd_streak(self, ctx, game, *args):
         self._require_enabled(ctx.guild.id, game)
@@ -525,6 +638,7 @@ class Minigames(commands.Cog):
             is_eligible=scoring.is_eligible_winner,
             best_result_sort_key_fn=scoring.best_result_sort_key,
             winner_result_sort_key_fn=scoring.winner_result_sort_key,
+            group_key_fn=scoring.result_group_key,
         )
         if not winners:
             raise MinigameCogError(
@@ -849,6 +963,11 @@ class Minigames(commands.Cog):
                        usage='@user1 @user2 [p>=N] [p<N] [filters...]')
     async def gg_vs(self, ctx, member1: CaseInsensitiveMember, member2: CaseInsensitiveMember, *args):
         await self._cmd_vs(ctx, GUESSGAME_GAME, member1, member2, *args)
+
+    @guessgame.command(name='results', aliases=['matchups'], brief='Show per-puzzle side-by-side results',
+                       usage='@user1 @user2 [p>=N] [p<N] [filters...]')
+    async def gg_results(self, ctx, member1: CaseInsensitiveMember, member2: CaseInsensitiveMember, *args):
+        await self._cmd_guessgame_matchups(ctx, member1, member2, *args)
 
     @guessgame.command(name='streak', brief='Show current win streak',
                        usage='[@user] [filters...]')

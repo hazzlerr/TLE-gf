@@ -127,6 +127,11 @@ def guessgame_is_eligible_winner(row):
     return row.accuracy > 0
 
 
+def guessgame_result_group_key(row):
+    """Group historical results by puzzle number, regardless of play date."""
+    return int(row.puzzle_number)
+
+
 GUESSGAME_GAME = GameDef(
     name='guessgame',
     display_name='GuessThe.Game',
@@ -135,5 +140,6 @@ GUESSGAME_GAME = GameDef(
     detect=_DETECT_RE,
     score_matchup=guessgame_score_matchup,
     is_eligible_winner=guessgame_is_eligible_winner,
+    result_group_key=guessgame_result_group_key,
     missing_is_loss=True,
 )
