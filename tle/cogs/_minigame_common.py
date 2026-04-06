@@ -45,6 +45,7 @@ class ScoringDef:
     best_result_sort_key: Optional[Callable] = None
     winner_result_sort_key: Optional[Callable] = None
     result_group_key: Optional[Callable] = None
+    award_single_participant_win: bool = False
 
 
 @dataclass(frozen=True)
@@ -149,6 +150,7 @@ def resolve_scoring(game, args):
         best_result_sort_key=game.best_result_sort_key,
         winner_result_sort_key=game.winner_result_sort_key,
         result_group_key=game.result_group_key,
+        award_single_participant_win=False,
     )
     if args:
         mode = args[-1].lower()
@@ -160,6 +162,7 @@ def resolve_scoring(game, args):
                 best_result_sort_key=override.best_result_sort_key or variant.best_result_sort_key,
                 winner_result_sort_key=override.winner_result_sort_key or variant.winner_result_sort_key,
                 result_group_key=override.result_group_key or variant.result_group_key,
+                award_single_participant_win=override.award_single_participant_win,
             )
             return args[:-1], mode, variant
     return args, None, variant
@@ -295,7 +298,8 @@ def compute_longest_streak(rows):
 
 
 def compute_top(rows, is_eligible=None, best_result_sort_key_fn=None,
-                winner_result_sort_key_fn=None, group_key_fn=None):
+                winner_result_sort_key_fn=None, group_key_fn=None,
+                award_single_participant_win=False):
     if is_eligible is None:
         is_eligible = default_is_eligible_winner
     if best_result_sort_key_fn is None:
@@ -311,8 +315,10 @@ def compute_top(rows, is_eligible=None, best_result_sort_key_fn=None,
         if prev is None or best_result_sort_key_fn(row) > best_result_sort_key_fn(prev):
             best_by_user_puzzle[key] = row
 
+    rows_by_puzzle = {}
     best_per_puzzle = {}
     for (_, puzzle_key), row in best_by_user_puzzle.items():
+        rows_by_puzzle.setdefault(puzzle_key, []).append(row)
         if not is_eligible(row):
             continue
         entry = best_per_puzzle.get(puzzle_key)
@@ -323,7 +329,16 @@ def compute_top(rows, is_eligible=None, best_result_sort_key_fn=None,
             entry['rows'].append(row)
 
     wins_by_user = {}
-    for entry in best_per_puzzle.values():
+    if award_single_participant_win:
+        for puzzle_rows in rows_by_puzzle.values():
+            if len(puzzle_rows) != 1:
+                continue
+            row = puzzle_rows[0]
+            user_id = str(row.user_id)
+            wins_by_user[user_id] = wins_by_user.get(user_id, 0) + 1
+    for puzzle_key, entry in best_per_puzzle.items():
+        if award_single_participant_win and len(rows_by_puzzle.get(puzzle_key, ())) == 1:
+            continue
         for row in entry['rows']:
             user_id = str(row.user_id)
             wins_by_user[user_id] = wins_by_user.get(user_id, 0) + 1

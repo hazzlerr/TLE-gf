@@ -343,6 +343,12 @@ class TestComputation:
         assert scoring.best_result_sort_key is not None
         assert scoring.winner_result_sort_key is not None
 
+    def test_resolve_scoring_uses_akari_all_variant(self):
+        args, scoring_name, scoring = resolve_scoring(AKARI_GAME, ('month', 'all'))
+        assert args == ('month',)
+        assert scoring_name == 'all'
+        assert scoring.award_single_participant_win is True
+
     def test_akari_raw_vs_ignores_accuracy_and_uses_time(self):
         _, _, scoring = resolve_scoring(AKARI_GAME, ('raw',))
         stats = compute_vs(
@@ -371,6 +377,22 @@ class TestComputation:
             winner_result_sort_key_fn=scoring.winner_result_sort_key,
         )
         assert result == [('10', 2), ('20', 1)]
+
+    def test_akari_all_top_counts_single_participant_completion(self):
+        _, _, scoring = resolve_scoring(AKARI_GAME, ('all',))
+        rows = [
+            _row(1, 10, '2026-03-26', False, 80, 95, 445),
+            _row(2, 20, '2026-03-27', True, 70, 100, 446),
+            _row(3, 30, '2026-03-27', True, 60, 100, 446),
+        ]
+        result = compute_top(
+            rows,
+            is_eligible=scoring.is_eligible_winner,
+            best_result_sort_key_fn=scoring.best_result_sort_key,
+            winner_result_sort_key_fn=scoring.winner_result_sort_key,
+            award_single_participant_win=scoring.award_single_participant_win,
+        )
+        assert result == [('10', 1), ('30', 1)]
 
 
 class TestArgs:
@@ -461,6 +483,18 @@ class TestDbMixin:
         rows = db.get_minigame_results_for_user(100, _GAME, 300, dlo=dlo, dhi=dhi)
         assert len(rows) == 1
         assert rows[0].puzzle_number == 445
+
+    def test_results_for_puzzle_by_number(self, db):
+        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 96, 70, False, 'c1')
+        db.save_minigame_result(2, 100, _GAME, 200, 301, 445, '2026-03-26', 100, 90, True, 'c2')
+        rows = db.get_minigame_results_for_puzzle(100, _GAME, puzzle_number=445)
+        assert [r.user_id for r in rows] == ['301', '300']
+
+    def test_results_for_puzzle_by_date(self, db):
+        db.save_minigame_result(1, 100, _GAME, 200, 300, 445, '2026-03-26', 96, 70, False, 'c1')
+        db.save_minigame_result(2, 100, _GAME, 200, 301, 445, '2026-03-26', 100, 90, True, 'c2')
+        rows = db.get_minigame_results_for_puzzle(100, _GAME, puzzle_date='2026-03-26')
+        assert [r.user_id for r in rows] == ['301', '300']
 
     def test_raw_content_updated_on_replace(self, db):
         """INSERT OR REPLACE should update raw_content when re-saving same message_id."""
@@ -1287,6 +1321,68 @@ class TestGuessGameVsCommand:
         assert '[#1201](https://guessthe.game/p/1201)' in embed.fields[0]['value']
         assert '[#1200](https://guessthe.game/p/1200)' in embed.fields[1]['value']
         assert '[#1199](https://guessthe.game/p/1199)' not in embed.fields[0]['value']
+
+
+class TestAkariStatsCommand:
+    def _make_ctx(self, guild_id, requester, members):
+        guild = _FakeGuild(guild_id, members=members)
+        sent = {}
+
+        async def send(content=None, *, embed=None, file=None, **kwargs):
+            sent['content'] = content
+            sent['embed'] = embed
+            sent['file'] = file
+            sent['kwargs'] = kwargs
+
+        return SimpleNamespace(
+            guild=guild,
+            author=requester,
+            channel=object(),
+            send=send,
+            sent=sent,
+        )
+
+    def test_stats_with_puzzle_id_shows_table(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(1, 'akari', '1')
+        db.set_minigame_channel(1, 'akari', 10)
+
+        alice = _FakeDiscordMember(10, 'alice', 'Alice')
+        bob = _FakeDiscordMember(20, 'bob', 'Bob')
+        ctx = self._make_ctx(1, alice, [alice, bob])
+        cog = Minigames(bot=object())
+
+        db.save_minigame_result(1, 1, 'akari', 10, alice.id, 445, '2026-03-26', 96, 70, False, 'a')
+        db.save_minigame_result(2, 1, 'akari', 10, bob.id, 445, '2026-03-26', 100, 90, True, 'b')
+
+        asyncio.run(cog._cmd_stats(ctx, AKARI_GAME, '445'))
+
+        embed = ctx.sent['embed']
+        assert embed.title == 'Daily Akari Results'
+        assert '#445 | 2026-03-26' in embed.description
+        assert 'Alice' in embed.description
+        assert 'Bob' in embed.description
+        assert '96%' in embed.description
+        assert '100%' in embed.description
+        assert '1:10' in embed.description
+        assert '1:30' in embed.description
+        assert ctx.sent['file'] is None
+
+    def test_stats_with_day_shows_table(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(1, 'akari', '1')
+
+        alice = _FakeDiscordMember(10, 'alice', 'Alice')
+        ctx = self._make_ctx(1, alice, [alice])
+        cog = Minigames(bot=object())
+
+        db.save_minigame_result(1, 1, 'akari', 10, alice.id, 445, '2026-03-26', 100, 89, True, 'a')
+
+        asyncio.run(cog._cmd_stats(ctx, AKARI_GAME, '2026-03-26'))
+
+        embed = ctx.sent['embed']
+        assert '#445 | 2026-03-26' in embed.description
+        assert 'Alice' in embed.description
 
 
 class TestStripCodeblock:

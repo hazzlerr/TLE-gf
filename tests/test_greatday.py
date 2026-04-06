@@ -166,12 +166,23 @@ class _FakeChannel:
 
 
 class _FakeGuild:
-    def __init__(self, guild_id, channel=None):
+    def __init__(self, guild_id, channel=None, members=None):
         self.id = guild_id
         self._channel = channel
+        self._members = {member.id: member for member in (members or [])}
 
     def get_channel(self, cid):
         return self._channel
+
+    def get_member(self, user_id):
+        return self._members.get(user_id)
+
+
+class _FakeMember:
+    def __init__(self, user_id, name, display_name=None):
+        self.id = user_id
+        self.name = name
+        self.display_name = display_name or name
 
 
 class TestSendGreatDayIntegration:
@@ -261,6 +272,64 @@ class TestSendGreatDayIntegration:
         assert f'<@{USER_A}>' in msg
         assert f'<@{USER_B}>' in msg
         assert f'<@{USER_C}>' in msg
+
+    def test_special_user_gets_forced_pick_when_coinflip_hits(self, db, monkeypatch):
+        from tle.cogs import greatday as greatday_module
+
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        db.greatday_signup(GUILD, USER_A)
+        db.greatday_signup(GUILD, USER_B)
+        db.greatday_signup(GUILD, USER_C)
+
+        channel = _FakeChannel()
+        members = [
+            _FakeMember(int(USER_A), 'flammifer4271'),
+            _FakeMember(int(USER_B), 'other1'),
+            _FakeMember(int(USER_C), 'other2'),
+            _FakeMember(400, 'other3'),
+            _FakeMember(500, 'other4'),
+            _FakeMember(600, 'other5'),
+        ]
+        for user_id in ['400', '500', '600']:
+            db.greatday_signup(GUILD, user_id)
+        guild = _FakeGuild(int(GUILD), channel, members=members)
+        cog = self._make_cog(db)
+
+        monkeypatch.setattr(greatday_module.random, 'random', lambda: 0.1)
+        monkeypatch.setattr(greatday_module.random, 'sample', lambda seq, k: list(seq)[1:k + 1])
+        monkeypatch.setattr(greatday_module.random, 'randrange', lambda n: 0)
+
+        self._run(cog._send_greatday(guild))
+
+        assert f'<@{USER_A}>' in channel.sent[0]
+
+    def test_special_user_can_still_miss_when_coinflip_fails(self, db, monkeypatch):
+        from tle.cogs import greatday as greatday_module
+
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        for user_id in [USER_A, USER_B, USER_C, '400', '500', '600']:
+            db.greatday_signup(GUILD, user_id)
+
+        channel = _FakeChannel()
+        members = [
+            _FakeMember(int(USER_A), 'flammifer4271'),
+            _FakeMember(int(USER_B), 'other1'),
+            _FakeMember(int(USER_C), 'other2'),
+            _FakeMember(400, 'other3'),
+            _FakeMember(500, 'other4'),
+            _FakeMember(600, 'other5'),
+        ]
+        guild = _FakeGuild(int(GUILD), channel, members=members)
+        cog = self._make_cog(db)
+
+        monkeypatch.setattr(greatday_module.random, 'random', lambda: 0.9)
+        monkeypatch.setattr(greatday_module.random, 'sample', lambda seq, k: list(seq)[-k:])
+
+        self._run(cog._send_greatday(guild))
+
+        assert f'<@{USER_A}>' not in channel.sent[0]
 
 
 class TestUpgrade:
