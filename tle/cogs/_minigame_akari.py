@@ -52,11 +52,6 @@ def _parse_date(date_text):
     raise ValueError(f'Unrecognized date format: {date_text}')
 
 
-def parse_akari_date(date_text):
-    """Parse a Daily Akari date string into a ``date``."""
-    return _parse_date(date_text)
-
-
 def parse_akari_message(content):
     """Parse a Daily Akari result message.  Returns a list with one ``ParsedResult``, or ``[]``."""
     lines = [line.strip() for line in content.splitlines() if line.strip()]
@@ -158,9 +153,6 @@ AKARI_GAME = GameDef(
             is_eligible_winner=akari_raw_is_eligible_winner,
             best_result_sort_key=akari_raw_best_result_sort_key,
             winner_result_sort_key=akari_raw_winner_result_sort_key,
-        ),
-        'all': ScoringDef(
-            award_single_participant_win=True,
         ),
     },
 )

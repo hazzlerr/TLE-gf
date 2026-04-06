@@ -1,6 +1,5 @@
 import asyncio
 import datetime as dt
-import io
 import logging
 from typing import Optional
 
@@ -12,14 +11,13 @@ from tle import constants
 from tle.util import codeforces_common as cf_common
 from tle.util import discord_common
 from tle.util import paginator
-from tle.util import table
 
 from tle.cogs._minigame_common import (
     compute_vs, compute_vs_matchups, compute_streak, compute_longest_streak, compute_top,
     pick_best_results, format_duration, parse_date_args, resolve_scoring,
     strip_codeblock,
 )
-from tle.cogs._minigame_akari import AKARI_GAME, parse_akari_date
+from tle.cogs._minigame_akari import AKARI_GAME
 from tle.cogs._minigame_guessgame import GUESSGAME_GAME
 from tle.cogs._minigame_stats import plot_akari_stats, plot_guessgame_stats
 from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
@@ -92,7 +90,6 @@ _TIMEFRAME_CHOICES = [
 
 _MODE_CHOICES = [
     app_commands.Choice(name='Raw (time only)', value='raw'),
-    app_commands.Choice(name='All completions', value='all'),
 ]
 
 
@@ -146,16 +143,6 @@ def _safe_user_name(guild, user_id):
 
 def _format_score(score):
     return f'{score:.3f}'.rstrip('0').rstrip('.')
-
-
-def _format_scoring_suffix(scoring_name):
-    if not scoring_name:
-        return ''
-    labels = {
-        'raw': 'Raw',
-        'all': 'All',
-    }
-    return f' ({labels.get(scoring_name, scoring_name.title())})'
 
 
 class Minigames(commands.Cog):
@@ -655,13 +642,12 @@ class Minigames(commands.Cog):
             best_result_sort_key_fn=scoring.best_result_sort_key,
             winner_result_sort_key_fn=scoring.winner_result_sort_key,
             group_key_fn=scoring.result_group_key,
-            award_single_participant_win=scoring.award_single_participant_win,
         )
         if not winners:
             raise MinigameCogError(
                 f'No {game.display_name} winners found for this range.')
 
-        title_suffix = _format_scoring_suffix(scoring_name)
+        title_suffix = ' (Raw)' if scoring_name else ''
         pages = []
         per_page = 10
         for page_idx, chunk in enumerate(paginator.chunkify(winners, per_page)):
@@ -699,12 +685,6 @@ class Minigames(commands.Cog):
 
     async def _cmd_stats(self, ctx, game, *args):
         self._require_enabled(ctx.guild.id, game)
-
-        if game.name == 'akari' and len(args) == 1:
-            selector = self._parse_akari_puzzle_selector(args[0])
-            if selector is not None:
-                return await self._cmd_akari_puzzle_stats(ctx, *selector)
-
         filter_args = list(args)
         member = ctx.author
         if filter_args:
@@ -731,85 +711,6 @@ class Minigames(commands.Cog):
 
         discord_file = plotter(rows, _safe_member_name(member))
         await ctx.send(file=discord_file)
-
-    @staticmethod
-    def _parse_akari_puzzle_selector(arg):
-        text = arg.strip()
-        lower = text.lower()
-        if lower in {'week', 'month', 'year'} or lower.startswith(('d>=', 'd<', 'p>=', 'p<')):
-            return None
-        if text.isdigit():
-            if len(text) in {4, 6, 8}:
-                try:
-                    puzzle_date = dt.datetime.fromtimestamp(cf_common.parse_date(text)).date()
-                    return None, puzzle_date
-                except cf_common.ParamParseError:
-                    pass
-            return int(text), None
-        try:
-            return None, parse_akari_date(text)
-        except ValueError:
-            return None
-
-    async def _cmd_akari_puzzle_stats(self, ctx, puzzle_number, puzzle_date):
-        rows = cf_common.user_db.get_minigame_results_for_puzzle(
-            ctx.guild.id, AKARI_GAME.name,
-            puzzle_number=puzzle_number,
-            puzzle_date=puzzle_date.isoformat() if puzzle_date is not None else None,
-        )
-        if not rows:
-            target = f'`{puzzle_number}`' if puzzle_number is not None else f'`{puzzle_date.isoformat()}`'
-            raise MinigameCogError(f'No {AKARI_GAME.display_name} results found for puzzle {target}.')
-
-        table_str = self._format_akari_puzzle_results(ctx.guild, rows)
-        first = rows[0]
-        title = f'{AKARI_GAME.display_name} Results'
-        puzzle_bits = [f'#{int(first.puzzle_number)}']
-        if getattr(first, 'puzzle_date', None):
-            puzzle_bits.append(str(first.puzzle_date))
-        description = f'{" | ".join(puzzle_bits)}\n```\n{table_str}\n```'
-        if len(description) > 1900:
-            await ctx.send(
-                embed=discord.Embed(
-                    title=title,
-                    description='Table attached.',
-                    color=discord_common.random_cf_color(),
-                ),
-                file=discord.File(io.StringIO(table_str), filename='akari-results.txt'),
-            )
-            return
-        embed = discord.Embed(
-            title=title,
-            description=description,
-            color=discord_common.random_cf_color(),
-        )
-        await ctx.send(embed=embed)
-
-    @staticmethod
-    def _format_akari_puzzle_results(guild, rows):
-        style = table.Style('{:>}  {:<}  {:>}  {:>}')
-        t = table.Table(style)
-        t += table.Header('#', 'Name', 'Acc', 'Time')
-        t += table.Line()
-        ordered = sorted(
-            rows,
-            key=lambda row: (
-                -int(bool(getattr(row, 'is_perfect', 0))),
-                -int(getattr(row, 'accuracy', 0)),
-                int(getattr(row, 'time_seconds', 0)),
-                int(getattr(row, 'message_id', 0)),
-            )
-        )
-        for index, row in enumerate(ordered, start=1):
-            member = guild.get_member(int(row.user_id))
-            name = _safe_member_name(member) if member is not None else f'user {row.user_id}'
-            t += table.Data(
-                index,
-                name,
-                f'{int(row.accuracy)}%',
-                format_duration(row.time_seconds),
-            )
-        return str(t)
 
     async def _cmd_import_start(self, ctx, game, channel=None):
         key = (ctx.guild.id, game.name)

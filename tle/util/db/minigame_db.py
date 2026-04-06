@@ -291,29 +291,6 @@ class MinigameDbMixin:
             params
         ).fetchall()
 
-    def get_minigame_results_for_puzzle(self, guild_id, game, *, puzzle_number=None, puzzle_date=None):
-        if puzzle_number is None and puzzle_date is None:
-            raise ValueError('Either puzzle_number or puzzle_date must be provided.')
-
-        query, params = self._minigame_filtered_union_query(guild_id, game)
-        clauses = []
-        extra_params = []
-        if puzzle_number is not None:
-            clauses.append('puzzle_number = ?')
-            extra_params.append(int(puzzle_number))
-        if puzzle_date is not None:
-            clauses.append('puzzle_date = ?')
-            extra_params.append(str(puzzle_date))
-
-        return self.conn.execute(
-            f'''
-            {query}
-            WHERE {' AND '.join(clauses)}
-            ORDER BY accuracy DESC, time_seconds ASC, CAST(message_id AS INTEGER) ASC
-            ''',
-            params + tuple(extra_params)
-        ).fetchall()
-
     def delete_minigame_result_for_user_puzzle(self, guild_id, game, user_id, puzzle_number):
         live_rc = self.conn.execute(
             '''
