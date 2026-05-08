@@ -117,7 +117,10 @@ class GreatDay(commands.Cog):
         if not rows:
             return False
 
-        user_ids = [r.user_id for r in rows]
+        user_ids = [r.user_id for r in rows
+                    if guild.get_member(int(r.user_id)) is not None]
+        if not user_ids:
+            return False
         picked = random.sample(user_ids, min(_PICK_COUNT, len(user_ids)))
         mentions = ' '.join(f'<@{uid}>' for uid in picked)
         verb = 'is' if len(picked) == 1 else 'are'

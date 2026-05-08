@@ -176,12 +176,16 @@ class _FakeChannel:
 
 
 class _FakeGuild:
-    def __init__(self, guild_id, channel=None):
+    def __init__(self, guild_id, channel=None, absent_user_ids=()):
         self.id = guild_id
         self._channel = channel
+        self._absent = {int(uid) for uid in absent_user_ids}
 
     def get_channel(self, cid):
         return self._channel
+
+    def get_member(self, uid):
+        return None if int(uid) in self._absent else object()
 
 
 class TestSendGreatDayIntegration:
@@ -250,6 +254,40 @@ class TestSendGreatDayIntegration:
 
         channel = _FakeChannel()
         guild = _FakeGuild(int(GUILD), channel)
+        cog = self._make_cog(db)
+        result = self._run(cog._send_greatday(guild))
+        assert result is False
+        assert len(channel.sent) == 0
+
+    def test_departed_users_are_filtered_out(self, db, monkeypatch):
+        """Users who left the server should not be greeted."""
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        db.greatday_signup(GUILD, USER_A)
+        db.greatday_signup(GUILD, USER_B)
+        db.greatday_signup(GUILD, USER_C)
+
+        channel = _FakeChannel()
+        # USER_B has left the server
+        guild = _FakeGuild(int(GUILD), channel, absent_user_ids=[USER_B])
+        cog = self._make_cog(db)
+        result = self._run(cog._send_greatday(guild))
+        assert result is True
+        msg = channel.sent[0]
+        assert f'<@{USER_A}>' in msg
+        assert f'<@{USER_B}>' not in msg
+        assert f'<@{USER_C}>' in msg
+
+    def test_returns_false_when_all_signups_departed(self, db, monkeypatch):
+        """If every signup has left, no message is sent."""
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(GUILD, 'greatday_channel', '999')
+        db.greatday_signup(GUILD, USER_A)
+        db.greatday_signup(GUILD, USER_B)
+
+        channel = _FakeChannel()
+        guild = _FakeGuild(int(GUILD), channel,
+                           absent_user_ids=[USER_A, USER_B])
         cog = self._make_cog(db)
         result = self._run(cog._send_greatday(guild))
         assert result is False
