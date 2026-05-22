@@ -214,6 +214,23 @@ class _FakeReference:
         self.resolved = resolved
 
 
+class _FakeFile:
+    """Stand-in for the discord.File produced by Attachment.to_file()."""
+    def __init__(self, filename, spoiler):
+        self.filename = filename
+        self.spoiler = spoiler
+
+    def __eq__(self, other):
+        # Backwards-compat with assertions that compare against the old
+        # 'File:<name>' string form.
+        if isinstance(other, str):
+            return f'File:{self.filename}' == other
+        return NotImplemented
+
+    def __repr__(self):
+        return f'File:{self.filename}(spoiler={self.spoiler})'
+
+
 class _FakeAttachment:
     def __init__(self, filename, url='https://cdn.example.com/file'):
         self.filename = filename
@@ -222,8 +239,8 @@ class _FakeAttachment:
     def is_spoiler(self):
         return self.filename.startswith('SPOILER_')
 
-    async def to_file(self):
-        return f'File:{self.filename}'
+    async def to_file(self, *, spoiler=False):
+        return _FakeFile(self.filename, spoiler)
 
 
 class _FakeMessage:
@@ -315,6 +332,21 @@ class TestBuildStarboardMessage:
         content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
         assert len(files) == 1
         assert files[0] == 'File:SPOILER_photo.png'
+
+    def test_spoiler_image_to_file_called_with_spoiler_true(self):
+        """to_file() must be called with spoiler=True — discord.py 2.4's
+        to_file() defaults spoiler=False and would otherwise strip it."""
+        att = _FakeAttachment('SPOILER_photo.png')
+        msg = _FakeMessage(attachments=[att])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert files[0].spoiler is True
+
+    def test_non_spoiler_video_to_file_not_spoilered(self):
+        """A normal video must not be spoilered when re-uploaded."""
+        att = _FakeAttachment('clip.mp4', url='https://cdn.example.com/clip.mp4')
+        msg = _FakeMessage(attachments=[att])
+        content, embeds, files = _run(Starboard.build_starboard_message(msg, '\N{WHITE MEDIUM STAR}', 5, 0xffaa10))
+        assert files[0].spoiler is False
 
     def test_spoiler_image_author_in_content(self):
         """Spoiler image messages put author in content like videos do."""
