@@ -291,6 +291,7 @@ constants_mod._DEFAULT_STAR = '\N{WHITE MEDIUM STAR}'
 constants_mod.TLE_ADMIN = 'Admin'
 constants_mod.TLE_MODERATOR = 'Moderator'
 constants_mod.NOTO_SANS_CJK_BOLD_FONT_PATH = '/tmp/fake-font.ttf'
+constants_mod.NOTO_COLOR_EMOJI_FONT_PATH = '/tmp/fake-color-emoji.ttf'
 
 # tle.util.codeforces_common needs a user_db attribute and parse_date for starboard cog
 import time as _time

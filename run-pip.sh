@@ -11,11 +11,36 @@ if [[ -n "${VENV_DIR}" ]]; then
     . "${VENV_DIR}/bin/activate"
 fi
 
+bootstrap_cairo() {
+    if [[ "${TLE_CAIRO_BOOTSTRAP:-1}" == "0" ]]; then
+        return
+    fi
+
+    local cairo_exports
+    if cairo_exports="$(python -m tle.util.cairo_bootstrap)"; then
+        while IFS= read -r cairo_export; do
+            case "${cairo_export}" in
+                LD_LIBRARY_PATH=*|PKG_CONFIG_PATH=*|TLE_ALLOW_COLOR_EMOJI=1)
+                    export "${cairo_export}"
+                    ;;
+                "")
+                    ;;
+                *)
+                    echo "Ignoring unexpected Cairo bootstrap output: ${cairo_export}" >&2
+                    ;;
+            esac
+        done <<< "${cairo_exports}"
+    else
+        echo "Cairo bootstrap helper failed; continuing with default Cairo." >&2
+    fi
+}
+
 while true; do
     git pull
     poetry export --without-hashes > requirements.txt
     python -m pip install --requirement requirements.txt
-    FONTCONFIG_FILE=$PWD/extra/fonts.conf python -m tle
+    bootstrap_cairo
+    python -m tle
 
     (( $? != 42 )) && break
 

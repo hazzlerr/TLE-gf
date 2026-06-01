@@ -26,9 +26,9 @@ FONTS = [
     'Noto Sans CJK TC',
     'Noto Sans CJK HK',
     'Noto Sans CJK KR',
-    # Monochrome emoji fallback, only reached for codepoints the sans/CJK fonts
-    # lack. Uses outline glyphs (not the color bitmap font) so emoji render on
-    # older Cairo instead of showing as tofu.
+    # extra/fonts.conf rejects Noto Color Emoji on old Cairo; fonts-color.conf
+    # allows it only after startup verifies a compatible Cairo runtime.
+    'Noto Color Emoji',
     'Noto Emoji',
 ]
 

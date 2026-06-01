@@ -49,8 +49,9 @@ _AKARI_IMAGE_FONTS = [
     'Noto Sans CJK HK',
     'Noto Sans CJK KR',
     # Keep this in sync with the Cairo/Pango renderers in handles/training.
-    # extra/fonts.conf rejects Noto Color Emoji so older Cairo uses this
-    # monochrome fallback instead of rendering emoji as tofu.
+    # extra/fonts.conf rejects Noto Color Emoji on old Cairo; fonts-color.conf
+    # allows it only after startup verifies a compatible Cairo runtime.
+    'Noto Color Emoji',
     'Noto Emoji',
 ]
 _DISCORD_GRAY = (.212, .244, .247)
@@ -203,6 +204,18 @@ def _format_akari_result_status(row):
     return f'{int(row.accuracy)}%'
 
 
+def _sort_akari_puzzle_results(rows):
+    return sorted(
+        rows,
+        key=lambda row: (
+            -int(bool(row.is_perfect)),
+            -int(getattr(row, 'accuracy', 0)),
+            int(getattr(row, 'time_seconds', 0)),
+            int(getattr(row, 'message_id', 0)),
+        ),
+    )
+
+
 def _akari_puzzle_table_rows(guild, rows):
     return [
         (
@@ -212,15 +225,7 @@ def _akari_puzzle_table_rows(guild, rows):
             _format_akari_result_status(row),
             format_duration(row.time_seconds),
         )
-        for index, row in enumerate(sorted(
-            rows,
-            key=lambda row: (
-                -int(bool(row.is_perfect)),
-                -int(getattr(row, 'accuracy', 0)),
-                int(getattr(row, 'time_seconds', 0)),
-                int(getattr(row, 'message_id', 0)),
-            ),
-        ), start=1)
+        for index, row in enumerate(_sort_akari_puzzle_results(rows), start=1)
     ]
 
 
@@ -310,11 +315,11 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None):
 
 
 def _get_akari_puzzle_table_image_file(guild, rows, title):
-    table_rows = _akari_puzzle_table_rows(guild, rows)
-    displayed_rows = table_rows[:_AKARI_IMAGE_MAX_ROWS]
+    rows = _sort_akari_puzzle_results(rows)
+    displayed_rows = _akari_puzzle_table_rows(guild, rows[:_AKARI_IMAGE_MAX_ROWS])
     footer = None
-    if len(table_rows) > len(displayed_rows):
-        footer = f'Showing top {len(displayed_rows)} of {len(table_rows)} results'
+    if len(rows) > len(displayed_rows):
+        footer = f'Showing top {len(displayed_rows)} of {len(rows)} results'
     return _get_akari_puzzle_table_image(displayed_rows, title=title, footer=footer)
 
 

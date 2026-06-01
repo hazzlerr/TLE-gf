@@ -4,21 +4,18 @@ import distutils.util
 import logging
 import os
 import sys
-import discord
 from logging.handlers import TimedRotatingFileHandler
 from os import environ
 from pathlib import Path
 
-# Make image rendering use the repo's bundled fonts (Noto Sans CJK + monochrome
-# Noto Emoji) even when the bot is launched directly (e.g. by a systemd unit)
-# rather than through run.sh -- run.sh is otherwise the only launcher that points
-# FONTCONFIG_FILE at extra/fonts.conf. Must be set before any fontconfig/Pango
-# use, i.e. before importing the rendering stack below.
-os.environ.setdefault(
-    'FONTCONFIG_FILE',
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'extra', 'fonts.conf'),
-)
+from tle.util import font_config
 
+# Must run before any fontconfig/Pango use. This keeps direct `python -m tle`
+# launches safe and lets run.sh request color emoji only when its Cairo
+# bootstrap actually worked.
+font_config.configure()
+
+import discord
 import seaborn as sns
 from discord.ext import commands
 from matplotlib import pyplot as plt
@@ -41,6 +38,7 @@ def setup():
                                       open(sys.stdout.fileno(), 'w', encoding='utf-8', closefd=False)),
                                   TimedRotatingFileHandler(constants.LOG_FILE_PATH, when='D',
                                                            backupCount=3, utc=True, encoding='utf-8')])
+    font_config.log_status()
 
     # matplotlib and seaborn
     plt.rcParams['figure.figsize'] = 7.0, 3.5

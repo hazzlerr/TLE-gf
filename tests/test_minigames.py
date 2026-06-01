@@ -890,8 +890,9 @@ class TestFormatting:
             minigames_module, '_get_akari_puzzle_table_image',
             lambda rows, *, title=None, footer=None: SimpleNamespace(
                 rows=rows, title=title, footer=footer, filename='akari-results.png'))
+        handle_lookups = []
         monkeypatch.setattr(cf_common, 'user_db', SimpleNamespace(
-            get_handle=lambda user_id, guild_id: f'h{user_id}'
+            get_handle=lambda user_id, guild_id: handle_lookups.append(user_id) or f'h{user_id}'
         ))
 
         guild = _FakeGuild(1, members=[
@@ -910,6 +911,7 @@ class TestFormatting:
         assert discord_file.filename == 'akari-results.png'
         assert discord_file.title == 'Akari Results'
         assert discord_file.footer == 'Showing top 40 of 45 results'
+        assert handle_lookups == [str(user_id) for user_id in range(1, 41)]
 
     def test_akari_puzzle_selector_sends_image_file_without_embed(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
