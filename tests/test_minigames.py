@@ -32,7 +32,7 @@ from tle.cogs.minigames import (
     _SlashCtx,
     _akari_puzzle_table_rows,
     _format_akari_puzzle_table,
-    _get_akari_puzzle_table_image_embed,
+    _get_akari_puzzle_table_image_file,
     _get_akari_puzzle_table_image,
     _maybe_parse_puzzle_selector,
 )
@@ -779,7 +779,14 @@ class TestCogIngest:
 
 
 class TestFormatting:
-    def test_format_akari_puzzle_table_orders_best_results_first(self):
+    def test_format_akari_puzzle_table_orders_best_results_first(self, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', SimpleNamespace(
+            get_handle=lambda user_id, guild_id: {
+                '10': 'alice_cf',
+                '20': 'bob_cf',
+                '30': 'cara_cf',
+            }.get(str(user_id))
+        ))
         guild = _FakeGuild(1, members=[
             _FakeDiscordMember(10, 'alice', 'Alice'),
             _FakeDiscordMember(20, 'bob', 'Bob'),
@@ -792,9 +799,10 @@ class TestFormatting:
         ])
 
         assert '#  Name' in table_str
-        assert '1  Alice  perfect  1:00' in table_str
-        assert '2  Bob    perfect  1:20' in table_str
-        assert '3  Cara   97%      0:50' in table_str
+        assert 'Handle' in table_str
+        assert '1  Alice  alice_cf  perfect  1:00' in table_str
+        assert '2  Bob    bob_cf    perfect  1:20' in table_str
+        assert '3  Cara   cara_cf   97%      0:50' in table_str
 
     def test_get_akari_puzzle_table_image_returns_png_file(self, monkeypatch):
         class _Surface:
@@ -855,6 +863,12 @@ class TestFormatting:
         monkeypatch.setattr(
             minigames_module.discord, 'File',
             lambda fp, filename: SimpleNamespace(fp=fp, filename=filename), raising=False)
+        monkeypatch.setattr(cf_common, 'user_db', SimpleNamespace(
+            get_handle=lambda user_id, guild_id: {
+                '10': 'alice_cf',
+                '20': 'emoji_cf',
+            }.get(str(user_id))
+        ))
 
         guild = _FakeGuild(1, members=[
             _FakeDiscordMember(10, 'alice', 'Alice' * 200),
@@ -871,25 +885,14 @@ class TestFormatting:
         assert discord_file.filename == 'akari-results.png'
         assert discord_file.fp.getbuffer().nbytes > 0
 
-    def test_akari_puzzle_table_image_embed_is_bounded(self, monkeypatch):
-        class _Embed:
-            def __init__(self, **kw):
-                self.title = kw.get('title')
-                self.footer = None
-
-            def set_footer(self, *, text=None, icon_url=None):
-                self.footer = {'text': text, 'icon_url': icon_url}
-
+    def test_akari_puzzle_table_image_file_is_bounded(self, monkeypatch):
         monkeypatch.setattr(
             minigames_module, '_get_akari_puzzle_table_image',
-            lambda rows: SimpleNamespace(rows=rows, filename='akari-results.png'))
-        monkeypatch.setattr(
-            minigames_module.discord_common, 'cf_color_embed',
-            lambda **kw: _Embed(**kw))
-        monkeypatch.setattr(
-            minigames_module.discord_common, 'attach_image',
-            lambda embed, discord_file: setattr(
-                embed, 'image_url', f'attachment://{discord_file.filename}'))
+            lambda rows, *, title=None, footer=None: SimpleNamespace(
+                rows=rows, title=title, footer=footer, filename='akari-results.png'))
+        monkeypatch.setattr(cf_common, 'user_db', SimpleNamespace(
+            get_handle=lambda user_id, guild_id: f'h{user_id}'
+        ))
 
         guild = _FakeGuild(1, members=[
             _FakeDiscordMember(user_id, f'user{user_id}', f'Player {user_id:03d}')
@@ -900,14 +903,43 @@ class TestFormatting:
             for user_id in range(1, 46)
         ]
 
-        embed, discord_file = _get_akari_puzzle_table_image_embed(
+        discord_file = _get_akari_puzzle_table_image_file(
             guild, rows, 'Akari Results')
 
         assert len(discord_file.rows) == 40
         assert discord_file.filename == 'akari-results.png'
-        assert embed.title == 'Akari Results'
-        assert embed.footer == {'text': 'Showing top 40 of 45 results', 'icon_url': None}
-        assert embed.image_url == 'attachment://akari-results.png'
+        assert discord_file.title == 'Akari Results'
+        assert discord_file.footer == 'Showing top 40 of 45 results'
+
+    def test_akari_puzzle_selector_sends_image_file_without_embed(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(1, 'akari', '1')
+        db.save_minigame_result(
+            1, 1, 'akari', 10, 20, 445, '2026-03-26', 100, 60, True, 'raw')
+
+        image_file = SimpleNamespace(filename='akari-results.png')
+        monkeypatch.setattr(
+            minigames_module, '_get_akari_puzzle_table_image_file',
+            lambda guild, rows, title: image_file)
+
+        sent = {}
+
+        async def send(content=None, *, embed=None, **kwargs):
+            sent['content'] = content
+            sent['embed'] = embed
+            sent['kwargs'] = kwargs
+
+        ctx = SimpleNamespace(
+            guild=_FakeGuild(1, members=[_FakeDiscordMember(20, 'alice', 'Alice')]),
+            author=_FakeDiscordMember(20, 'alice', 'Alice'),
+            send=send,
+        )
+
+        asyncio.run(Minigames(bot=None)._cmd_stats(ctx, AKARI_GAME, '445'))
+
+        assert sent['content'] is None
+        assert sent['embed'] is None
+        assert sent['kwargs']['file'] is image_file
 
 
 def test_slash_context_forwards_file_kwarg():

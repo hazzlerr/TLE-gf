@@ -35,12 +35,12 @@ logger = logging.getLogger(__name__)
 _IMPORT_BATCH_SIZE = 500
 _IMPORT_RATE_DELAY = 0.5
 _AKARI_IMAGE_MAX_ROWS = 40
-_AKARI_IMAGE_WIDTH = 760
+_AKARI_IMAGE_WIDTH = 900
 _AKARI_IMAGE_MARGIN = 20
 _AKARI_IMAGE_ROW_HEIGHT = 36
 _AKARI_IMAGE_HEADER_SPACING = 1.25
 _AKARI_IMAGE_COLUMN_MARGIN = 10
-_AKARI_IMAGE_COLS = (54, 420, 150, 96)
+_AKARI_IMAGE_COLS = (54, 300, 260, 150, 96)
 _AKARI_IMAGE_FONTS = [
     'Noto Sans',
     'Noto Sans CJK JP',
@@ -173,6 +173,13 @@ def _safe_user_name(guild, user_id):
     return f'user `{user_id}`'
 
 
+def _safe_cf_handle(guild, user_id):
+    if cf_common.user_db is None:
+        return '-'
+    handle = cf_common.user_db.get_handle(user_id, guild.id)
+    return handle or '-'
+
+
 def _format_score(score):
     return f'{score:.3f}'.rstrip('0').rstrip('.')
 
@@ -201,6 +208,7 @@ def _akari_puzzle_table_rows(guild, rows):
         (
             index,
             _safe_user_name(guild, row.user_id),
+            _safe_cf_handle(guild, row.user_id),
             _format_akari_result_status(row),
             format_duration(row.time_seconds),
         )
@@ -217,9 +225,9 @@ def _akari_puzzle_table_rows(guild, rows):
 
 
 def _format_akari_puzzle_table(guild, rows):
-    style = table.Style('{:>}  {:<}  {:<}  {:>}')
+    style = table.Style('{:>}  {:<}  {:<}  {:<}  {:>}')
     t = table.Table(style)
-    t += table.Header('#', 'Name', 'Result', 'Time')
+    t += table.Header('#', 'Name', 'Handle', 'Result', 'Time')
     t += table.Line()
 
     for row in _akari_puzzle_table_rows(guild, rows):
@@ -227,10 +235,12 @@ def _format_akari_puzzle_table(guild, rows):
     return str(t)
 
 
-def _get_akari_puzzle_table_image(table_rows):
+def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None):
+    title_height = _AKARI_IMAGE_ROW_HEIGHT if title is not None else 0
+    footer_height = _AKARI_IMAGE_ROW_HEIGHT if footer is not None else 0
     height = int(
         (len(table_rows) + _AKARI_IMAGE_HEADER_SPACING) * _AKARI_IMAGE_ROW_HEIGHT
-        + 2 * _AKARI_IMAGE_MARGIN
+        + title_height + footer_height + 2 * _AKARI_IMAGE_MARGIN
     )
 
     surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, _AKARI_IMAGE_WIDTH, height)
@@ -259,16 +269,30 @@ def _get_akari_puzzle_table_image(table_rows):
         PangoCairo.show_layout(context, layout)
         context.rel_move_to(width, 0)
 
+    def draw_line(text, y, color, *, bold=False):
+        context.set_source_rgb(*(component / 255 for component in color))
+        context.move_to(_AKARI_IMAGE_MARGIN, y)
+        draw_cell(
+            text,
+            _AKARI_IMAGE_WIDTH - 2 * _AKARI_IMAGE_MARGIN,
+            bold=bold,
+        )
+
     def draw_row(row, y, color, *, bold=False):
         context.set_source_rgb(*(component / 255 for component in color))
         context.move_to(_AKARI_IMAGE_MARGIN, y)
         draw_cell(row[0], _AKARI_IMAGE_COLS[0], align=Pango.Alignment.RIGHT, bold=bold)
         draw_cell(row[1], _AKARI_IMAGE_COLS[1], bold=bold)
         draw_cell(row[2], _AKARI_IMAGE_COLS[2], bold=bold)
-        draw_cell(row[3], _AKARI_IMAGE_COLS[3], align=Pango.Alignment.RIGHT, bold=bold)
+        draw_cell(row[3], _AKARI_IMAGE_COLS[3], bold=bold)
+        draw_cell(row[4], _AKARI_IMAGE_COLS[4], align=Pango.Alignment.RIGHT, bold=bold)
 
     y = _AKARI_IMAGE_MARGIN
-    draw_row(('#', 'Name', 'Result', 'Time'), y, _SMOKE_WHITE, bold=True)
+    if title is not None:
+        draw_line(title, y, _SMOKE_WHITE, bold=True)
+        y += _AKARI_IMAGE_ROW_HEIGHT
+
+    draw_row(('#', 'Name', 'Handle', 'Result', 'Time'), y, _SMOKE_WHITE, bold=True)
     y += int(_AKARI_IMAGE_ROW_HEIGHT * _AKARI_IMAGE_HEADER_SPACING)
 
     for i, row in enumerate(table_rows):
@@ -276,21 +300,22 @@ def _get_akari_puzzle_table_image(table_rows):
         draw_row(row, y, _BLACK)
         y += _AKARI_IMAGE_ROW_HEIGHT
 
+    if footer is not None:
+        draw_line(footer, y, _SMOKE_WHITE)
+
     image_data = io.BytesIO()
     surface.write_to_png(image_data)
     image_data.seek(0)
     return discord.File(image_data, filename='akari-results.png')
 
 
-def _get_akari_puzzle_table_image_embed(guild, rows, title):
+def _get_akari_puzzle_table_image_file(guild, rows, title):
     table_rows = _akari_puzzle_table_rows(guild, rows)
     displayed_rows = table_rows[:_AKARI_IMAGE_MAX_ROWS]
-    discord_file = _get_akari_puzzle_table_image(displayed_rows)
-    embed = discord_common.cf_color_embed(title=title)
+    footer = None
     if len(table_rows) > len(displayed_rows):
-        embed.set_footer(text=f'Showing top {len(displayed_rows)} of {len(table_rows)} results')
-    discord_common.attach_image(embed, discord_file)
-    return embed, discord_file
+        footer = f'Showing top {len(displayed_rows)} of {len(table_rows)} results'
+    return _get_akari_puzzle_table_image(displayed_rows, title=title, footer=footer)
 
 
 class Minigames(commands.Cog):
@@ -875,9 +900,9 @@ class Minigames(commands.Cog):
                 if not rows:
                     raise MinigameCogError(f'No {game.display_name} results found for `{args[0]}`.')
 
-                embed, discord_file = _get_akari_puzzle_table_image_embed(
+                discord_file = _get_akari_puzzle_table_image_file(
                     ctx.guild, rows, title)
-                await ctx.send(embed=embed, file=discord_file)
+                await ctx.send(file=discord_file)
                 return
 
         filter_args = list(args)
