@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import random
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -10,6 +11,7 @@ from discord.ext import commands
 from tle import constants
 from tle.util import codeforces_common as cf_common
 from tle.util import discord_common
+from tle.util import paginator
 from tle.util import tasks
 
 logger = logging.getLogger(__name__)
@@ -19,6 +21,57 @@ _PRECISE_WINDOW = 300  # schedule precise timer when within 5 minutes
 _DEFAULT_TIME = '10:00'
 _DEFAULT_TZ = 'US/Eastern'
 _PICK_COUNT = 5
+_STATS_PER_PAGE = 15
+# Edit the backfill progress embed every N scanned messages. Discord rate-
+# limits message edits to ~5/5s — 250 is a comfortable cadence even for
+# multi-thousand-message channels.
+_BACKFILL_PROGRESS_INTERVAL = 250
+# Stop the backfill once we've walked this far past the most recent
+# greatday match without finding another one. Greatday runs ~daily, so
+# a 5-day gap means we've collected the full history.
+_BACKFILL_STOP_GAP_SECONDS = 5 * 24 * 3600
+
+
+def _personal_rank_line(rows, user_id):
+    """Render the 'Your rank: #N — great-day'd K times' line for the
+    stats command. `rows` is sorted desc-by-count (the natural output
+    of greatday_get_stats). Returned as plain text — the caller puts it
+    above the embed as message content, not inside the embed."""
+    user_id_str = str(user_id)
+    for i, row in enumerate(rows):
+        if str(row.user_id) == user_id_str:
+            return (f"Your rank: **#{i + 1}** — great-day'd "
+                    f'**{row.cnt}** time(s).')
+    return "You haven't been great-day'd yet."
+
+
+def _should_stop_backfill(last_match_ts, current_msg_ts, max_gap_seconds):
+    """True if the gap between the most recent matched greatday and the
+    current (older) message exceeds the threshold. last_match_ts is None
+    until the first match — we must keep scanning until then."""
+    if last_match_ts is None:
+        return False
+    return last_match_ts - current_msg_ts > max_gap_seconds
+
+# Greatday message template: "I hope <@id> <@id> ... having a great day!"
+# Anchors: prefix "I hope " and the trailing "having a great day!" — anything
+# in between is treated as the mention list (we extract `<@id>` patterns).
+_GREATDAY_RE = re.compile(r'^I hope .*having a great day!\s*$')
+_MENTION_RE = re.compile(r'<@!?(\d+)>')
+
+
+def _parse_greatday_message(msg, bot_user_id):
+    """If the message is a real bot-authored greatday post, return the list
+    of mentioned user IDs; otherwise return None. Trusting any author would
+    let users (or webhooks) spoof picks into the leaderboard.
+    """
+    author_id = getattr(getattr(msg, 'author', None), 'id', None)
+    if author_id != bot_user_id:
+        return None
+    if not _GREATDAY_RE.match(msg.content or ''):
+        return None
+    uids = _MENTION_RE.findall(msg.content)
+    return uids or None
 
 
 def _target_datetime(now, time_str):
@@ -117,11 +170,24 @@ class GreatDay(commands.Cog):
         if not rows:
             return False
 
-        user_ids = [r.user_id for r in rows]
+        user_ids = [r.user_id for r in rows
+                    if guild.get_member(int(r.user_id)) is not None]
+        if not user_ids:
+            return False
         picked = random.sample(user_ids, min(_PICK_COUNT, len(user_ids)))
         mentions = ' '.join(f'<@{uid}>' for uid in picked)
         verb = 'is' if len(picked) == 1 else 'are'
-        await channel.send(f'I hope {mentions} {verb} having a great day!')
+        msg = await channel.send(f'I hope {mentions} {verb} having a great day!')
+        # Record picks best-effort. Once the message is sent, the day is
+        # 'done' from the user's perspective — if recording fails the caller
+        # must still stamp the kvs sentinel, otherwise the 60s scheduler
+        # will keep re-sending.
+        try:
+            cf_common.user_db.greatday_record_picks(
+                guild.id, picked, msg.id, msg.created_at.timestamp())
+        except Exception:
+            logger.exception('Failed to record greatday picks for guild=%s msg=%s',
+                             guild.id, msg.id)
         return True
 
     # ── Commands ───────────────────────────────────────────────────────
@@ -271,6 +337,106 @@ class GreatDay(commands.Cog):
             f'Signed up: **{len(rows)}** user(s)',
         ]
         await ctx.send(embed=discord_common.embed_neutral('\n'.join(lines)))
+
+    @greatday.command(name='stats', brief='Show how many times users have been great-day\'d',
+                      usage='[@user]')
+    async def stats(self, ctx, member: discord.Member = None):
+        if member is not None:
+            count = cf_common.user_db.greatday_get_count(ctx.guild.id, member.id)
+            name = discord.utils.escape_mentions(member.display_name)
+            await ctx.send(embed=discord_common.embed_neutral(
+                f'`{name}` has been great-day\'d **{count}** time(s).'))
+            return
+
+        rows = cf_common.user_db.greatday_get_stats(ctx.guild.id)
+        if not rows:
+            raise GreatDayCogError(
+                'No picks recorded yet. Admins can run `;greatday backfill` '
+                'to seed history from the channel.')
+
+        personal = _personal_rank_line(rows, ctx.author.id)
+        chunks = paginator.chunkify(rows, _STATS_PER_PAGE)
+        pages = []
+        for page_idx, chunk in enumerate(chunks):
+            lines = []
+            for i, row in enumerate(chunk):
+                rank = page_idx * _STATS_PER_PAGE + i + 1
+                m = ctx.guild.get_member(int(row.user_id))
+                name = m.mention if m is not None else f'`{row.user_id}`'
+                lines.append(f'**#{rank}** {name} — **{row.cnt}**')
+            embed = discord.Embed(
+                title='Great Day leaderboard',
+                description='\n'.join(lines),
+                color=0x00aaff,
+            )
+            pages.append((personal, embed))
+        paginator.paginate(self.bot, ctx.channel, pages, wait_time=5 * 60,
+                           set_pagenum_footers=True, author_id=ctx.author.id)
+
+    @greatday.command(name='backfill',
+                      brief='Seed pick history from the greatday channel (admin)')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def backfill(self, ctx):
+        """Walk the greatday channel's history and insert one pick row per
+        matched message and mentioned user. Idempotent — safe to re-run.
+        """
+        channel_id = cf_common.user_db.get_guild_config(
+            ctx.guild.id, 'greatday_channel')
+        if not channel_id:
+            raise GreatDayCogError(
+                'No great day channel set. Use `;greatday here` first.')
+        channel = ctx.guild.get_channel(int(channel_id))
+        if channel is None:
+            raise GreatDayCogError('Configured great day channel is not accessible.')
+
+        progress = await ctx.send(embed=discord_common.embed_neutral(
+            f'Backfilling from {channel.mention}… (scanned **0**, matched **0**)'))
+
+        bot_user_id = self.bot.user.id if self.bot and self.bot.user else None
+        scanned = 0
+        matched = 0
+        inserted = 0
+        last_match_ts = None
+        stopped_early = False
+        # Newest first — leaderboard updates with recent picks immediately,
+        # and if the admin aborts (bot restart) the most relevant history
+        # is already saved.
+        async for msg in channel.history(limit=None, oldest_first=False):
+            scanned += 1
+            msg_ts = msg.created_at.timestamp()
+            uids = _parse_greatday_message(msg, bot_user_id)
+            if uids is not None:
+                matched += 1
+                inserted += cf_common.user_db.greatday_record_picks(
+                    ctx.guild.id, uids, msg.id, msg_ts)
+                last_match_ts = msg_ts
+            elif _should_stop_backfill(last_match_ts, msg_ts,
+                                        _BACKFILL_STOP_GAP_SECONDS):
+                stopped_early = True
+                break
+
+            if scanned % _BACKFILL_PROGRESS_INTERVAL == 0:
+                try:
+                    await progress.edit(embed=discord_common.embed_neutral(
+                        f'Backfilling from {channel.mention}… '
+                        f'scanned **{scanned}**, matched **{matched}**, '
+                        f'inserted **{inserted}** so far.'))
+                except discord.HTTPException:
+                    # Rate-limited or message deleted — keep scanning either way.
+                    pass
+
+        gap_days = _BACKFILL_STOP_GAP_SECONDS // 86400
+        tail = (f' Stopped early after a {gap_days}-day gap with no further '
+                'greatday messages — assumed full history captured.'
+                if stopped_early else '')
+        await progress.edit(embed=discord_common.embed_success(
+            f'Backfill complete. Scanned **{scanned}** message(s), '
+            f'matched **{matched}**, inserted **{inserted}** new pick row(s).'
+            + tail))
+        # Fresh ping so the invoker sees completion even if the progress
+        # message has scrolled out of view.
+        await ctx.send(f'{ctx.author.mention} `;greatday backfill` finished — '
+                       f'inserted **{inserted}** new pick row(s).')
 
     # ── Error handler ──────────────────────────────────────────────────
 

@@ -24,9 +24,13 @@ class Complain(commands.Cog):
     async def complain(self, ctx, *, text: str = None):
         """Add a complaint or list subcommands.
 
+        This feature is used for admins to track improvements for the server,
+        please don't abuse.
+
         Usage:
-          ;complain <text>    — file a complaint
-          ;complain list      — view all complaints
+          ;complain <text>             — file a complaint
+          ;complain list               — view all complaints
+          ;complain withdraw <id>      — withdraw your own complaint
           ;complain remove <id or ids> — remove complaints (admin only)
         """
         if text is None:
@@ -63,7 +67,8 @@ class Complain(commands.Cog):
         )
         logger.info(f'Complaint #{complaint_id} added by {author.id} in guild {ctx.guild.id}')
         await ctx.send(embed=discord_common.embed_success(
-            f'Complaint #{complaint_id} filed.'
+            f'Complaint #{complaint_id} filed. '
+            f'You can withdraw it with `;complain withdraw {complaint_id}`.'
         ))
 
     @complain.command(brief='List complaints')
@@ -101,6 +106,30 @@ class Complain(commands.Cog):
             title = 'Complaints' if len(pages) == 1 else f'Complaints (page {i+1}/{len(pages)})'
             embed = discord.Embed(title=title, description=page, color=0xffaa10)
             await ctx.send(embed=embed)
+
+    @complain.command(brief='Withdraw your own complaint')
+    async def withdraw(self, ctx, complaint_id: int):
+        """Withdraw a complaint you filed.
+
+        Usage:
+          ;complain withdraw <id>
+        """
+        complaint = cf_common.user_db.get_complaint(complaint_id)
+        if complaint is None or str(complaint.guild_id) != str(ctx.guild.id):
+            await ctx.send(embed=discord_common.embed_alert(
+                f'Complaint #{complaint_id} not found.'
+            ))
+            return
+        if str(complaint.user_id) != str(ctx.author.id):
+            await ctx.send(embed=discord_common.embed_alert(
+                f'Complaint #{complaint_id} is not yours to withdraw.'
+            ))
+            return
+        cf_common.user_db.delete_complaint(complaint_id)
+        logger.info(f'Complaint #{complaint_id} withdrawn by {ctx.author.id} in guild {ctx.guild.id}')
+        await ctx.send(embed=discord_common.embed_success(
+            f'Complaint #{complaint_id} withdrawn.'
+        ))
 
     @complain.command(brief='Remove complaint(s)', aliases=['delete'])
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)

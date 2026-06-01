@@ -134,9 +134,14 @@ async def build_starboard_message(message, emoji_str, count, color):
             f'{emoji_str} **{count}** \u00b7 **{safe_name}** '
             f'| {message.jump_url}'
         )
+        # `spoiler=att.is_spoiler()` is required, not optional: discord.py
+        # 2.4's Attachment.to_file() defaults spoiler=False and passes it
+        # explicitly to File(), which suppresses File's SPOILER_-filename
+        # auto-detection. A bare to_file() therefore silently strips the
+        # spoiler and the media gets posted un-spoilered.
         for att in video_attachments + audio_attachments + spoiler_image_attachments:
             try:
-                files.append(await att.to_file())
+                files.append(await att.to_file(spoiler=att.is_spoiler()))
             except Exception:
                 logger.debug(f'Failed to download attachment {att.filename}')
 

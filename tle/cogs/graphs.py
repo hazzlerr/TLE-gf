@@ -321,16 +321,15 @@ def _estimate_perf_from_cache(contest_id, virtual_rank):
     return best.oldRating + 4 * (best.newRating - best.oldRating)
 
 
-async def _build_cfvc_rows(handle, dlo=0, dhi=10**10, source=cf.RANKLIST_SOURCE_STANDINGS):
+async def _build_cfvc_rows(handle, dlo=0, dhi=10**10):
     """Build performance rows for CF virtual participations (not TLE VCs).
 
-    Caching strategy:
-      - cfvc_cache stores (handle, contest_id, rank) — the per-user data that
-        requires an API call to contest.standings.
-      - Performance is computed on-the-fly from the shared rating_changes_cache,
-        so all users benefit from the same cached rating data.
-      - Only contest.standings calls for NEW virtual participations are made;
-        already-cached ranks are reused instantly.
+    Under CF's May 2026 contest.standings restriction, anonymous callers
+    only see CONTESTANT rows — VIRTUAL ranks cannot be fetched, so this
+    function no longer writes to cfvc_cache. Existing cached entries are
+    still served (computed pre-restriction); uncached contests are
+    counted as missing. Performance is computed from the shared
+    rating_changes_cache so all users benefit from one cache.
 
     Returns (rows, missing_count).
     """
@@ -350,35 +349,12 @@ async def _build_cfvc_rows(handle, dlo=0, dhi=10**10, source=cf.RANKLIST_SOURCE_
     cached_ranks = cf_common.user_db.get_cfvc_cache(handle)
     rank_by_cid = {cid: rank for cid, rank in cached_ranks}
 
-    # Only fetch standings for contests not yet cached
+    # Under CF's May 2026 contest.standings restriction, anonymous callers
+    # only see CONTESTANT rows. There is no way to recover a VIRTUAL rank
+    # via the API for an uncached contest — skip the wasted multi-MB
+    # request and surface the contest as missing.
     uncached_cids = sorted(virtual_cids - cached_cids)
-    new_entries = []  # (contest_id, rank) to save
-
-    missing = 0
-
-    for cid in uncached_cids:
-        try:
-            _contest, _problems, ranklist = await cf.contest.standings(
-                contest_id=cid, handles=[handle], show_unofficial=True, source=source)
-        except Exception:
-            missing += 1
-            continue
-
-        virtual_row = None
-        for row in ranklist:
-            if row.party.participantType == 'VIRTUAL':
-                virtual_row = row
-                break
-        if virtual_row is None:
-            missing += 1
-            continue
-
-        new_entries.append((cid, virtual_row.rank))
-        rank_by_cid[cid] = virtual_row.rank
-
-    # Persist newly fetched ranks
-    if new_entries:
-        cf_common.user_db.save_cfvc_cache(handle, new_entries)
+    missing = len(uncached_cids)
 
     # Build rows — compute perf on-the-fly from shared rating changes cache
     rows = []
@@ -1415,8 +1391,7 @@ class Graphs(commands.Cog):
         handle = handles[0]
 
         await ctx.send(f'Fetching virtual participations for `{handle}`, this may take a moment...')
-        source = cf_common.get_cf_ranklist_source(ctx.guild.id)
-        rows, missing = await _build_cfvc_rows(handle, filt.dlo, filt.dhi, source=source)
+        rows, missing = await _build_cfvc_rows(handle, filt.dlo, filt.dhi)
 
         if not rows:
             raise GraphCogError(f'No CF virtual participations found for `{handle}`.')

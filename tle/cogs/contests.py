@@ -36,6 +36,47 @@ class ContestCogError(commands.CommandError):
     pass
 
 
+_VcRatingChange = namedtuple('VcRatingChange', 'handle oldRating newRating')
+
+
+def _apply_vc_deltas(db, vc_id, handles, member_ids, ranklist):
+    """Apply rated-VC rating deltas after a contest finishes.
+
+    Returns a {handle: _VcRatingChange} dict on success, or None if the
+    ranklist contains no VIRTUAL participation rows *for our VC
+    handles* — under CF's May 2026 restriction on contest.standings,
+    ordinary callers only see CONTESTANT rows, so we cannot compute
+    deltas. The caller is expected to finish the VC and notify users
+    without touching VC ratings in that case (silently treating every
+    None delta as 'did not participate' would wipe everyone's history).
+
+    The check is specific to our handles: even if CF's API ever starts
+    surfacing VIRTUAL rows for strangers (e.g. due to a partial
+    rollback), that alone shouldn't unlock the rating loop — it has to
+    include the actual VC participants.
+    """
+    handle_set = set(handles)
+    has_our_virtual = any(
+        row.party.participantType == 'VIRTUAL'
+        and row.party.members
+        and row.party.members[0].handle in handle_set
+        for row in ranklist.standings)
+    if not has_our_virtual:
+        return None
+    rating_change_by_handle = {}
+    for handle, member_id in zip(handles, member_ids):
+        delta = ranklist.delta_by_handle.get(handle)
+        if delta is None:
+            db.remove_last_ratedvc_participation(member_id)
+            continue
+        old_rating = db.get_vc_rating(member_id)
+        new_rating = old_rating + delta
+        rating_change_by_handle[handle] = _VcRatingChange(
+            handle=handle, oldRating=old_rating, newRating=new_rating)
+        db.update_vc_rating(vc_id, member_id, new_rating)
+    return rating_change_by_handle
+
+
 def _contest_start_time_format(contest, tz):
     start = dt.datetime.fromtimestamp(contest.startTimeSeconds, tz)
     return f'{start.strftime("%d %b %y, %H:%M")} {tz}'
@@ -477,7 +518,6 @@ class Contests(commands.Cog):
         handles = await cf_common.resolve_handles(ctx, self.member_converter, handles, maxcnt=None,
                                                   default_to_all_server=True)
         contest = cf_common.cache2.contest_cache.get_contest(contest_id)
-        source = cf_common.get_cf_ranklist_source(ctx.guild.id)
         wait_msg = await ctx.channel.send('Generating ranklist, please wait...')
         ranklist = None
         try:
@@ -486,8 +526,7 @@ class Contests(commands.Cog):
             if contest.phase == 'BEFORE':
                 raise ContestCogError(f'Contest `{contest.id} | {contest.name}` has not started')
             ranklist = await cf_common.cache2.ranklist_cache.generate_ranklist(contest.id, fetch_changes=True,
-                                                                               show_unofficial=not show_official,
-                                                                               source=source)
+                                                                               show_unofficial=not show_official)
 
         await wait_msg.delete()
         await ctx.channel.send(embed=self._make_contest_embed_for_ranklist(ranklist))
@@ -626,9 +665,7 @@ class Contests(commands.Cog):
         handles = [cf_common.user_db.get_handle(member_id, channel.guild.id) for member_id in member_ids]
         handle_to_member_id = {handle : member_id for handle, member_id in zip(handles, member_ids)}
         now = time.time()
-        source = cf_common.get_cf_ranklist_source(vc.guild_id)
-        ranklist = await cf_common.cache2.ranklist_cache.generate_vc_ranklist(vc.contest_id, handle_to_member_id,
-                                                                              source=source)
+        ranklist = await cf_common.cache2.ranklist_cache.generate_vc_ranklist(vc.contest_id, handle_to_member_id)
 
         async def has_running_subs(handle):
             return [sub for sub in await cf.user.status(handle=handle)
@@ -645,18 +682,15 @@ class Contests(commands.Cog):
             await channel.send(embed=self._make_contest_embed_for_vc_ranklist(ranklist, vc.start_time, vc.finish_time), delete_after=_WATCHING_RATED_VC_WAIT_TIME)
             await self._show_ranklist(channel, vc.contest_id, handles, ranklist=ranklist, vc=True, delete_after=_WATCHING_RATED_VC_WAIT_TIME)
             return
-        rating_change_by_handle = {}
-        RatingChange = namedtuple('RatingChange', 'handle oldRating newRating')
-        for handle, member_id in zip(handles, member_ids):
-            delta = ranklist.delta_by_handle.get(handle)
-            if delta is None:  # The user did not participate.
-                cf_common.user_db.remove_last_ratedvc_participation(member_id)
-                continue
-            old_rating = cf_common.user_db.get_vc_rating(member_id)
-            new_rating = old_rating + delta
-            rating_change_by_handle[handle] = RatingChange(handle=handle, oldRating=old_rating, newRating=new_rating)
-            cf_common.user_db.update_vc_rating(vc_id, member_id, new_rating)
+        rating_change_by_handle = _apply_vc_deltas(
+            cf_common.user_db, vc_id, handles, member_ids, ranklist)
         cf_common.user_db.finish_rated_vc(vc_id)
+        if rating_change_by_handle is None:
+            await channel.send(embed=discord_common.embed_alert(
+                "Rated VC complete, but rating changes can't be applied — "
+                "CF's standings API no longer returns virtual participations "
+                "for ordinary callers. VC ratings have been preserved."))
+            return
         await channel.send(embed=self._make_vc_rating_changes_embed(channel.guild, vc.contest_id, rating_change_by_handle))
         await self._show_ranklist(channel, vc.contest_id, handles, ranklist=ranklist, vc=True)
 
@@ -846,10 +880,6 @@ class Contests(commands.Cog):
     async def problemratings(self, ctx, contest_id: int):
         """Estimation of contest problem ratings
         """
-        if cf_common.get_cf_ranklist_source(ctx.guild.id) == cf.RANKLIST_SOURCE_RATING_CHANGES:
-            raise ContestCogError(
-                'Mike guards cf.contest.standings api to be admin only. '
-                'We can no longer do probrat.')
         await ctx.send('This will take a while')
         contests = await cf.contest.list()
         reqcontest = [contest for contest in contests if contest.id == contest_id]
@@ -866,7 +896,7 @@ class Contests(commands.Cog):
         ranklists = []
         rating_cache = dict()
         for contest in combined:
-            _, problem, ranklist = await cf.contest.standings(contest_id=contest.id, show_unofficial=False)
+            _, problem, ranklist = await cf.contest.standings(contest_id=contest.id)
             problems.append(problem)
             ranklists.append(ranklist)
 
