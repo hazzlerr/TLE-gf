@@ -26,7 +26,7 @@ from tle.cogs._minigame_common import (
     pick_best_results, format_duration, parse_date_args, resolve_scoring,
     strip_codeblock,
 )
-from tle.cogs._minigame_akari import AKARI_GAME
+from tle.cogs._minigame_akari import AKARI_GAME, expected_puzzle_number
 from tle.cogs._minigame_guessgame import GUESSGAME_GAME
 from tle.cogs._minigame_stats import plot_akari_stats, plot_guessgame_stats
 from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
@@ -386,18 +386,24 @@ def _format_akari_rating_debug(guild, rating_rows, registrants):
     return str(t)
 
 
-def _chunk_text_lines(text, limit):
-    """Split ``text`` into <=``limit``-char chunks on line boundaries."""
-    chunks, current, current_len = [], [], 0
-    for line in text.split('\n'):
-        if current and current_len + len(line) + 1 > limit:
-            chunks.append('\n'.join(current))
-            current, current_len = [], 0
-        current.append(line)
-        current_len += len(line) + 1
-    if current:
-        chunks.append('\n'.join(current))
-    return chunks
+_AKARI_DEBUG_PER_PAGE = 15
+
+
+def _build_akari_debug_pages(guild, rating_rows, registrants,
+                             *, per_page=_AKARI_DEBUG_PER_PAGE):
+    """Build paginated ``(None, embed)`` pages for the admin debug dump."""
+    title = (f'{AKARI_GAME.display_name} ratings (debug) — '
+             f'{len(rating_rows)} players (* = registered)')
+    pages = []
+    for chunk in paginator.chunkify(rating_rows, per_page):
+        text = _format_akari_rating_debug(guild, chunk, registrants)
+        embed = discord.Embed(
+            title=title,
+            description=f'```\n{text}\n```',
+            color=discord_common.random_cf_color(),
+        )
+        pages.append((None, embed))
+    return pages
 
 
 class Minigames(commands.Cog):
@@ -467,12 +473,30 @@ class Minigames(commands.Cog):
         try:
             rows = cf_common.user_db.get_minigame_results_for_guild(
                 guild_id, AKARI_GAME.name)
-            states = compute_ratings(rows)
+            max_puzzle = (expected_puzzle_number(dt.date.today())
+                          + constants.AKARI_MAX_PUZZLE_LOOKAHEAD)
+            states = compute_ratings(rows, max_puzzle=max_puzzle)
             cf_common.user_db.replace_akari_ratings(
                 guild_id, states.values(), time.time())
         except Exception:
             logger.error('Failed to recompute Akari ratings for guild %s',
                          guild_id, exc_info=True)
+
+    @staticmethod
+    def _active_ranking_rows(rows):
+        """Keep only recently-active players for the ranking.
+
+        Hides anyone who hasn't played in the last
+        ``AKARI_RANKING_MAX_INACTIVE_DAYS`` days, plus any stale future/garbage
+        ``last_puzzle`` (e.g. a troll number lingering until the next recompute).
+        """
+        current = expected_puzzle_number(dt.date.today())
+        cutoff = constants.AKARI_RANKING_MAX_INACTIVE_DAYS
+        lookahead = constants.AKARI_MAX_PUZZLE_LOOKAHEAD
+        return [
+            row for row in rows
+            if -lookahead <= current - int(row.last_puzzle) <= cutoff
+        ]
 
     # ── Listeners ───────────────────────────────────────────────────────
 
@@ -1024,9 +1048,14 @@ class Minigames(commands.Cog):
             raise MinigameCogError(
                 f'No {AKARI_GAME.display_name} ratings yet. They appear once '
                 f'players post results.')
+        active = self._active_ranking_rows(rows)
+        if not active:
+            raise MinigameCogError(
+                f'No {AKARI_GAME.display_name} players active in the last '
+                f'{constants.AKARI_RANKING_MAX_INACTIVE_DAYS} days.')
         registrants = cf_common.user_db.get_minigame_registrants(ctx.guild.id)
         discord_file = _get_akari_rating_table_image_file(
-            ctx.guild, rows, registrants)
+            ctx.guild, active, registrants)
         await ctx.send(file=discord_file)
 
     async def _cmd_akari_ratings_debug(self, ctx):
@@ -1038,12 +1067,10 @@ class Minigames(commands.Cog):
                 f'No {AKARI_GAME.display_name} ratings yet. They appear once '
                 f'players post results.')
         registrants = cf_common.user_db.get_minigame_registrants(ctx.guild.id)
-        text = _format_akari_rating_debug(ctx.guild, rows, registrants)
-        header = (f'**{AKARI_GAME.display_name} ratings — {len(rows)} players** '
-                  f'(* = registered)')
-        for index, chunk in enumerate(_chunk_text_lines(text, 1900)):
-            prefix = f'{header}\n' if index == 0 else ''
-            await ctx.send(f'{prefix}```\n{chunk}\n```')
+        pages = _build_akari_debug_pages(ctx.guild, rows, registrants)
+        paginator.paginate(
+            self.bot, ctx.channel, pages, wait_time=300,
+            set_pagenum_footers=True, author_id=ctx.author.id)
 
     _STATS_PLOTTERS = {
         'akari': plot_akari_stats,

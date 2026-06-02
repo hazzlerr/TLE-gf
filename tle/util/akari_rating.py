@@ -183,7 +183,8 @@ def _decay_rate(skip_streak, decay_base, decay_max, decay_grace):
 
 
 def compute_ratings(rows, start_rating=None, damping=None,
-                    decay_base=None, decay_max=None, decay_grace=None):
+                    decay_base=None, decay_max=None, decay_grace=None,
+                    max_puzzle=None):
     """Replay every Akari day in order and return ``{user_id: RatingState}``.
 
     ``rows`` is any iterable of result rows, each exposing ``user_id``,
@@ -192,9 +193,11 @@ def compute_ratings(rows, start_rating=None, damping=None,
     (``get_minigame_results_for_guild``) so a player's locked-in first result is
     what counts — resubmitting a better time can't farm rating.
 
-    Days are processed by ascending ``puzzle_number``.  A newly seen player is
-    seeded at ``start_rating`` (default 1200).  Days with fewer than two players
-    are not a contest and change nothing (but still seed any newcomer).
+    Days are processed by ascending ``puzzle_number``.  Rows whose puzzle number
+    is non-positive or greater than ``max_puzzle`` (when given) are dropped as bad
+    data.  A newly seen player is seeded at ``start_rating`` (default 1200).  Days
+    with fewer than two players are not a contest and change nothing (but still
+    seed any newcomer).
 
     **Inactivity decay:** for every day present in the data, each previously seen
     player who did *not* submit that day has their consecutive-skip streak bumped
@@ -219,7 +222,12 @@ def compute_ratings(rows, start_rating=None, damping=None,
 
     by_puzzle = {}
     for row in rows:
-        by_puzzle.setdefault(int(row.puzzle_number), []).append(row)
+        number = int(row.puzzle_number)
+        # Drop garbage puzzle numbers: non-positive, or far beyond today's real
+        # puzzle (e.g. a troll posting "Daily Akari 9999999999").
+        if number < 1 or (max_puzzle is not None and number > max_puzzle):
+            continue
+        by_puzzle.setdefault(number, []).append(row)
 
     ratings = {}       # user_id -> float
     games = {}         # user_id -> int (rated days only)

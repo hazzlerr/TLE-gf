@@ -95,6 +95,17 @@ class TestComputeRatings:
         assert states['a'].rating == float(constants.AKARI_START_RATING)
         assert states['a'].games == 0
 
+    def test_max_puzzle_drops_garbage_numbers(self):
+        rows = []
+        for puzzle in (1, 2):
+            rows += _day(puzzle, [('a', True, 100, 30), ('b', False, 60, 200)])
+        # A troll post with an absurd number, plus a non-positive one — both dropped.
+        rows += _day(9223372036854775806, [('a', True, 100, 10), ('b', True, 100, 10)])
+        rows += _day(0, [('a', True, 100, 10), ('b', True, 100, 10)])
+        states = compute_ratings(rows, max_puzzle=100)
+        assert states['a'].games == 2       # only puzzles 1 and 2 counted
+        assert states['a'].last_puzzle == 2  # not the garbage number
+
     def test_consistent_winner_climbs_but_slowly(self):
         rows = []
         for puzzle in range(1, 6):

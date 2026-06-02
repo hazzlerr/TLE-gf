@@ -297,6 +297,8 @@ constants_mod.AKARI_RATING_DAMPING = 0.25
 constants_mod.AKARI_DECAY_BASE = 0.002
 constants_mod.AKARI_DECAY_MAX = 0.05
 constants_mod.AKARI_DECAY_GRACE = 3
+constants_mod.AKARI_MAX_PUZZLE_LOOKAHEAD = 2
+constants_mod.AKARI_RANKING_MAX_INACTIVE_DAYS = 30
 
 # tle.util.codeforces_common needs a user_db attribute and parse_date for starboard cog
 import time as _time

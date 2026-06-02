@@ -26,6 +26,14 @@ def _puzzle_number_from_date(puzzle_date):
     return _ANCHOR_NUMBER + (puzzle_date - _ANCHOR_DATE).days
 
 
+def expected_puzzle_number(on_date):
+    """The Daily Akari puzzle number expected on ``on_date`` (one puzzle/day).
+
+    Used to reject troll/garbage puzzle numbers far beyond the real one.
+    """
+    return _puzzle_number_from_date(on_date)
+
+
 def _parse_time(time_text):
     parts = [int(part) for part in time_text.split(':')]
     if len(parts) == 2:

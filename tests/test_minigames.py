@@ -1828,8 +1828,16 @@ class TestCogRating:
                             f'Daily Akari {puzzle}\n✅2026-03-26✅\n{body}\n'
                             f'https://dailyakari.com/')
 
+    @staticmethod
+    def _no_puzzle_filter(monkeypatch):
+        # Make recompute clock-independent: don't drop the test's puzzle numbers
+        # as "far ahead of today" regardless of the machine's date.
+        monkeypatch.setattr(minigames_module, 'expected_puzzle_number',
+                            lambda _date: 10 ** 9)
+
     def test_results_persist_rating_snapshot(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
         self._enable(db)
         cog = Minigames(bot=None)
         perfect = self._akari_msg(1, 999, '\U0001f31f Perfect! \U0001f553 1:29')
@@ -1850,6 +1858,7 @@ class TestCogRating:
 
     def test_recompute_runs_after_admin_remove(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
         self._enable(db)
         cog = Minigames(bot=None)
 
@@ -1871,6 +1880,7 @@ class TestCogRating:
 
     def test_absent_user_decays_in_snapshot(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
         self._enable(db)
         cog = Minigames(bot=None)
 
@@ -1893,8 +1903,9 @@ class TestCogRating:
         assert a.last_puzzle == 500  # last day actually played
         assert a.rating > 1200       # decayed toward, but never past, the default
 
-    def test_debug_dump_command_sends_all_users(self, db, monkeypatch):
+    def test_debug_dump_paginates_all_users(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
         self._enable(db)
         cog = Minigames(bot=None)
 
@@ -1903,20 +1914,26 @@ class TestCogRating:
             await cog.on_message(self._akari_msg(2, 888, '\U0001f3af 96% \U0001f553 1:00'))
         asyncio.run(_seed())
 
-        sent = []
+        captured = {}
+        from tle.util import paginator as _paginator
 
-        async def _send(content=None, **kwargs):
-            sent.append(content or '')
+        def _capture(bot, channel, pages, **kwargs):
+            captured['pages'] = pages
+        monkeypatch.setattr(_paginator, 'paginate', _capture)
+
         ctx = SimpleNamespace(
             guild=_FakeGuild(1, members=[
                 _FakeDiscordMember(999, 'Alice'), _FakeDiscordMember(888, 'Bob')]),
-            send=_send)
+            channel=SimpleNamespace(id=10),
+            author=SimpleNamespace(id=999),
+        )
         asyncio.run(cog._cmd_akari_ratings_debug(ctx))
 
-        blob = '\n'.join(sent)
-        assert '```' in blob                     # rendered as a code block
-        assert 'Alice' in blob and 'Bob' in blob  # ALL users present
-        assert '2 players' in blob
+        pages = captured['pages']
+        assert len(pages) >= 1
+        blob = '\n'.join(page_embed.description for _content, page_embed in pages)
+        assert 'Alice' in blob and 'Bob' in blob  # ALL users present across pages
+        assert '```' in blob                       # rendered as code blocks
 
     def test_recompute_never_raises_without_rating_table(self, monkeypatch):
         # Ingestion must survive even if the rating recompute fails internally.
@@ -1984,3 +2001,32 @@ class TestRatingDisplayNoLeak:
         assert '1316.1' in out   # exact rating (1 dp), not rounded to an integer
         assert '17' in out       # skip streak surfaced for testing
         assert '*' in out        # registered marker
+
+    def test_active_ranking_hides_inactive_and_garbage(self):
+        import datetime as _dt
+        from tle.cogs._minigame_akari import expected_puzzle_number
+        current = expected_puzzle_number(_dt.date.today())
+        rows = [
+            SimpleNamespace(user_id='today', last_puzzle=current),
+            SimpleNamespace(user_id='week', last_puzzle=current - 7),
+            SimpleNamespace(user_id='month', last_puzzle=current - 40),       # >30d -> hidden
+            SimpleNamespace(user_id='troll', last_puzzle=9223372036854775806),  # garbage -> hidden
+        ]
+        kept = {r.user_id for r in Minigames._active_ranking_rows(rows)}
+        assert kept == {'today', 'week'}
+
+    def test_debug_pages_split_by_per_page(self, monkeypatch):
+        from tle.cogs.minigames import _build_akari_debug_pages
+        monkeypatch.setattr(cf_common, 'user_db', None)
+        guild = _FakeGuild(1, members=[
+            _FakeDiscordMember(i, f'U{i}') for i in range(1, 21)])
+        rows = [
+            SimpleNamespace(user_id=str(i), rating=1300.0 - i, games=3, peak=1300.0,
+                            last_delta=-1.0, skip_streak=0, last_puzzle=500)
+            for i in range(1, 21)
+        ]
+        pages = _build_akari_debug_pages(guild, rows, registrants={'1'}, per_page=15)
+        assert len(pages) == 2  # 20 users / 15 per page
+        blob = '\n'.join(embed.description for _content, embed in pages)
+        for i in range(1, 21):
+            assert f'U{i}' in blob

@@ -44,3 +44,9 @@ AKARI_RATING_DAMPING = 0.25
 AKARI_DECAY_BASE = 0.002
 AKARI_DECAY_MAX = 0.05
 AKARI_DECAY_GRACE = 3
+# A puzzle number more than this many days beyond today's real puzzle is treated
+# as bad data (e.g. a troll posting "Daily Akari 9999999999") and ignored for
+# rating. The small margin tolerates timezones / posting just after midnight.
+AKARI_MAX_PUZZLE_LOOKAHEAD = 2
+# Players who haven't played within this many days are hidden from the ranking.
+AKARI_RANKING_MAX_INACTIVE_DAYS = 30
