@@ -1,0 +1,226 @@
+"""Codeforces-style multiplayer rating for Daily Akari.
+
+Each Akari day (one ``puzzle_number`` per day) is treated as a single Codeforces
+contest: every player who submitted that day is ranked against the others, and
+ratings move toward each player's expected-versus-actual rank using the exact
+Codeforces rating formula (logistic win-probabilities, expected-rank "seed",
+geometric-mean target rank, binary-searched needed rating, and the two CF
+anti-inflation corrections).  The final per-contest change is then scaled by a
+small ``damping`` factor so the rating is *way less volatile* than real CF —
+appropriate because Akari is played daily, so a year of play is hundreds of
+"contests" and the undamped formula would swing wildly.
+
+This module is pure: no database, no discord, no wall-clock.  Given the same
+result rows it always returns the same ratings, regardless of row order, which
+keeps it trivially unit-testable and lets callers replay the full history on
+every change.
+
+Players start at :data:`tle.constants.AKARI_START_RATING` (1200).  Ratings are
+kept as ``float`` throughout the replay (and stored as ``REAL``); callers round
+only for display.  At a quarter-strength damping, rounding every daily delta to
+an integer would floor most of them to zero and ratings would never move.
+"""
+
+import math
+from collections import namedtuple
+
+from tle import constants
+
+# Codeforces logistic scale: a 400-point gap ⇒ ~10x odds.
+_RATING_SCALE = 400.0
+# Bounds and iteration count for the needed-rating binary search.  25 bisections
+# over [1, 8000] resolve to < 3e-4 — far finer than any rating difference, while
+# keeping a full-history replay cheap enough to run on every result change.
+_SEARCH_LO = 1.0
+_SEARCH_HI = 8000.0
+_SEARCH_ITERS = 25
+
+
+# Per-user result of a full replay.  ``rating``/``peak``/``last_delta`` are floats
+# (round for display); ``games`` counts only *rated* days (days with >= 2 players).
+RatingState = namedtuple('RatingState', 'user_id rating games peak last_delta')
+
+
+def _result_sort_key(row):
+    """Ranking key for one day's result — smaller is better.
+
+    Mirrors the display ordering in ``minigames.py`` (``_sort_akari_puzzle_results``):
+    perfect beats imperfect, then higher accuracy, then faster time.  The
+    message-id tiebreak used for *display* is deliberately omitted so that two
+    genuinely identical performances tie (share a rank), as a real contest would.
+    """
+    return (
+        -int(bool(row.is_perfect)),
+        -int(getattr(row, 'accuracy', 0)),
+        int(getattr(row, 'time_seconds', 0)),
+    )
+
+
+def rank_participants(rows):
+    """Assign standard competition ranks to one day's participants.
+
+    Returns ``{user_id (str): rank}`` where rank is 1-based and tied players
+    (identical :func:`_result_sort_key`) share the lower rank, e.g. places
+    ``A, B, C`` with ``B == C`` get ranks ``1, 2, 2``.
+    """
+    ordered = sorted(rows, key=_result_sort_key)
+    ranks = {}
+    current_rank = 0
+    prev_key = None
+    for index, row in enumerate(ordered):
+        key = _result_sort_key(row)
+        if prev_key is None or key != prev_key:
+            current_rank = index + 1  # standard competition ("1224") ranking
+            prev_key = key
+        ranks[str(row.user_id)] = current_rank
+    return ranks
+
+
+def _pow10(rating):
+    """``10 ** (rating / 400)`` — precomputed per player so the seed sums below
+    contain no ``pow`` calls (P(b beats a) = x_b / (x_a + x_b) where x = 10^(R/400))."""
+    return 10.0 ** (rating / _RATING_SCALE)
+
+
+def _expected_seed(x_self, pow_others):
+    """Codeforces "seed": the expected rank of a player whose ``_pow10`` is ``x_self``.
+
+    seed = 1 + Σ P(other ranks above me) = 1 + Σ x_other / (x_self + x_other).
+    ``pow_others`` is the list of the *other* players' ``_pow10`` values.
+    Monotonically decreasing in the player's rating.
+    """
+    seed = 1.0
+    for x_other in pow_others:
+        seed += x_other / (x_self + x_other)
+    return seed
+
+
+def _needed_rating(pow_others, target_seed):
+    """Binary-search the rating whose :func:`_expected_seed` equals ``target_seed``.
+
+    The seed decreases as rating rises, so when the seed at ``mid`` is below the
+    target we have overshot and search lower.
+    """
+    lo, hi = _SEARCH_LO, _SEARCH_HI
+    for _ in range(_SEARCH_ITERS):
+        mid = (lo + hi) / 2.0
+        if _expected_seed(_pow10(mid), pow_others) < target_seed:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2.0
+
+
+def compute_round(ratings, ranks, damping=None):
+    """Run one Codeforces rating round and return ``{user_id: delta}``.
+
+    ``ratings``: ``{user_id: float}`` pre-contest ratings of the participants.
+    ``ranks``:   ``{user_id: int}`` actual ranks (1-based, ties share a rank).
+    Returned deltas are already damped; add them to ``ratings`` to advance.
+
+    Users are processed in a stable sorted order so floating-point summation is
+    deterministic regardless of dict insertion order.
+    """
+    if damping is None:
+        damping = constants.AKARI_RATING_DAMPING
+
+    users = sorted(ratings)
+    n = len(users)
+    if n < 2:
+        return {user: 0.0 for user in users}
+
+    pows = {user: _pow10(ratings[user]) for user in users}
+    deltas = {}
+    for user in users:
+        pow_others = [pows[other] for other in users if other != user]
+        seed = _expected_seed(pows[user], pow_others)
+        mid_rank = math.sqrt(ranks[user] * seed)
+        need = _needed_rating(pow_others, mid_rank)
+        deltas[user] = (need - ratings[user]) / 2.0
+
+    # CF correction 1: shift everyone so the field loses a tiny, fixed amount of
+    # rating (total change becomes exactly -n), counteracting inflation.
+    total = sum(deltas.values())
+    inc = -total / n - 1.0
+    for user in users:
+        deltas[user] += inc
+
+    # CF correction 2: clamp inflation among the strongest participants.  Take
+    # the top s by pre-contest rating; if their deltas sum positive, deflate the
+    # whole field (capped at 10) to absorb it.
+    by_rating = sorted(users, key=lambda u: ratings[u], reverse=True)
+    s = round(min(n, 4 * round(math.sqrt(n))))
+    if s > 0:
+        top_sum = sum(deltas[user] for user in by_rating[:s])
+        inc = min(max(-top_sum / s, -10.0), 0.0)
+        for user in users:
+            deltas[user] += inc
+
+    return {user: damping * deltas[user] for user in users}
+
+
+def compute_ratings(rows, start_rating=None, damping=None):
+    """Replay every Akari day in order and return ``{user_id: RatingState}``.
+
+    ``rows`` is any iterable of result rows, each exposing ``user_id``,
+    ``puzzle_number``, ``is_perfect``, ``accuracy`` and ``time_seconds``.  Pass
+    the DB's first-submission-per-(user, puzzle) rows
+    (``get_minigame_results_for_guild``) so a player's locked-in first result is
+    what counts — resubmitting a better time can't farm rating.
+
+    Days are processed by ascending ``puzzle_number``.  A newly seen player is
+    seeded at ``start_rating`` (default 1200).  Days with fewer than two players
+    are not a contest and change nothing (but still seed any newcomer).
+    """
+    if start_rating is None:
+        start_rating = float(constants.AKARI_START_RATING)
+    if damping is None:
+        damping = constants.AKARI_RATING_DAMPING
+
+    by_puzzle = {}
+    for row in rows:
+        by_puzzle.setdefault(int(row.puzzle_number), []).append(row)
+
+    ratings = {}      # user_id -> float
+    games = {}        # user_id -> int (rated days only)
+    peak = {}         # user_id -> float
+    last_delta = {}   # user_id -> float
+
+    for puzzle_number in sorted(by_puzzle):
+        # One row per user per day; the DB already guarantees this, but dedupe
+        # defensively (keep the first occurrence) so the algorithm is robust.
+        day_rows = {}
+        for row in by_puzzle[puzzle_number]:
+            day_rows.setdefault(str(row.user_id), row)
+
+        for user_id in day_rows:
+            if user_id not in ratings:
+                ratings[user_id] = start_rating
+                games[user_id] = 0
+                peak[user_id] = start_rating
+                last_delta[user_id] = 0.0
+
+        if len(day_rows) < 2:
+            continue  # solo day — no contest
+
+        day_ratings = {user_id: ratings[user_id] for user_id in day_rows}
+        ranks = rank_participants(day_rows.values())
+        deltas = compute_round(day_ratings, ranks, damping=damping)
+
+        for user_id, delta in deltas.items():
+            ratings[user_id] += delta
+            games[user_id] += 1
+            last_delta[user_id] = delta
+            if ratings[user_id] > peak[user_id]:
+                peak[user_id] = ratings[user_id]
+
+    return {
+        user_id: RatingState(
+            user_id=user_id,
+            rating=ratings[user_id],
+            games=games[user_id],
+            peak=peak[user_id],
+            last_delta=last_delta[user_id],
+        )
+        for user_id in ratings
+    }

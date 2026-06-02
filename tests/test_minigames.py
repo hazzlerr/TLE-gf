@@ -31,11 +31,13 @@ from tle.cogs.minigames import Minigames
 from tle.cogs.minigames import (
     _SlashCtx,
     _akari_puzzle_table_rows,
+    _akari_rating_table_rows,
     _format_akari_puzzle_table,
     _get_akari_puzzle_table_image_file,
     _get_akari_puzzle_table_image,
     _maybe_parse_puzzle_selector,
 )
+from tle.util.akari_rating import RatingState
 
 
 _GAME = 'akari'
@@ -103,6 +105,26 @@ class FakeMinigameDb(MinigameDbMixin):
                 key         TEXT,
                 value       TEXT,
                 PRIMARY KEY (guild_id, key)
+            )
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS minigame_registrant (
+                guild_id      TEXT NOT NULL,
+                user_id       TEXT NOT NULL,
+                registered_at REAL NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS akari_rating (
+                guild_id   TEXT NOT NULL,
+                user_id    TEXT NOT NULL,
+                rating     REAL NOT NULL,
+                games      INTEGER NOT NULL DEFAULT 0,
+                peak       REAL NOT NULL,
+                last_delta REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
             )
         ''')
         self.conn.commit()
@@ -1726,3 +1748,156 @@ class TestSlashCtx:
         ch = _FollowupChannel(inter)
         msg = asyncio.run(ch.send('hi'))
         assert hasattr(msg, 'id')
+
+
+class TestRatingDb:
+    def test_register_is_idempotent(self, db):
+        assert db.register_minigame_user(1, 999, 123.0) == 1
+        assert db.register_minigame_user(1, 999, 124.0) == 0
+        assert db.is_minigame_registered(1, 999) is True
+        assert db.is_minigame_registered(1, 888) is False
+        assert db.get_minigame_registrants(1) == {'999'}
+
+    def test_unregister(self, db):
+        db.register_minigame_user(1, 999, 1.0)
+        assert db.unregister_minigame_user(1, 999) == 1
+        assert db.unregister_minigame_user(1, 999) == 0
+        assert db.is_minigame_registered(1, 999) is False
+        assert db.get_minigame_registrants(1) == set()
+
+    def test_registrants_are_guild_scoped(self, db):
+        db.register_minigame_user(1, 999, 1.0)
+        db.register_minigame_user(2, 999, 1.0)
+        db.unregister_minigame_user(1, 999)
+        assert db.get_minigame_registrants(1) == set()
+        assert db.get_minigame_registrants(2) == {'999'}
+
+    def test_replace_and_get_ratings_sorted_desc(self, db):
+        states = [
+            RatingState('a', 1300.5, 4, 1320.0, 5.0),
+            RatingState('b', 1100.25, 4, 1200.0, -3.0),
+        ]
+        assert db.replace_akari_ratings(1, states, 1000.0) == 2
+        rows = db.get_akari_ratings(1)
+        assert [r.user_id for r in rows] == ['a', 'b']
+        assert abs(rows[0].rating - 1300.5) < 1e-9
+        b = db.get_akari_rating(1, 'b')
+        assert b.games == 4
+        assert abs(b.last_delta + 3.0) < 1e-9
+
+    def test_replace_overwrites_not_appends(self, db):
+        db.replace_akari_ratings(1, [RatingState('a', 1300.0, 1, 1300.0, 0.0)], 1.0)
+        db.replace_akari_ratings(1, [RatingState('a', 1250.0, 2, 1300.0, -50.0)], 2.0)
+        rows = db.get_akari_ratings(1)
+        assert len(rows) == 1
+        assert abs(rows[0].rating - 1250.0) < 1e-9
+
+    def test_replace_is_guild_scoped(self, db):
+        db.replace_akari_ratings(1, [RatingState('a', 1300.0, 1, 1300.0, 0.0)], 1.0)
+        db.replace_akari_ratings(2, [RatingState('b', 1400.0, 1, 1400.0, 0.0)], 1.0)
+        # Rebuilding guild 1 must leave guild 2 untouched.
+        db.replace_akari_ratings(1, [RatingState('a', 1290.0, 2, 1300.0, -10.0)], 3.0)
+        assert len(db.get_akari_ratings(2)) == 1
+        assert db.get_akari_rating(2, 'b').rating == 1400.0
+
+
+class TestCogRating:
+    @staticmethod
+    def _enable(db, guild=1, channel=10):
+        db.set_guild_config(guild, 'akari', '1')
+        db.set_minigame_channel(guild, _GAME, channel)
+
+    @staticmethod
+    def _akari_msg(msg_id, user_id, body, guild=1, channel=10):
+        return _FakeMessage(msg_id, guild, channel, user_id,
+                            f'Daily Akari 445\n✅2026-03-26✅\n{body}\n'
+                            f'https://dailyakari.com/')
+
+    def test_results_persist_rating_snapshot(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._enable(db)
+        cog = Minigames(bot=None)
+        perfect = self._akari_msg(1, 999, '\U0001f31f Perfect! \U0001f553 1:29')
+        partial = self._akari_msg(2, 888, '\U0001f3af 96% \U0001f553 1:00')
+
+        async def _inner():
+            await cog.on_message(perfect)
+            await cog.on_message(partial)
+        asyncio.run(_inner())
+
+        rows = db.get_akari_ratings(1)
+        by_user = {r.user_id: r for r in rows}
+        assert set(by_user) == {'999', '888'}
+        # Perfect beats partial -> the perfect solver is rated above 1200.
+        assert by_user['999'].rating > 1200 > by_user['888'].rating
+        assert by_user['999'].games == 1
+        assert rows[0].user_id == '999'  # strongest first
+
+    def test_recompute_runs_after_admin_remove(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._enable(db)
+        cog = Minigames(bot=None)
+
+        async def _inner():
+            await cog.on_message(self._akari_msg(1, 999, '\U0001f31f Perfect! \U0001f553 1:29'))
+            await cog.on_message(self._akari_msg(2, 888, '\U0001f3af 96% \U0001f553 1:00'))
+        asyncio.run(_inner())
+        assert len(db.get_akari_ratings(1)) == 2
+
+        member = _FakeDiscordMember(888, 'Bob')
+
+        async def _send(content=None, *, embed=None, **kwargs):
+            return None
+        ctx = SimpleNamespace(guild=_FakeGuild(1), send=_send)
+        asyncio.run(cog._cmd_remove(ctx, AKARI_GAME, member, 445))
+        # 888's only result is gone -> they fall out of the rebuilt snapshot.
+        users = {r.user_id for r in db.get_akari_ratings(1)}
+        assert users == {'999'}
+
+    def test_recompute_never_raises_without_rating_table(self, monkeypatch):
+        # Ingestion must survive even if the rating recompute fails internally.
+        class _NoRatingDb(FakeMinigameDb):
+            def replace_akari_ratings(self, *a, **k):
+                raise sqlite3.OperationalError('boom')
+        bad = _NoRatingDb()
+        monkeypatch.setattr(cf_common, 'user_db', bad)
+        self._enable(bad)
+        cog = Minigames(bot=None)
+        asyncio.run(cog.on_message(
+            self._akari_msg(1, 999, '\U0001f31f Perfect! \U0001f553 1:29')))
+        # The result still saved despite the rating failure.
+        assert bad.get_minigame_result(1) is not None
+        bad.close()
+
+
+class TestRatingDisplayNoLeak:
+    def test_rating_table_rows_mark_registered_and_round(self, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', None)  # handles render as '-'
+        guild = _FakeGuild(1, members=[
+            _FakeDiscordMember(999, 'Alice'),
+            _FakeDiscordMember(888, 'Bob'),
+        ])
+        rating_rows = [
+            SimpleNamespace(user_id='999', rating=1316.1, games=5, peak=1316.1, last_delta=2.0),
+            SimpleNamespace(user_id='888', rating=1090.4, games=5, peak=1200.0, last_delta=-3.0),
+        ]
+        out = _akari_rating_table_rows(guild, rating_rows, registrants={'999'})
+        # columns: (#, name, handle, rating, games)
+        assert out[0][0] == 1
+        assert '\N{CHECK MARK}' in out[0][1]       # registered marked
+        assert '\N{CHECK MARK}' not in out[1][1]   # shadow-rated, not marked
+        assert out[0][3] == '1316'                 # rounded for display
+        assert out[1][3] == '1090'
+        assert out[0][4] == '5'
+
+    def test_puzzle_result_rows_carry_no_rating(self, monkeypatch):
+        # The public per-puzzle table must never surface a rating value.
+        monkeypatch.setattr(cf_common, 'user_db', None)
+        guild = _FakeGuild(1, members=[_FakeDiscordMember(999, 'Alice')])
+        result_row = SimpleNamespace(
+            user_id='999', is_perfect=True, accuracy=100,
+            time_seconds=89, message_id=1)
+        out = _akari_puzzle_table_rows(guild, [result_row])
+        # (#, name, handle, result, time) — 'perfect'/time only, no 1200-ish number.
+        assert out[0][3] == 'perfect'
+        assert '1200' not in ' '.join(str(c) for c in out[0])

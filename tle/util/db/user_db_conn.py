@@ -351,6 +351,31 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
             CREATE INDEX IF NOT EXISTS idx_minigame_raw_message_guild
                 ON minigame_raw_message (guild_id)
         ''')
+        # Minigame ratings (registrants + rebuildable Akari rating snapshot)
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS minigame_registrant (
+                guild_id      TEXT NOT NULL,
+                user_id       TEXT NOT NULL,
+                registered_at REAL NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS akari_rating (
+                guild_id   TEXT NOT NULL,
+                user_id    TEXT NOT NULL,
+                rating     REAL NOT NULL,
+                games      INTEGER NOT NULL DEFAULT 0,
+                peak       REAL NOT NULL,
+                last_delta REAL NOT NULL DEFAULT 0,
+                updated_at REAL NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        self.conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_akari_rating_guild
+                ON akari_rating (guild_id, rating DESC)
+        ''')
         # Complaints
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS complaint (

@@ -353,3 +353,40 @@ class TestFreshDbDetection:
 
         has_legacy = db.execute('SELECT 1 FROM starboard LIMIT 1').fetchone() is not None
         assert has_legacy is True
+
+
+class TestUpgrade124:
+    def test_creates_rating_tables(self, db):
+        from tle.util.db.user_db_upgrades import upgrade_1_24_0
+        upgrade_1_24_0(db)
+        # Both tables exist with the expected columns (no error = present).
+        db.execute('SELECT guild_id, user_id, registered_at '
+                   'FROM minigame_registrant').fetchall()
+        db.execute('SELECT guild_id, user_id, rating, games, peak, last_delta, '
+                   'updated_at FROM akari_rating').fetchall()
+
+    def test_idempotent(self, db):
+        from tle.util.db.user_db_upgrades import upgrade_1_24_0
+        upgrade_1_24_0(db)
+        upgrade_1_24_0(db)  # CREATE ... IF NOT EXISTS -> safe to re-run
+
+
+class TestFreshDbSchema:
+    """A fresh DB stamps the latest version WITHOUT running migrations, so every
+    migration table must also be created by create_tables()."""
+
+    def test_fresh_userdbconn_has_rating_tables(self):
+        from tle.util.db.user_db_conn import UserDbConn
+        from tle.util.db.user_db_upgrades import registry
+
+        conn = UserDbConn(':memory:')
+        try:
+            # These would raise "no such table" if only the 1.24.0 migration
+            # (which a fresh DB never runs) created them.
+            conn.conn.execute('SELECT guild_id, user_id, registered_at '
+                              'FROM minigame_registrant').fetchall()
+            conn.conn.execute('SELECT guild_id, user_id, rating, games, peak, '
+                              'last_delta, updated_at FROM akari_rating').fetchall()
+            assert registry.get_current_version(conn.conn) == registry.latest_version
+        finally:
+            conn.conn.close()

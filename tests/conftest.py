@@ -292,6 +292,8 @@ constants_mod.TLE_ADMIN = 'Admin'
 constants_mod.TLE_MODERATOR = 'Moderator'
 constants_mod.NOTO_SANS_CJK_BOLD_FONT_PATH = '/tmp/fake-font.ttf'
 constants_mod.NOTO_COLOR_EMOJI_FONT_PATH = '/tmp/fake-color-emoji.ttf'
+constants_mod.AKARI_START_RATING = 1200
+constants_mod.AKARI_RATING_DAMPING = 0.25
 
 # tle.util.codeforces_common needs a user_db attribute and parse_date for starboard cog
 import time as _time

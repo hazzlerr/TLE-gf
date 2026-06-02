@@ -308,3 +308,92 @@ class MinigameDbMixin:
         ).rowcount
         self.conn.commit()
         return live_rc + imported_rc
+
+    # ── Rating: registration ─────────────────────────────────────────
+
+    def register_minigame_user(self, guild_id, user_id, registered_at):
+        """Opt a user in to minigame ratings. Returns 1 if newly added, else 0."""
+        rc = self.conn.execute(
+            '''
+            INSERT OR IGNORE INTO minigame_registrant (guild_id, user_id, registered_at)
+            VALUES (?, ?, ?)
+            ''',
+            (str(guild_id), str(user_id), float(registered_at))
+        ).rowcount
+        self.conn.commit()
+        return rc
+
+    def unregister_minigame_user(self, guild_id, user_id):
+        """Opt a user out. Returns the number of rows removed (1 or 0)."""
+        rc = self.conn.execute(
+            'DELETE FROM minigame_registrant WHERE guild_id = ? AND user_id = ?',
+            (str(guild_id), str(user_id))
+        ).rowcount
+        self.conn.commit()
+        return rc
+
+    def is_minigame_registered(self, guild_id, user_id):
+        row = self.conn.execute(
+            'SELECT user_id FROM minigame_registrant WHERE guild_id = ? AND user_id = ?',
+            (str(guild_id), str(user_id))
+        ).fetchone()
+        return row is not None
+
+    def get_minigame_registrants(self, guild_id):
+        """Return the set of opted-in user_ids (as TEXT) for a guild."""
+        rows = self.conn.execute(
+            'SELECT user_id FROM minigame_registrant WHERE guild_id = ?',
+            (str(guild_id),)
+        ).fetchall()
+        return {row.user_id for row in rows}
+
+    # ── Rating: snapshot ─────────────────────────────────────────────
+
+    def replace_akari_ratings(self, guild_id, states, updated_at):
+        """Atomically replace a guild's cached Akari rating snapshot.
+
+        ``states`` is an iterable of objects exposing ``user_id``, ``rating``,
+        ``games``, ``peak`` and ``last_delta`` (e.g. ``RatingState`` from
+        ``tle.util.akari_rating``).  Ratings are stored as floats; callers round
+        for display.  Returns the number of rows written.
+        """
+        guild_id = str(guild_id)
+        rows = [
+            (guild_id, str(state.user_id), float(state.rating), int(state.games),
+             float(state.peak), float(state.last_delta), float(updated_at))
+            for state in states
+        ]
+        with self.conn:
+            self.conn.execute(
+                'DELETE FROM akari_rating WHERE guild_id = ?', (guild_id,))
+            self.conn.executemany(
+                '''
+                INSERT INTO akari_rating
+                    (guild_id, user_id, rating, games, peak, last_delta, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ''',
+                rows
+            )
+        return len(rows)
+
+    def get_akari_ratings(self, guild_id):
+        """All rated users for a guild, strongest first."""
+        return self.conn.execute(
+            '''
+            SELECT user_id, rating, games, peak, last_delta, updated_at
+            FROM akari_rating
+            WHERE guild_id = ?
+            ORDER BY rating DESC, games DESC, user_id ASC
+            ''',
+            (str(guild_id),)
+        ).fetchall()
+
+    def get_akari_rating(self, guild_id, user_id):
+        return self.conn.execute(
+            '''
+            SELECT user_id, rating, games, peak, last_delta, updated_at
+            FROM akari_rating
+            WHERE guild_id = ? AND user_id = ?
+            ''',
+            (str(guild_id), str(user_id))
+        ).fetchone()

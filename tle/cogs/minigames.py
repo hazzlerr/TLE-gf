@@ -3,6 +3,7 @@ import datetime as dt
 import html
 import io
 import logging
+import time
 from typing import Optional
 
 import cairo
@@ -29,6 +30,7 @@ from tle.cogs._minigame_akari import AKARI_GAME
 from tle.cogs._minigame_guessgame import GUESSGAME_GAME
 from tle.cogs._minigame_stats import plot_akari_stats, plot_guessgame_stats
 from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
+from tle.util.akari_rating import compute_ratings
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +242,8 @@ def _format_akari_puzzle_table(guild, rows):
     return str(t)
 
 
-def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None):
+def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
+                                  header=('#', 'Name', 'Handle', 'Result', 'Time')):
     title_height = _AKARI_IMAGE_ROW_HEIGHT if title is not None else 0
     footer_height = _AKARI_IMAGE_ROW_HEIGHT if footer is not None else 0
     height = int(
@@ -297,7 +300,7 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None):
         draw_line(title, y, _SMOKE_WHITE, bold=True)
         y += _AKARI_IMAGE_ROW_HEIGHT
 
-    draw_row(('#', 'Name', 'Handle', 'Result', 'Time'), y, _SMOKE_WHITE, bold=True)
+    draw_row(header, y, _SMOKE_WHITE, bold=True)
     y += int(_AKARI_IMAGE_ROW_HEIGHT * _AKARI_IMAGE_HEADER_SPACING)
 
     for i, row in enumerate(table_rows):
@@ -321,6 +324,39 @@ def _get_akari_puzzle_table_image_file(guild, rows, title):
     if len(rows) > len(displayed_rows):
         footer = f'Showing top {len(displayed_rows)} of {len(rows)} results'
     return _get_akari_puzzle_table_image(displayed_rows, title=title, footer=footer)
+
+
+def _akari_rating_table_rows(guild, rating_rows, registrants):
+    """Build display rows (#, Name[✓], Handle, Rating, Games) for the admin list.
+
+    A ``✓`` after the name marks users who opted in via ``;mg register``; the
+    rest are shadow-rated.  ``rating`` is rounded only here for display.
+    """
+    rows = []
+    for index, row in enumerate(rating_rows, start=1):
+        name = _safe_user_name(guild, row.user_id)
+        if row.user_id in registrants:
+            name = f'{name} \N{CHECK MARK}'
+        rows.append((
+            index,
+            name,
+            _safe_cf_handle(guild, row.user_id),
+            str(round(row.rating)),
+            str(row.games),
+        ))
+    return rows
+
+
+def _get_akari_rating_table_image_file(guild, rating_rows, registrants,
+                                       *, title='Daily Akari Ratings'):
+    table_rows = _akari_rating_table_rows(
+        guild, rating_rows[:_AKARI_IMAGE_MAX_ROWS], registrants)
+    footer = None
+    if len(rating_rows) > len(table_rows):
+        footer = f'Showing top {len(table_rows)} of {len(rating_rows)} rated players'
+    return _get_akari_puzzle_table_image(
+        table_rows, title=title, footer=footer,
+        header=('#', 'Name', 'Handle', 'Rating', 'Games'))
 
 
 class Minigames(commands.Cog):
@@ -375,15 +411,38 @@ class Minigames(commands.Cog):
         except commands.BadArgument as exc:
             raise MinigameCogError(str(exc)) from exc
 
+    # ── Rating ──────────────────────────────────────────────────────────
+
+    def _recompute_akari_ratings(self, guild_id):
+        """Replay all Akari results and overwrite the persisted rating snapshot.
+
+        Pure function of the result tables, so this is always correct after any
+        edit/delete/import.  Synchronous and free of ``await`` points, so it runs
+        atomically with respect to the event loop (no lock needed).  Only fired
+        when an Akari result actually changed, and once (not per row) after an
+        import, so the brief CPU cost stays off the hot path.  Never raises — a
+        rating failure must not break ingestion.
+        """
+        try:
+            rows = cf_common.user_db.get_minigame_results_for_guild(
+                guild_id, AKARI_GAME.name)
+            states = compute_ratings(rows)
+            cf_common.user_db.replace_akari_ratings(
+                guild_id, states.values(), time.time())
+        except Exception:
+            logger.error('Failed to recompute Akari ratings for guild %s',
+                         guild_id, exc_info=True)
+
     # ── Listeners ───────────────────────────────────────────────────────
 
     async def _ingest_message(self, message, game):
         results = game.parse(strip_codeblock(message.content))
         if not results:
-            return
+            return 0
 
         puzzle_date_fallback = message.created_at.date()
 
+        saved = 0
         for parsed in results:
             existing = cf_common.user_db.get_minigame_result_for_user_puzzle(
                 message.guild.id, game.name, message.author.id, parsed.puzzle_number
@@ -404,6 +463,8 @@ class Minigames(commands.Cog):
                 puzzle_date.isoformat(), parsed.accuracy,
                 parsed.time_seconds, parsed.is_perfect, message.content,
             )
+            saved += 1
+        return saved
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -418,7 +479,9 @@ class Minigames(commands.Cog):
                     message.author.id, message.created_at.isoformat(),
                     message.content,
                 )
-                await self._ingest_message(message, game)
+                saved = await self._ingest_message(message, game)
+                if saved and game.name == AKARI_GAME.name:
+                    self._recompute_akari_ratings(message.guild.id)
             except Exception:
                 logger.error('Error ingesting message %s', message.id, exc_info=True)
 
@@ -434,12 +497,14 @@ class Minigames(commands.Cog):
             cf_common.user_db.update_raw_message(after.id, after.content)
             # Delete all existing live results for this message, then re-ingest.
             # Handles the case where an edit removes some results from a multi-result message.
-            cf_common.user_db.delete_minigame_result(after.id)
+            changed = cf_common.user_db.delete_minigame_result(after.id)
             results = game.parse(strip_codeblock(after.content))
             if results:
-                await self._ingest_message(after, game)
+                changed += await self._ingest_message(after, game)
             else:
-                cf_common.user_db.delete_imported_minigame_result(after.id)
+                changed += cf_common.user_db.delete_imported_minigame_result(after.id)
+            if changed and game.name == AKARI_GAME.name:
+                self._recompute_akari_ratings(after.guild.id)
         except Exception:
             logger.error('Error handling message edit %s', after.id, exc_info=True)
 
@@ -448,9 +513,13 @@ class Minigames(commands.Cog):
         if payload.guild_id is None or cf_common.user_db is None:
             return
         try:
-            cf_common.user_db.delete_minigame_result(payload.message_id)
-            cf_common.user_db.delete_imported_minigame_result(payload.message_id)
+            deleted = cf_common.user_db.delete_minigame_result(payload.message_id)
+            deleted += cf_common.user_db.delete_imported_minigame_result(payload.message_id)
             cf_common.user_db.delete_raw_message(payload.message_id)
+            # Game isn't known from a raw delete payload; a removed result row may
+            # have been an Akari one, so refresh ratings whenever any row went.
+            if deleted:
+                self._recompute_akari_ratings(payload.guild_id)
         except Exception:
             logger.error('Error handling message delete %s', payload.message_id, exc_info=True)
 
@@ -590,6 +659,10 @@ class Minigames(commands.Cog):
             )
         finally:
             self._import_tasks.pop(key, None)
+            # Recompute once after the whole import (committed batches persist even
+            # on cancel/fail), rather than per imported row.
+            if game.name == AKARI_GAME.name:
+                self._recompute_akari_ratings(guild_id)
             await self._notify_import_complete(guild_id, game, status)
 
     # ── Shared command implementations ──────────────────────────────────
@@ -876,9 +949,44 @@ class Minigames(commands.Cog):
             raise MinigameCogError(
                 f'No {game.display_name} result found for '
                 f'`{_safe_member_name(member)}` on puzzle `{puzzle_id}`.')
+        if game.name == AKARI_GAME.name:
+            self._recompute_akari_ratings(ctx.guild.id)
         await ctx.send(embed=discord_common.embed_success(
             f'Removed {game.display_name} result for '
             f'`{_safe_member_name(member)}` on puzzle `{puzzle_id}`.'))
+
+    async def _cmd_akari_ratings(self, ctx, member=None):
+        """Admin-only rating display — the *only* place a rating is shown."""
+        self._require_enabled(ctx.guild.id, AKARI_GAME)
+        if member is not None:
+            row = cf_common.user_db.get_akari_rating(ctx.guild.id, member.id)
+            if row is None:
+                raise MinigameCogError(
+                    f'No {AKARI_GAME.display_name} rating for '
+                    f'`{_safe_member_name(member)}` yet.')
+            registered = cf_common.user_db.is_minigame_registered(
+                ctx.guild.id, member.id)
+            embed = discord.Embed(
+                title=f'{AKARI_GAME.display_name} rating — {_safe_member_name(member)}',
+                color=discord_common.random_cf_color(),
+            )
+            embed.add_field(name='Rating', value=str(round(row.rating)))
+            embed.add_field(name='Games', value=str(row.games))
+            embed.add_field(name='Peak', value=str(round(row.peak)))
+            embed.add_field(name='Last change', value=f'{row.last_delta:+.0f}')
+            embed.add_field(name='Registered', value='yes' if registered else 'no')
+            await ctx.send(embed=embed)
+            return
+
+        rows = cf_common.user_db.get_akari_ratings(ctx.guild.id)
+        if not rows:
+            raise MinigameCogError(
+                f'No {AKARI_GAME.display_name} ratings yet. They appear once '
+                f'players post results.')
+        registrants = cf_common.user_db.get_minigame_registrants(ctx.guild.id)
+        discord_file = _get_akari_rating_table_image_file(
+            ctx.guild, rows, registrants)
+        await ctx.send(file=discord_file)
 
     _STATS_PLOTTERS = {
         'akari': plot_akari_stats,
@@ -1027,6 +1135,8 @@ class Minigames(commands.Cog):
         deleted = cf_common.user_db.clear_imported_minigame_results(
             ctx.guild.id, game.name)
         self._import_status.pop(key, None)
+        if game.name == AKARI_GAME.name:
+            self._recompute_akari_ratings(ctx.guild.id)
         await ctx.send(embed=discord_common.embed_success(
             f'Deleted {deleted} imported {game.display_name} row(s). '
             f'Raw messages preserved for reparse.'))
@@ -1062,6 +1172,9 @@ class Minigames(commands.Cog):
                 parsed_count += 1
         cf_common.user_db.conn.commit()
 
+        if game.name == AKARI_GAME.name:
+            self._recompute_akari_ratings(ctx.guild.id)
+
         lines = [
             f'raw messages scanned: **{len(raw_messages)}**',
             f'previous imported rows cleared: **{deleted}**',
@@ -1085,6 +1198,24 @@ class Minigames(commands.Cog):
     async def minigames(self, ctx):
         """Daily puzzle minigame commands."""
         await ctx.send_help(ctx.command)
+
+    @minigames.command(name='register', brief='Opt in to Daily Akari ratings')
+    async def minigames_register(self, ctx):
+        added = cf_common.user_db.register_minigame_user(
+            ctx.guild.id, ctx.author.id, time.time())
+        msg = (f'You are now registered for {AKARI_GAME.display_name} ratings.'
+               if added else
+               f'You are already registered for {AKARI_GAME.display_name} ratings.')
+        await ctx.send(embed=discord_common.embed_success(msg))
+
+    @minigames.command(name='unregister', brief='Opt out of Daily Akari ratings')
+    async def minigames_unregister(self, ctx):
+        removed = cf_common.user_db.unregister_minigame_user(
+            ctx.guild.id, ctx.author.id)
+        msg = (f'You are no longer registered for {AKARI_GAME.display_name} ratings. '
+               f'Your results are still recorded.'
+               if removed else 'You were not registered.')
+        await ctx.send(embed=discord_common.embed_success(msg))
 
     # ── Akari commands: ;minigames akari … ──────────────────────────────
 
@@ -1164,6 +1295,19 @@ class Minigames(commands.Cog):
     @commands.has_role(constants.TLE_ADMIN)
     async def akari_reparse(self, ctx):
         await self._cmd_reparse(ctx, AKARI_GAME)
+
+    @akari.group(name='ratings', aliases=['rating'], brief='(Admin) Show Akari ratings',
+                 usage='[@user]', invoke_without_command=True)
+    @commands.has_role(constants.TLE_ADMIN)
+    async def akari_ratings(self, ctx, member: CaseInsensitiveMember = None):
+        await self._cmd_akari_ratings(ctx, member)
+
+    @akari_ratings.command(name='recompute', brief='(Admin) Rebuild the rating snapshot')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def akari_ratings_recompute(self, ctx):
+        self._recompute_akari_ratings(ctx.guild.id)
+        await ctx.send(embed=discord_common.embed_success(
+            f'{AKARI_GAME.display_name} ratings recomputed.'))
 
     # ── GuessGame commands: ;minigames guessgame … ──────────────────────
 

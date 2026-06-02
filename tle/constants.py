@@ -30,3 +30,9 @@ TLE_MODERATOR = os.environ.get('TLE_MODERATOR', 'Moderator')
 
 _DEFAULT_STAR_COLOR = 0xffaa10
 _DEFAULT_STAR = '\N{WHITE MEDIUM STAR}'
+
+# Daily Akari Codeforces-style rating (see tle/util/akari_rating.py).
+# Everyone starts here; AKARI_RATING_DAMPING scales every CF per-contest change
+# down (0.25 = a quarter of real CF) so daily play stays low-volatility.
+AKARI_START_RATING = 1200
+AKARI_RATING_DAMPING = 0.25

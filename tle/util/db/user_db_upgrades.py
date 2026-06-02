@@ -552,3 +552,39 @@ def upgrade_1_23_0(db):
     ''')
     db.commit()
     logger.info('1.23.0: greatday_pick table created')
+
+
+@registry.register('1.24.0', 'Akari ratings')
+def upgrade_1_24_0(db):
+    logger.info('1.24.0: Creating minigame_registrant and akari_rating tables')
+    # Who has opted in via `;mg register`. Rating is computed for everyone with
+    # results regardless; this table only records the opt-in flag.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS minigame_registrant (
+            guild_id      TEXT NOT NULL,
+            user_id       TEXT NOT NULL,
+            registered_at REAL NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    ''')
+    # Rebuildable snapshot of the Codeforces-style rating replay. Ratings are
+    # stored as REAL (float) and rounded only for display; this table is a cache
+    # of a pure function of the minigame result tables, not a source of truth.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS akari_rating (
+            guild_id   TEXT NOT NULL,
+            user_id    TEXT NOT NULL,
+            rating     REAL NOT NULL,
+            games      INTEGER NOT NULL DEFAULT 0,
+            peak       REAL NOT NULL,
+            last_delta REAL NOT NULL DEFAULT 0,
+            updated_at REAL NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    ''')
+    db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_akari_rating_guild
+            ON akari_rating (guild_id, rating DESC)
+    ''')
+    db.commit()
+    logger.info('1.24.0: minigame_registrant and akari_rating tables created')
