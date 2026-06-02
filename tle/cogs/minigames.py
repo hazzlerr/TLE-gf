@@ -245,7 +245,8 @@ def _format_akari_puzzle_table(guild, rows):
 
 
 def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
-                                  header=('#', 'Name', 'Handle', 'Result', 'Time')):
+                                  header=('#', 'Name', 'Handle', 'Result', 'Time'),
+                                  row_colors=None):
     title_height = _AKARI_IMAGE_ROW_HEIGHT if title is not None else 0
     footer_height = _AKARI_IMAGE_ROW_HEIGHT if footer is not None else 0
     height = int(
@@ -307,7 +308,10 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
 
     for i, row in enumerate(table_rows):
         draw_bg(y, _TABLE_ROW_COLORS[i % 2])
-        draw_row(row, y, _BLACK)
+        # row_colors (when provided) gives the per-row text colour as a 0–255
+        # RGB tuple; otherwise everything stays black like the puzzle tables.
+        text_color = row_colors[i] if row_colors is not None else _BLACK
+        draw_row(row, y, text_color)
         y += _AKARI_IMAGE_ROW_HEIGHT
 
     if footer is not None:
@@ -353,16 +357,29 @@ def _akari_rating_table_rows(guild, rating_rows, registrants):
     return rows
 
 
+def _akari_row_text_color(rating):
+    """Per-row text colour for the rating leaderboard image.
+
+    Uses the rank's ``color_embed`` (the darker integer variant) so the text
+    stays legible on the light-gray alternating row backgrounds — the pastel
+    ``color_graph`` shades are tuned for plot fills and would wash out here.
+    """
+    embed = rank_for_rating(round(rating)).color_embed
+    return ((embed >> 16) & 0xFF, (embed >> 8) & 0xFF, embed & 0xFF)
+
+
 def _get_akari_rating_table_image_file(guild, rating_rows, registrants,
                                        *, title='Daily Akari Ratings'):
-    table_rows = _akari_rating_table_rows(
-        guild, rating_rows[:_AKARI_IMAGE_MAX_ROWS], registrants)
+    displayed = rating_rows[:_AKARI_IMAGE_MAX_ROWS]
+    table_rows = _akari_rating_table_rows(guild, displayed, registrants)
+    row_colors = [_akari_row_text_color(row.rating) for row in displayed]
     footer = None
     if len(rating_rows) > len(table_rows):
         footer = f'Showing top {len(table_rows)} of {len(rating_rows)} rated players'
     return _get_akari_puzzle_table_image(
         table_rows, title=title, footer=footer,
-        header=('#', 'Name', 'Handle', 'Rating', 'Games'))
+        header=('#', 'Name', 'Handle', 'Rating', 'Games'),
+        row_colors=row_colors)
 
 
 def _format_akari_rating_debug(guild, rating_rows, registrants):
@@ -1074,14 +1091,13 @@ class Minigames(commands.Cog):
         rating = round(row.rating)
         rank = rank_for_rating(rating)
         peak_rank = rank_for_rating(round(row.peak))
-        discord_file = plot_akari_rating(
-            history, _safe_member_name(member), rank.title_abbr)
+        discord_file = plot_akari_rating(history, _safe_member_name(member))
         embed = discord.Embed(
             title=f'{AKARI_GAME.display_name} rating — {_safe_member_name(member)}',
             color=rank.color_embed,
         )
-        embed.add_field(name='Rating', value=f'{rating} ({rank.title})')
-        embed.add_field(name='Peak', value=f'{round(row.peak)} ({peak_rank.title})')
+        embed.add_field(name='Rating', value=f'{rating} ({rank.title_abbr})')
+        embed.add_field(name='Peak', value=f'{round(row.peak)} ({peak_rank.title_abbr})')
         embed.add_field(name='Games', value=str(row.games))
         embed.add_field(name='Last change', value=f'{row.last_delta:+.0f}')
         discord_common.attach_image(embed, discord_file)

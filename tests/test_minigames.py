@@ -1964,6 +1964,8 @@ class TestRatingDisplayNoLeak:
         ]
         out = _akari_rating_table_rows(guild, rating_rows, registrants={'999'})
         # columns: (#, name, handle, "rating · rank", games)
+        # Per-row colouring is applied by the image renderer (not in the row
+        # tuple), so the cell is plain text here.
         assert out[0][0] == 1
         assert '\N{CHECK MARK}' in out[0][1]       # registered marked
         assert '\N{CHECK MARK}' not in out[1][1]   # shadow-rated, not marked

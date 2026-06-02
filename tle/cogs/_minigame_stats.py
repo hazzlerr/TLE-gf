@@ -142,7 +142,7 @@ def plot_akari_stats(rows, display_name):
     return discord_file
 
 
-def plot_akari_rating(history, display_name, rank_abbr=None):
+def plot_akari_rating(history, display_name):
     """Plot one user's Daily Akari rating over time (``;plot rating`` style).
 
     ``history`` is the list of :class:`HistoryPoint` from
@@ -166,12 +166,9 @@ def plot_akari_rating(history, display_name, rank_abbr=None):
     gc.plot_rating_bg(AKARI_RANKS)
 
     plt.gcf().autofmt_xdate()
-    current = round(ratings[-1])
-    legend_text = (f'{display_name} ({current}, {rank_abbr})'
-                   if rank_abbr is not None else
-                   f'{display_name} ({current})')
-    plt.legend([gc.StrWrap(legend_text)], bbox_to_anchor=(0, 1, 1, 0),
-               loc='lower left', mode='expand', ncol=1)
+    label = gc.StrWrap(f'{display_name} ({round(ratings[-1])})')
+    plt.legend([label], bbox_to_anchor=(0, 1, 1, 0), loc='lower left',
+               mode='expand', ncol=1)
 
     return gc.get_current_figure_as_file()
 
