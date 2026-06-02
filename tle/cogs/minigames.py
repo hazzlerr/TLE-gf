@@ -333,18 +333,19 @@ def _get_akari_puzzle_table_image_file(guild, rows, title):
     return _get_akari_puzzle_table_image(displayed_rows, title=title, footer=footer)
 
 
-def _akari_rating_table_rows(guild, rating_rows, registrants):
-    """Build display rows (#, Name[✓], Handle, Rating · Rank, Games) for the admin list.
+def _akari_rating_table_rows(guild, rating_rows, registrants, *, mark_registered=True):
+    """Build display rows (#, Name[✓], Handle, Rating · Rank, Games) for the leaderboard.
 
-    A ``✓`` after the name marks users who opted in via ``;mg register``; the
-    rest are shadow-rated.  ``rating`` is rounded only here for display, and the
-    rank abbreviation (N/P/S/E/CM/…) is appended so scanners see the tier without
-    a separate column.
+    ``rating`` is rounded only here for display, and the rank abbreviation
+    (N/P/S/E/CM/…) is appended so scanners see the tier without a separate
+    column.  When ``mark_registered`` is True, a ``✓`` after the name marks
+    users who opted in via ``;mg register``; pass False on a registered-only
+    view (the marker is redundant when every row is opted in).
     """
     rows = []
     for index, row in enumerate(rating_rows, start=1):
         name = _safe_user_name(guild, row.user_id)
-        if row.user_id in registrants:
+        if mark_registered and row.user_id in registrants:
             name = f'{name} \N{CHECK MARK}'
         rating = round(row.rating)
         rank = rank_for_rating(rating)
@@ -370,9 +371,11 @@ def _akari_row_text_color(rating):
 
 
 def _get_akari_rating_table_image_file(guild, rating_rows, registrants,
-                                       *, title='Daily Akari Ratings'):
+                                       *, title='Daily Akari Ratings',
+                                       mark_registered=True):
     displayed = rating_rows[:_AKARI_IMAGE_MAX_ROWS]
-    table_rows = _akari_rating_table_rows(guild, displayed, registrants)
+    table_rows = _akari_rating_table_rows(
+        guild, displayed, registrants, mark_registered=mark_registered)
     row_colors = [_akari_row_text_color(row.rating) for row in displayed]
     footer = None
     if len(rating_rows) > len(table_rows):
@@ -381,56 +384,6 @@ def _get_akari_rating_table_image_file(guild, rating_rows, registrants,
         table_rows, title=title, footer=footer,
         header=('#', 'Name', 'Handle', 'Rating', 'Games'),
         row_colors=row_colors)
-
-
-def _format_akari_rating_debug(guild, rating_rows, registrants):
-    """Plain-text dump of every rated user's exact state (admin testing).
-
-    Shows unrounded rating plus the decay-relevant fields (skip streak, last day
-    played) so an admin can verify ratings and inactivity decay. ``*`` marks
-    registered users.
-    """
-    style = table.Style('{:<}  {:>}  {:<}  {:>}  {:>}  {:>}  {:>}  {:>}')
-    t = table.Table(style)
-    t += table.Header(
-        'Name', 'Rating', 'Rk', 'Games', 'Peak', 'LastD', 'Skip', 'Played')
-    t += table.Line()
-    for row in rating_rows:
-        name = _safe_user_name(guild, row.user_id).replace('`', '')
-        if row.user_id in registrants:
-            name = f'{name} *'
-        rank = rank_for_rating(round(row.rating))
-        t += table.Data(
-            name[:20],
-            f'{row.rating:.1f}',
-            rank.title_abbr,
-            str(row.games),
-            f'{row.peak:.0f}',
-            f'{row.last_delta:+.1f}',
-            str(row.skip_streak),
-            str(row.last_puzzle),
-        )
-    return str(t)
-
-
-_AKARI_DEBUG_PER_PAGE = 15
-
-
-def _build_akari_debug_pages(guild, rating_rows, registrants,
-                             *, per_page=_AKARI_DEBUG_PER_PAGE):
-    """Build paginated ``(None, embed)`` pages for the admin debug dump."""
-    title = (f'{AKARI_GAME.display_name} ratings (debug) — '
-             f'{len(rating_rows)} players (* = registered)')
-    pages = []
-    for chunk in paginator.chunkify(rating_rows, per_page):
-        text = _format_akari_rating_debug(guild, chunk, registrants)
-        embed = discord.Embed(
-            title=title,
-            description=f'```\n{text}\n```',
-            color=discord_common.random_cf_color(),
-        )
-        pages.append((None, embed))
-    return pages
 
 
 class Minigames(commands.Cog):
@@ -1048,21 +1001,27 @@ class Minigames(commands.Cog):
             f'`{_safe_member_name(member)}` on puzzle `{puzzle_id}`.'))
 
     async def _cmd_akari_ratings(self, ctx):
-        """Mod-gated guild leaderboard — top ratings as a single image."""
+        """Mod-gated guild leaderboard — registered, recently-active players only."""
         self._require_enabled(ctx.guild.id, AKARI_GAME)
         rows = cf_common.user_db.get_akari_ratings(ctx.guild.id)
         if not rows:
             raise MinigameCogError(
                 f'No {AKARI_GAME.display_name} ratings yet. They appear once '
                 f'players post results.')
-        active = self._active_ranking_rows(rows)
+        registrants = cf_common.user_db.get_minigame_registrants(ctx.guild.id)
+        registered = [r for r in rows if r.user_id in registrants]
+        if not registered:
+            raise MinigameCogError(
+                f'No registered {AKARI_GAME.display_name} players yet. '
+                f'Players opt in with `;mg register`.')
+        active = self._active_ranking_rows(registered)
         if not active:
             raise MinigameCogError(
-                f'No {AKARI_GAME.display_name} players active in the last '
-                f'{constants.AKARI_RANKING_MAX_INACTIVE_DAYS} days.')
-        registrants = cf_common.user_db.get_minigame_registrants(ctx.guild.id)
+                f'No registered {AKARI_GAME.display_name} players active in '
+                f'the last {constants.AKARI_RANKING_MAX_INACTIVE_DAYS} days.')
+        # All shown users are registered, so the ✓ marker is redundant noise.
         discord_file = _get_akari_rating_table_image_file(
-            ctx.guild, active, registrants)
+            ctx.guild, active, registrants, mark_registered=False)
         await ctx.send(file=discord_file)
 
     def _akari_user_history(self, guild_id, user_id):
@@ -1079,9 +1038,20 @@ class Minigames(commands.Cog):
         compute_ratings(result_rows, max_puzzle=max_puzzle, histories=histories)
         return histories.get(str(user_id), [])
 
-    async def _cmd_akari_rating(self, ctx, member):
-        """Mod-gated per-user rating graph (``;plot rating`` style)."""
+    async def _cmd_akari_rating(self, ctx, member, *, require_registered=True):
+        """Per-user rating graph (``;plot rating`` style).
+
+        ``require_registered=True`` (the default, public-facing path) refuses
+        to show the rating of users who haven't opted in via ``;mg register``.
+        The ``rating debug`` subcommand passes False so admins can inspect any
+        shadow-rated player.
+        """
         self._require_enabled(ctx.guild.id, AKARI_GAME)
+        if require_registered and not cf_common.user_db.is_minigame_registered(
+                ctx.guild.id, member.id):
+            raise MinigameCogError(
+                f'`{_safe_member_name(member)}` has not opted in to '
+                f'{AKARI_GAME.display_name} ratings (`;mg register`).')
         row = cf_common.user_db.get_akari_rating(ctx.guild.id, member.id)
         if row is None:
             raise MinigameCogError(
@@ -1116,15 +1086,25 @@ class Minigames(commands.Cog):
         discord_common.attach_image(embed, discord_file)
         await ctx.send(embed=embed, file=discord_file)
 
-    async def _cmd_akari_performance(self, ctx, member):
-        """Mod-gated per-user performance graph.
+    async def _cmd_akari_performance(self, ctx, member, *, require_registered=True):
+        """Per-user performance graph.
 
         Performance is the rating that, given the day's field, would seed the
         player at exactly their actual rank — i.e. their "rating-equivalent
         finish" for that contest, independent of their incoming rating.  Solo
         days have no field and are dropped from the plot.
+
+        ``require_registered=True`` (the default, public-facing path) refuses
+        to show performance for users who haven't opted in via ``;mg register``.
+        The ``performance debug`` subcommand passes False so admins can inspect
+        any shadow-rated player.
         """
         self._require_enabled(ctx.guild.id, AKARI_GAME)
+        if require_registered and not cf_common.user_db.is_minigame_registered(
+                ctx.guild.id, member.id):
+            raise MinigameCogError(
+                f'`{_safe_member_name(member)}` has not opted in to '
+                f'{AKARI_GAME.display_name} ratings (`;mg register`).')
         row = cf_common.user_db.get_akari_rating(ctx.guild.id, member.id)
         if row is None:
             raise MinigameCogError(
@@ -1138,7 +1118,8 @@ class Minigames(commands.Cog):
                 f'`{_safe_member_name(member)}` has no contested '
                 f'{AKARI_GAME.display_name} days to plot performance for yet.')
 
-        discord_file = plot_akari_performance(history, _safe_member_name(member))
+        discord_file = plot_akari_performance(
+            history, _safe_member_name(member), round(row.rating))
         last_perf = contest_history[-1].performance
         last_rank = rank_for_rating(round(last_perf))
         best_perf = max(h.performance for h in contest_history)
@@ -1156,18 +1137,27 @@ class Minigames(commands.Cog):
         await ctx.send(embed=embed, file=discord_file)
 
     async def _cmd_akari_ratings_debug(self, ctx):
-        """Mod testing dump: ALL rated users with exact, unrounded values."""
+        """Admin view: leaderboard image including shadow-rated (unopted-in) users.
+
+        Same image as ``;mg akari ratings`` but without the registration filter —
+        so admins can see everyone's rating, with a ``✓`` marking opted-in users.
+        """
         self._require_enabled(ctx.guild.id, AKARI_GAME)
         rows = cf_common.user_db.get_akari_ratings(ctx.guild.id)
         if not rows:
             raise MinigameCogError(
                 f'No {AKARI_GAME.display_name} ratings yet. They appear once '
                 f'players post results.')
+        active = self._active_ranking_rows(rows)
+        if not active:
+            raise MinigameCogError(
+                f'No {AKARI_GAME.display_name} players active in the last '
+                f'{constants.AKARI_RANKING_MAX_INACTIVE_DAYS} days.')
         registrants = cf_common.user_db.get_minigame_registrants(ctx.guild.id)
-        pages = _build_akari_debug_pages(ctx.guild, rows, registrants)
-        paginator.paginate(
-            self.bot, ctx.channel, pages, wait_time=300,
-            set_pagenum_footers=True, author_id=ctx.author.id)
+        discord_file = _get_akari_rating_table_image_file(
+            ctx.guild, active, registrants,
+            title='Daily Akari Ratings (all)', mark_registered=True)
+        await ctx.send(file=discord_file)
 
     _STATS_PLOTTERS = {
         'akari': plot_akari_stats,
@@ -1483,22 +1473,37 @@ class Minigames(commands.Cog):
     async def akari_ratings(self, ctx):
         await self._cmd_akari_ratings(ctx)
 
-    @akari.command(name='rating', brief='(Mod) Show one user\'s Akari rating graph',
-                   usage='[@user]')
+    @akari.group(name='rating',
+                 brief='(Mod) Show one registered user\'s Akari rating graph',
+                 usage='[@user]', invoke_without_command=True)
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_rating(self, ctx, member: CaseInsensitiveMember = None):
         if member is None:
             member = ctx.author
         await self._cmd_akari_rating(ctx, member)
 
-    @akari.command(name='performance', aliases=['perf'],
-                   brief='(Mod) Show one user\'s Akari performance graph',
-                   usage='[@user]')
+    @akari_rating.command(name='debug',
+                          brief='(Mod) Rating graph for any user (incl. shadow-rated)',
+                          usage='@user')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def akari_rating_debug(self, ctx, member: CaseInsensitiveMember):
+        await self._cmd_akari_rating(ctx, member, require_registered=False)
+
+    @akari.group(name='performance', aliases=['perf'],
+                 brief='(Mod) Show one registered user\'s Akari performance graph',
+                 usage='[@user]', invoke_without_command=True)
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_performance(self, ctx, member: CaseInsensitiveMember = None):
         if member is None:
             member = ctx.author
         await self._cmd_akari_performance(ctx, member)
+
+    @akari_performance.command(name='debug',
+                               brief='(Mod) Performance graph for any user (incl. shadow-rated)',
+                               usage='@user')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def akari_performance_debug(self, ctx, member: CaseInsensitiveMember):
+        await self._cmd_akari_performance(ctx, member, require_registered=False)
 
     @akari_ratings.command(name='recompute', brief='(Mod) Rebuild the rating snapshot')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
@@ -1507,8 +1512,8 @@ class Minigames(commands.Cog):
         await ctx.send(embed=discord_common.embed_success(
             f'{AKARI_GAME.display_name} ratings recomputed.'))
 
-    @akari_ratings.command(name='debug', aliases=['all', 'raw'],
-                           brief='(Mod) Dump exact ratings for all users')
+    @akari_ratings.command(name='debug', aliases=['all'],
+                           brief='(Mod) Leaderboard incl. shadow-rated (unopted-in) users')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_ratings_debug(self, ctx):
         await self._cmd_akari_ratings_debug(ctx)

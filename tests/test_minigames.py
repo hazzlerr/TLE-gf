@@ -1903,10 +1903,15 @@ class TestCogRating:
         assert a.last_puzzle == 500  # last day actually played
         assert a.rating > 1200       # decayed toward, but never past, the default
 
-    def test_debug_dump_paginates_all_users(self, db, monkeypatch):
+    def test_debug_leaderboard_includes_shadow_rated(self, db, monkeypatch):
+        # ;mg akari ratings debug is the admin variant: it must include users
+        # who haven't opted in via ;mg register (shadow-rated), with the ✓
+        # marker preserved so admins can still tell who's registered.
         monkeypatch.setattr(cf_common, 'user_db', db)
         self._no_puzzle_filter(monkeypatch)
         self._enable(db)
+        # Alice opts in; Bob is shadow-rated.
+        db.register_minigame_user(1, 999, 1.0)
         cog = Minigames(bot=None)
 
         async def _seed():
@@ -1914,26 +1919,37 @@ class TestCogRating:
             await cog.on_message(self._akari_msg(2, 888, '\U0001f3af 96% \U0001f553 1:00'))
         asyncio.run(_seed())
 
+        # Inactivity filter compares last_puzzle against today's real puzzle
+        # number; the test's puzzle numbers are 1/2, so disable filtering for
+        # this assertion.
+        monkeypatch.setattr(Minigames, '_active_ranking_rows',
+                            staticmethod(lambda rows: list(rows)))
+
         captured = {}
-        from tle.util import paginator as _paginator
 
-        def _capture(bot, channel, pages, **kwargs):
-            captured['pages'] = pages
-        monkeypatch.setattr(_paginator, 'paginate', _capture)
+        def _capture(guild, rating_rows, registrants, *, title='', mark_registered=True):
+            captured['user_ids'] = [r.user_id for r in rating_rows]
+            captured['mark_registered'] = mark_registered
+            return object()  # stand-in for the discord.File
+        monkeypatch.setattr(
+            minigames_module, '_get_akari_rating_table_image_file', _capture)
 
+        sent = {}
+
+        async def _send(*a, **k):
+            sent.update(k)
         ctx = SimpleNamespace(
             guild=_FakeGuild(1, members=[
                 _FakeDiscordMember(999, 'Alice'), _FakeDiscordMember(888, 'Bob')]),
             channel=SimpleNamespace(id=10),
             author=SimpleNamespace(id=999),
+            send=_send,
         )
         asyncio.run(cog._cmd_akari_ratings_debug(ctx))
 
-        pages = captured['pages']
-        assert len(pages) >= 1
-        blob = '\n'.join(page_embed.description for _content, page_embed in pages)
-        assert 'Alice' in blob and 'Bob' in blob  # ALL users present across pages
-        assert '```' in blob                       # rendered as code blocks
+        assert set(captured['user_ids']) == {'999', '888'}  # both users shown
+        assert captured['mark_registered'] is True           # ✓ kept in debug view
+        assert 'file' in sent                                # sent as an image
 
     def test_recompute_never_raises_without_rating_table(self, monkeypatch):
         # Ingestion must survive even if the rating recompute fails internally.
@@ -1985,25 +2001,6 @@ class TestRatingDisplayNoLeak:
         assert out[0][3] == 'perfect'
         assert '1200' not in ' '.join(str(c) for c in out[0])
 
-    def test_rating_debug_dump_shows_all_with_exact_values(self, monkeypatch):
-        from tle.cogs.minigames import _format_akari_rating_debug
-        monkeypatch.setattr(cf_common, 'user_db', None)  # handles render as '-'
-        guild = _FakeGuild(1, members=[
-            _FakeDiscordMember(999, 'Alice'),
-            _FakeDiscordMember(888, 'Bob'),
-        ])
-        rating_rows = [
-            SimpleNamespace(user_id='999', rating=1316.12, games=5, peak=1316.12,
-                            last_delta=-1.73, skip_streak=17, last_puzzle=3),
-            SimpleNamespace(user_id='888', rating=1090.40, games=5, peak=1200.0,
-                            last_delta=2.0, skip_streak=0, last_puzzle=20),
-        ]
-        out = _format_akari_rating_debug(guild, rating_rows, registrants={'999'})
-        assert 'Alice' in out and 'Bob' in out
-        assert '1316.1' in out   # exact rating (1 dp), not rounded to an integer
-        assert '17' in out       # skip streak surfaced for testing
-        assert '*' in out        # registered marker
-
     def test_active_ranking_hides_inactive_and_garbage(self):
         import datetime as _dt
         from tle.cogs._minigame_akari import expected_puzzle_number
@@ -2017,18 +2014,3 @@ class TestRatingDisplayNoLeak:
         kept = {r.user_id for r in Minigames._active_ranking_rows(rows)}
         assert kept == {'today', 'week'}
 
-    def test_debug_pages_split_by_per_page(self, monkeypatch):
-        from tle.cogs.minigames import _build_akari_debug_pages
-        monkeypatch.setattr(cf_common, 'user_db', None)
-        guild = _FakeGuild(1, members=[
-            _FakeDiscordMember(i, f'U{i}') for i in range(1, 21)])
-        rows = [
-            SimpleNamespace(user_id=str(i), rating=1300.0 - i, games=3, peak=1300.0,
-                            last_delta=-1.0, skip_streak=0, last_puzzle=500)
-            for i in range(1, 21)
-        ]
-        pages = _build_akari_debug_pages(guild, rows, registrants={'1'}, per_page=15)
-        assert len(pages) == 2  # 20 users / 15 per page
-        blob = '\n'.join(embed.description for _content, embed in pages)
-        for i in range(1, 21):
-            assert f'U{i}' in blob

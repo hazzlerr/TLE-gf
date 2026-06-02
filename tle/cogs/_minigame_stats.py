@@ -142,11 +142,14 @@ def plot_akari_stats(rows, display_name):
     return discord_file
 
 
-def _plot_akari_series(dates, values, display_name):
+def _plot_akari_series(dates, values, display_name, legend_value=None):
     """Shared body for the rating and performance graphs.
 
     Renders one line + markers, paints the Akari tier bands underneath, sets
-    a reasonable y-window, and labels the legend with the latest value.
+    a reasonable y-window, and labels the legend.  ``legend_value`` controls
+    the number shown after the name (defaults to ``values[-1]``); callers like
+    the performance graph pass the user's current rating here so the legend
+    always reads ``Name (rating)`` rather than ``Name (last point)``.
     """
     plt.clf()
     plt.axes().set_prop_cycle(gc.rating_color_cycler)
@@ -157,7 +160,9 @@ def _plot_akari_series(dates, values, display_name):
     gc.plot_rating_bg(AKARI_RANKS)
 
     plt.gcf().autofmt_xdate()
-    label = gc.StrWrap(f'{display_name} ({round(values[-1])})')
+    if legend_value is None:
+        legend_value = values[-1]
+    label = gc.StrWrap(f'{display_name} ({round(legend_value)})')
     plt.legend([label], bbox_to_anchor=(0, 1, 1, 0), loc='lower left',
                mode='expand', ncol=1)
 
@@ -177,19 +182,23 @@ def plot_akari_rating(history, display_name):
     return _plot_akari_series(dates, ratings, display_name)
 
 
-def plot_akari_performance(history, display_name):
+def plot_akari_performance(history, display_name, current_rating):
     """Plot one user's per-contest performance over time.
 
     Solo days (where the user was the only player) carry ``performance=None``
     and are dropped — performance is only defined when there's a field to seed
     against.  Raises ``ValueError`` if no contest days remain.
+
+    The legend shows the user's *current rating*, not the latest performance
+    point, to match the look of ``plot_akari_rating``.
     """
     points = [(normalize_puzzle_date(h.puzzle_date), h.performance)
               for h in history if h.performance is not None]
     if not points:
         raise ValueError('No contest days to plot performance for.')
     dates, perfs = zip(*points)
-    return _plot_akari_series(list(dates), list(perfs), display_name)
+    return _plot_akari_series(
+        list(dates), list(perfs), display_name, legend_value=current_rating)
 
 
 # ── GuessThe.Game ──────────────────────────────────────────────────────
