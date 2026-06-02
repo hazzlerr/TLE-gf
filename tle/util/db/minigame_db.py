@@ -360,7 +360,8 @@ class MinigameDbMixin:
         guild_id = str(guild_id)
         rows = [
             (guild_id, str(state.user_id), float(state.rating), int(state.games),
-             float(state.peak), float(state.last_delta), float(updated_at))
+             float(state.peak), float(state.last_delta), int(state.skip_streak),
+             int(state.last_puzzle), float(updated_at))
             for state in states
         ]
         with self.conn:
@@ -369,8 +370,9 @@ class MinigameDbMixin:
             self.conn.executemany(
                 '''
                 INSERT INTO akari_rating
-                    (guild_id, user_id, rating, games, peak, last_delta, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                    (guild_id, user_id, rating, games, peak, last_delta,
+                     skip_streak, last_puzzle, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''',
                 rows
             )
@@ -380,7 +382,8 @@ class MinigameDbMixin:
         """All rated users for a guild, strongest first."""
         return self.conn.execute(
             '''
-            SELECT user_id, rating, games, peak, last_delta, updated_at
+            SELECT user_id, rating, games, peak, last_delta, skip_streak,
+                   last_puzzle, updated_at
             FROM akari_rating
             WHERE guild_id = ?
             ORDER BY rating DESC, games DESC, user_id ASC
@@ -391,7 +394,8 @@ class MinigameDbMixin:
     def get_akari_rating(self, guild_id, user_id):
         return self.conn.execute(
             '''
-            SELECT user_id, rating, games, peak, last_delta, updated_at
+            SELECT user_id, rating, games, peak, last_delta, skip_streak,
+                   last_puzzle, updated_at
             FROM akari_rating
             WHERE guild_id = ? AND user_id = ?
             ''',

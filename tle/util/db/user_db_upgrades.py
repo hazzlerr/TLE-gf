@@ -588,3 +588,17 @@ def upgrade_1_24_0(db):
     ''')
     db.commit()
     logger.info('1.24.0: minigame_registrant and akari_rating tables created')
+
+
+@registry.register('1.25.0', 'Akari rating decay columns')
+def upgrade_1_25_0(db):
+    logger.info('1.25.0: Adding skip_streak/last_puzzle columns to akari_rating')
+    for column in ('skip_streak', 'last_puzzle'):
+        try:
+            db.execute(
+                f'ALTER TABLE akari_rating ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0')
+            logger.info('1.25.0: Added %s column', column)
+        except Exception as e:
+            logger.debug('1.25.0: %s column already exists or error: %s', column, e)
+    db.commit()
+    logger.info('1.25.0: Upgrade complete')

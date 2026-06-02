@@ -19,6 +19,9 @@ Players start at :data:`tle.constants.AKARI_START_RATING` (1200).  Ratings are
 kept as ``float`` throughout the replay (and stored as ``REAL``); callers round
 only for display.  At a quarter-strength damping, rounding every daily delta to
 an integer would floor most of them to zero and ratings would never move.
+
+Inactive players also decay back toward the default rating, with the pull
+growing the longer they stay away (see :func:`compute_ratings`).
 """
 
 import math
@@ -37,8 +40,15 @@ _SEARCH_ITERS = 25
 
 
 # Per-user result of a full replay.  ``rating``/``peak``/``last_delta`` are floats
-# (round for display); ``games`` counts only *rated* days (days with >= 2 players).
-RatingState = namedtuple('RatingState', 'user_id rating games peak last_delta')
+# (round for display); ``games`` counts only *rated* days (days with >= 2 players);
+# ``skip_streak`` is the number of consecutive recent days the user missed (drives
+# decay); ``last_puzzle`` is the last day they actually played.  The last two
+# default to 0 so callers that only care about the rating can omit them.
+RatingState = namedtuple(
+    'RatingState',
+    'user_id rating games peak last_delta skip_streak last_puzzle',
+    defaults=(0, 0),
+)
 
 
 def _result_sort_key(row):
@@ -159,7 +169,21 @@ def compute_round(ratings, ranks, damping=None):
     return {user: damping * deltas[user] for user in users}
 
 
-def compute_ratings(rows, start_rating=None, damping=None):
+def _decay_rate(skip_streak, decay_base, decay_max, decay_grace):
+    """Fraction of the gap-to-default to close on a skipped day.
+
+    The first ``decay_grace`` missed days are free (rate 0), so short breaks cost
+    nothing. After that the rate grows linearly with the streak — absence bites
+    harder the longer it lasts — up to a ceiling. E.g. base 0.002 / max 0.05 /
+    grace 3 ⇒ 0% for the first 3 skipped days, then 0.2% of the gap on day 4,
+    rising to a 5% cap.
+    """
+    effective_streak = max(0, skip_streak - decay_grace)
+    return min(decay_max, decay_base * effective_streak)
+
+
+def compute_ratings(rows, start_rating=None, damping=None,
+                    decay_base=None, decay_max=None, decay_grace=None):
     """Replay every Akari day in order and return ``{user_id: RatingState}``.
 
     ``rows`` is any iterable of result rows, each exposing ``user_id``,
@@ -171,20 +195,38 @@ def compute_ratings(rows, start_rating=None, damping=None):
     Days are processed by ascending ``puzzle_number``.  A newly seen player is
     seeded at ``start_rating`` (default 1200).  Days with fewer than two players
     are not a contest and change nothing (but still seed any newcomer).
+
+    **Inactivity decay:** for every day present in the data, each previously seen
+    player who did *not* submit that day has their consecutive-skip streak bumped
+    and their rating pulled toward ``start_rating`` by :func:`_decay_rate` of the
+    remaining gap — free for the first few days (grace), then stronger the longer
+    they stay away, and symmetric (under-1200 ratings drift back up).  Playing
+    resets the streak.
+    The "days" counted are days the guild was active (puzzles in the data), so
+    decay advances as others keep playing, not by wall-clock; it is therefore a
+    pure, deterministic function of the result rows.
     """
     if start_rating is None:
         start_rating = float(constants.AKARI_START_RATING)
     if damping is None:
         damping = constants.AKARI_RATING_DAMPING
+    if decay_base is None:
+        decay_base = constants.AKARI_DECAY_BASE
+    if decay_max is None:
+        decay_max = constants.AKARI_DECAY_MAX
+    if decay_grace is None:
+        decay_grace = constants.AKARI_DECAY_GRACE
 
     by_puzzle = {}
     for row in rows:
         by_puzzle.setdefault(int(row.puzzle_number), []).append(row)
 
-    ratings = {}      # user_id -> float
-    games = {}        # user_id -> int (rated days only)
-    peak = {}         # user_id -> float
-    last_delta = {}   # user_id -> float
+    ratings = {}       # user_id -> float
+    games = {}         # user_id -> int (rated days only)
+    peak = {}          # user_id -> float
+    last_delta = {}    # user_id -> float (last change, contest or decay)
+    skip_streak = {}   # user_id -> int (consecutive recent days missed)
+    last_puzzle = {}   # user_id -> int (last day actually played)
 
     for puzzle_number in sorted(by_puzzle):
         # One row per user per day; the DB already guarantees this, but dedupe
@@ -193,26 +235,42 @@ def compute_ratings(rows, start_rating=None, damping=None):
         for row in by_puzzle[puzzle_number]:
             day_rows.setdefault(str(row.user_id), row)
 
-        for user_id in day_rows:
+        for user_id in sorted(day_rows):
             if user_id not in ratings:
                 ratings[user_id] = start_rating
                 games[user_id] = 0
                 peak[user_id] = start_rating
                 last_delta[user_id] = 0.0
+                skip_streak[user_id] = 0
+                last_puzzle[user_id] = puzzle_number
 
-        if len(day_rows) < 2:
-            continue  # solo day — no contest
+        # Contest among the day's players (needs at least two to be a contest).
+        if len(day_rows) >= 2:
+            day_ratings = {user_id: ratings[user_id] for user_id in day_rows}
+            ranks = rank_participants(day_rows.values())
+            deltas = compute_round(day_ratings, ranks, damping=damping)
+            for user_id, delta in deltas.items():
+                ratings[user_id] += delta
+                games[user_id] += 1
+                last_delta[user_id] = delta
+                if ratings[user_id] > peak[user_id]:
+                    peak[user_id] = ratings[user_id]
 
-        day_ratings = {user_id: ratings[user_id] for user_id in day_rows}
-        ranks = rank_participants(day_rows.values())
-        deltas = compute_round(day_ratings, ranks, damping=damping)
+        # Everyone who showed up resets their skip streak and records the day.
+        for user_id in day_rows:
+            skip_streak[user_id] = 0
+            last_puzzle[user_id] = puzzle_number
 
-        for user_id, delta in deltas.items():
+        # Absent previously-seen players accrue a skipped day and decay toward
+        # the default rating (independent per user, so order is irrelevant).
+        for user_id in ratings:
+            if user_id in day_rows:
+                continue
+            skip_streak[user_id] += 1
+            delta = (start_rating - ratings[user_id]) * _decay_rate(
+                skip_streak[user_id], decay_base, decay_max, decay_grace)
             ratings[user_id] += delta
-            games[user_id] += 1
             last_delta[user_id] = delta
-            if ratings[user_id] > peak[user_id]:
-                peak[user_id] = ratings[user_id]
 
     return {
         user_id: RatingState(
@@ -221,6 +279,8 @@ def compute_ratings(rows, start_rating=None, damping=None):
             games=games[user_id],
             peak=peak[user_id],
             last_delta=last_delta[user_id],
+            skip_streak=skip_streak[user_id],
+            last_puzzle=last_puzzle[user_id],
         )
         for user_id in ratings
     }

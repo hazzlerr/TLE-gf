@@ -362,13 +362,15 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
         ''')
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS akari_rating (
-                guild_id   TEXT NOT NULL,
-                user_id    TEXT NOT NULL,
-                rating     REAL NOT NULL,
-                games      INTEGER NOT NULL DEFAULT 0,
-                peak       REAL NOT NULL,
-                last_delta REAL NOT NULL DEFAULT 0,
-                updated_at REAL NOT NULL,
+                guild_id    TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                rating      REAL NOT NULL,
+                games       INTEGER NOT NULL DEFAULT 0,
+                peak        REAL NOT NULL,
+                last_delta  REAL NOT NULL DEFAULT 0,
+                skip_streak INTEGER NOT NULL DEFAULT 0,
+                last_puzzle INTEGER NOT NULL DEFAULT 0,
+                updated_at  REAL NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
             )
         ''')

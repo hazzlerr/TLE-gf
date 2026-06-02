@@ -7,7 +7,9 @@ from types import SimpleNamespace
 
 from tle import constants
 from tle.util import akari_rating
-from tle.util.akari_rating import compute_ratings, compute_round, rank_participants
+from tle.util.akari_rating import (
+    RatingState, compute_ratings, compute_round, rank_participants,
+)
 
 
 def _row(user_id, puzzle_number, *, perfect=False, accuracy=0, time_seconds=100):
@@ -160,3 +162,77 @@ class TestComputeRatings:
         # Guard the perf-vs-precision knob: replaying on every result change must
         # stay cheap, so the binary search stays well under CF's textbook depth.
         assert akari_rating._SEARCH_ITERS <= 30
+
+
+class TestDecay:
+    @staticmethod
+    def _winner_then_absent(absent_days):
+        # 'a' beats 'b' on days 1-3 (a climbs above 1200), then 'a' is absent
+        # while 'b' and 'c' keep playing days 4..(3+absent_days).
+        rows = []
+        for puzzle in range(1, 4):
+            rows += _day(puzzle, [('a', True, 100, 30), ('b', False, 60, 200)])
+        for puzzle in range(4, 4 + absent_days):
+            rows += _day(puzzle, [('b', True, 100, 40), ('c', False, 50, 200)])
+        return compute_ratings(rows)['a']
+
+    def test_ratingstate_decay_fields_default_to_zero(self):
+        state = RatingState('a', 1300.0, 4, 1300.0, 5.0)
+        assert state.skip_streak == 0
+        assert state.last_puzzle == 0
+
+    def test_short_absence_within_grace_does_not_decay(self):
+        active = self._winner_then_absent(0)
+        grace = self._winner_then_absent(constants.AKARI_DECAY_GRACE)
+        assert grace.skip_streak == constants.AKARI_DECAY_GRACE
+        assert abs(grace.rating - active.rating) < 1e-9  # free during grace
+
+    def test_decay_starts_after_grace(self):
+        active = self._winner_then_absent(0)
+        past_grace = self._winner_then_absent(constants.AKARI_DECAY_GRACE + 1)
+        assert past_grace.rating < active.rating  # first real decay applied
+        assert past_grace.rating > 1200           # never crosses the default
+
+    def test_decay_strengthens_with_more_skips(self):
+        early = self._winner_then_absent(constants.AKARI_DECAY_GRACE + 2)
+        late = self._winner_then_absent(constants.AKARI_DECAY_GRACE + 11)
+        assert late.skip_streak > early.skip_streak
+        # The longer streak removes more rating on its most recent skipped day.
+        assert abs(late.last_delta) > abs(early.last_delta)
+
+    def test_decay_pulls_high_rating_toward_default(self):
+        active = self._winner_then_absent(0)
+        long_absent = self._winner_then_absent(40)
+        assert 1200 < long_absent.rating < active.rating
+        assert long_absent.skip_streak == 40
+        assert long_absent.last_puzzle == 3  # last day actually played
+
+    def test_decay_reverts_low_rating_upward(self):
+        rows = []
+        for puzzle in range(1, 6):
+            rows += _day(puzzle, [('d', False, 10, 300), ('e', True, 100, 20)])
+        low = compute_ratings(rows)['d'].rating
+        assert low < 1200
+        for puzzle in range(6, 45):
+            rows += _day(puzzle, [('e', True, 100, 20), ('f', False, 40, 200)])
+        reverted = compute_ratings(rows)['d']
+        assert low < reverted.rating < 1200  # drifts back up toward the default
+
+    def test_playing_resets_skip_streak(self):
+        rows = []
+        for puzzle in range(1, 4):
+            rows += _day(puzzle, [('a', True, 100, 30), ('b', False, 60, 200)])
+        for puzzle in range(4, 12):
+            rows += _day(puzzle, [('b', True, 100, 40), ('c', False, 50, 200)])
+        rows += _day(12, [('a', True, 100, 30), ('b', False, 60, 200)])  # a returns
+        a = compute_ratings(rows)['a']
+        assert a.skip_streak == 0
+        assert a.last_puzzle == 12
+
+    def test_active_players_never_decay(self):
+        rows = []
+        for puzzle in range(1, 11):
+            rows += _day(puzzle, [('a', True, 100, 30), ('b', True, 100, 60)])
+        states = compute_ratings(rows)
+        assert states['a'].skip_streak == 0
+        assert states['b'].skip_streak == 0

@@ -117,13 +117,15 @@ class FakeMinigameDb(MinigameDbMixin):
         ''')
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS akari_rating (
-                guild_id   TEXT NOT NULL,
-                user_id    TEXT NOT NULL,
-                rating     REAL NOT NULL,
-                games      INTEGER NOT NULL DEFAULT 0,
-                peak       REAL NOT NULL,
-                last_delta REAL NOT NULL DEFAULT 0,
-                updated_at REAL NOT NULL,
+                guild_id    TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                rating      REAL NOT NULL,
+                games       INTEGER NOT NULL DEFAULT 0,
+                peak        REAL NOT NULL,
+                last_delta  REAL NOT NULL DEFAULT 0,
+                skip_streak INTEGER NOT NULL DEFAULT 0,
+                last_puzzle INTEGER NOT NULL DEFAULT 0,
+                updated_at  REAL NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
             )
         ''')
@@ -1800,6 +1802,13 @@ class TestRatingDb:
         assert len(db.get_akari_ratings(2)) == 1
         assert db.get_akari_rating(2, 'b').rating == 1400.0
 
+    def test_replace_persists_decay_fields(self, db):
+        state = RatingState('a', 1300.0, 4, 1320.0, -2.5, 7, 612)
+        db.replace_akari_ratings(1, [state], 1000.0)
+        row = db.get_akari_rating(1, 'a')
+        assert row.skip_streak == 7
+        assert row.last_puzzle == 612
+
 
 class TestCogRating:
     @staticmethod
@@ -1811,6 +1820,12 @@ class TestCogRating:
     def _akari_msg(msg_id, user_id, body, guild=1, channel=10):
         return _FakeMessage(msg_id, guild, channel, user_id,
                             f'Daily Akari 445\n✅2026-03-26✅\n{body}\n'
+                            f'https://dailyakari.com/')
+
+    @staticmethod
+    def _akari_msg_n(msg_id, user_id, puzzle, body, guild=1, channel=10):
+        return _FakeMessage(msg_id, guild, channel, user_id,
+                            f'Daily Akari {puzzle}\n✅2026-03-26✅\n{body}\n'
                             f'https://dailyakari.com/')
 
     def test_results_persist_rating_snapshot(self, db, monkeypatch):
@@ -1853,6 +1868,30 @@ class TestCogRating:
         # 888's only result is gone -> they fall out of the rebuilt snapshot.
         users = {r.user_id for r in db.get_akari_ratings(1)}
         assert users == {'999'}
+
+    def test_absent_user_decays_in_snapshot(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._enable(db)
+        cog = Minigames(bot=None)
+
+        async def _inner():
+            # Day 500: A (perfect) beats B (partial) -> A above 1200.
+            await cog.on_message(self._akari_msg_n(1, 999, 500, '\U0001f31f Perfect! \U0001f553 1:29'))
+            await cog.on_message(self._akari_msg_n(2, 888, 500, '\U0001f3af 96% \U0001f553 1:00'))
+            # Days 501-515: B and C play; A is absent for 15 community days.
+            mid = 3
+            for puzzle in range(501, 516):
+                await cog.on_message(self._akari_msg_n(mid, 888, puzzle, '\U0001f31f Perfect! \U0001f553 0:40'))
+                mid += 1
+                await cog.on_message(self._akari_msg_n(mid, 777, puzzle, '\U0001f3af 50% \U0001f553 3:00'))
+                mid += 1
+        asyncio.run(_inner())
+
+        a = db.get_akari_rating(1, '999')
+        assert a is not None
+        assert a.skip_streak == 15   # missed puzzles 501..515
+        assert a.last_puzzle == 500  # last day actually played
+        assert a.rating > 1200       # decayed toward, but never past, the default
 
     def test_recompute_never_raises_without_rating_table(self, monkeypatch):
         # Ingestion must survive even if the rating recompute fails internally.
@@ -1901,3 +1940,22 @@ class TestRatingDisplayNoLeak:
         # (#, name, handle, result, time) — 'perfect'/time only, no 1200-ish number.
         assert out[0][3] == 'perfect'
         assert '1200' not in ' '.join(str(c) for c in out[0])
+
+    def test_rating_debug_dump_shows_all_with_exact_values(self, monkeypatch):
+        from tle.cogs.minigames import _format_akari_rating_debug
+        monkeypatch.setattr(cf_common, 'user_db', None)  # handles render as '-'
+        guild = _FakeGuild(1, members=[
+            _FakeDiscordMember(999, 'Alice'),
+            _FakeDiscordMember(888, 'Bob'),
+        ])
+        rating_rows = [
+            SimpleNamespace(user_id='999', rating=1316.12, games=5, peak=1316.12,
+                            last_delta=-1.73, skip_streak=17, last_puzzle=3),
+            SimpleNamespace(user_id='888', rating=1090.40, games=5, peak=1200.0,
+                            last_delta=2.0, skip_streak=0, last_puzzle=20),
+        ]
+        out = _format_akari_rating_debug(guild, rating_rows, registrants={'999'})
+        assert 'Alice' in out and 'Bob' in out
+        assert '1316.1' in out   # exact rating (1 dp), not rounded to an integer
+        assert '17' in out       # skip streak surfaced for testing
+        assert '*' in out        # registered marker

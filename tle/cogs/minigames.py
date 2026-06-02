@@ -359,6 +359,47 @@ def _get_akari_rating_table_image_file(guild, rating_rows, registrants,
         header=('#', 'Name', 'Handle', 'Rating', 'Games'))
 
 
+def _format_akari_rating_debug(guild, rating_rows, registrants):
+    """Plain-text dump of every rated user's exact state (admin testing).
+
+    Shows unrounded rating plus the decay-relevant fields (skip streak, last day
+    played) so an admin can verify ratings and inactivity decay. ``*`` marks
+    registered users.
+    """
+    style = table.Style('{:<}  {:>}  {:>}  {:>}  {:>}  {:>}  {:>}')
+    t = table.Table(style)
+    t += table.Header('Name', 'Rating', 'Games', 'Peak', 'LastD', 'Skip', 'Played')
+    t += table.Line()
+    for row in rating_rows:
+        name = _safe_user_name(guild, row.user_id).replace('`', '')
+        if row.user_id in registrants:
+            name = f'{name} *'
+        t += table.Data(
+            name[:20],
+            f'{row.rating:.1f}',
+            str(row.games),
+            f'{row.peak:.0f}',
+            f'{row.last_delta:+.1f}',
+            str(row.skip_streak),
+            str(row.last_puzzle),
+        )
+    return str(t)
+
+
+def _chunk_text_lines(text, limit):
+    """Split ``text`` into <=``limit``-char chunks on line boundaries."""
+    chunks, current, current_len = [], [], 0
+    for line in text.split('\n'):
+        if current and current_len + len(line) + 1 > limit:
+            chunks.append('\n'.join(current))
+            current, current_len = [], 0
+        current.append(line)
+        current_len += len(line) + 1
+    if current:
+        chunks.append('\n'.join(current))
+    return chunks
+
+
 class Minigames(commands.Cog):
     GAMES = {
         'akari': AKARI_GAME,
@@ -988,6 +1029,22 @@ class Minigames(commands.Cog):
             ctx.guild, rows, registrants)
         await ctx.send(file=discord_file)
 
+    async def _cmd_akari_ratings_debug(self, ctx):
+        """Admin testing dump: ALL rated users with exact, unrounded values."""
+        self._require_enabled(ctx.guild.id, AKARI_GAME)
+        rows = cf_common.user_db.get_akari_ratings(ctx.guild.id)
+        if not rows:
+            raise MinigameCogError(
+                f'No {AKARI_GAME.display_name} ratings yet. They appear once '
+                f'players post results.')
+        registrants = cf_common.user_db.get_minigame_registrants(ctx.guild.id)
+        text = _format_akari_rating_debug(ctx.guild, rows, registrants)
+        header = (f'**{AKARI_GAME.display_name} ratings — {len(rows)} players** '
+                  f'(* = registered)')
+        for index, chunk in enumerate(_chunk_text_lines(text, 1900)):
+            prefix = f'{header}\n' if index == 0 else ''
+            await ctx.send(f'{prefix}```\n{chunk}\n```')
+
     _STATS_PLOTTERS = {
         'akari': plot_akari_stats,
         'guessgame': plot_guessgame_stats,
@@ -1308,6 +1365,12 @@ class Minigames(commands.Cog):
         self._recompute_akari_ratings(ctx.guild.id)
         await ctx.send(embed=discord_common.embed_success(
             f'{AKARI_GAME.display_name} ratings recomputed.'))
+
+    @akari_ratings.command(name='debug', aliases=['all', 'raw'],
+                           brief='(Admin) Dump exact ratings for all users')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def akari_ratings_debug(self, ctx):
+        await self._cmd_akari_ratings_debug(ctx)
 
     # ── GuessGame commands: ;minigames guessgame … ──────────────────────
 

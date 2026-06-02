@@ -371,9 +371,30 @@ class TestUpgrade124:
         upgrade_1_24_0(db)  # CREATE ... IF NOT EXISTS -> safe to re-run
 
 
+class TestUpgrade125:
+    def test_adds_decay_columns(self, db):
+        from tle.util.db.user_db_upgrades import upgrade_1_24_0, upgrade_1_25_0
+        upgrade_1_24_0(db)   # creates akari_rating without the decay columns
+        upgrade_1_25_0(db)   # adds skip_streak / last_puzzle
+        db.execute(
+            "INSERT INTO akari_rating (guild_id, user_id, rating, games, peak, "
+            "last_delta, skip_streak, last_puzzle, updated_at) "
+            "VALUES ('1', '9', 1300, 2, 1310, -1.5, 4, 500, 123.0)")
+        row = db.execute(
+            'SELECT skip_streak, last_puzzle FROM akari_rating').fetchone()
+        assert row.skip_streak == 4
+        assert row.last_puzzle == 500
+
+    def test_idempotent(self, db):
+        from tle.util.db.user_db_upgrades import upgrade_1_24_0, upgrade_1_25_0
+        upgrade_1_24_0(db)
+        upgrade_1_25_0(db)
+        upgrade_1_25_0(db)  # ALTER guarded by try/except -> safe to re-run
+
+
 class TestFreshDbSchema:
     """A fresh DB stamps the latest version WITHOUT running migrations, so every
-    migration table must also be created by create_tables()."""
+    migration table/column must also be created by create_tables()."""
 
     def test_fresh_userdbconn_has_rating_tables(self):
         from tle.util.db.user_db_conn import UserDbConn
@@ -381,12 +402,13 @@ class TestFreshDbSchema:
 
         conn = UserDbConn(':memory:')
         try:
-            # These would raise "no such table" if only the 1.24.0 migration
-            # (which a fresh DB never runs) created them.
+            # These would raise "no such table"/"no such column" if only the
+            # 1.24.0/1.25.0 migrations (which a fresh DB never runs) created them.
             conn.conn.execute('SELECT guild_id, user_id, registered_at '
                               'FROM minigame_registrant').fetchall()
             conn.conn.execute('SELECT guild_id, user_id, rating, games, peak, '
-                              'last_delta, updated_at FROM akari_rating').fetchall()
+                              'last_delta, skip_streak, last_puzzle, updated_at '
+                              'FROM akari_rating').fetchall()
             assert registry.get_current_version(conn.conn) == registry.latest_version
         finally:
             conn.conn.close()
