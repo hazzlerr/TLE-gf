@@ -1963,12 +1963,12 @@ class TestRatingDisplayNoLeak:
             SimpleNamespace(user_id='888', rating=1090.4, games=5, peak=1200.0, last_delta=-3.0),
         ]
         out = _akari_rating_table_rows(guild, rating_rows, registrants={'999'})
-        # columns: (#, name, handle, rating, games)
+        # columns: (#, name, handle, "rating · rank", games)
         assert out[0][0] == 1
         assert '\N{CHECK MARK}' in out[0][1]       # registered marked
         assert '\N{CHECK MARK}' not in out[1][1]   # shadow-rated, not marked
-        assert out[0][3] == '1316'                 # rounded for display
-        assert out[1][3] == '1090'
+        assert out[0][3] == '1316 · CM'            # rounded for display + tier abbr
+        assert out[1][3] == '1090 · P'
         assert out[0][4] == '5'
 
     def test_puzzle_result_rows_carry_no_rating(self, monkeypatch):

@@ -32,7 +32,7 @@ from tle.cogs._minigame_stats import (
     plot_akari_rating, plot_akari_stats, plot_guessgame_stats,
 )
 from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
-from tle.util.akari_rating import compute_ratings
+from tle.util.akari_rating import compute_ratings, rank_for_rating
 
 logger = logging.getLogger(__name__)
 
@@ -329,21 +329,25 @@ def _get_akari_puzzle_table_image_file(guild, rows, title):
 
 
 def _akari_rating_table_rows(guild, rating_rows, registrants):
-    """Build display rows (#, Name[✓], Handle, Rating, Games) for the admin list.
+    """Build display rows (#, Name[✓], Handle, Rating · Rank, Games) for the admin list.
 
     A ``✓`` after the name marks users who opted in via ``;mg register``; the
-    rest are shadow-rated.  ``rating`` is rounded only here for display.
+    rest are shadow-rated.  ``rating`` is rounded only here for display, and the
+    rank abbreviation (N/P/S/E/CM/…) is appended so scanners see the tier without
+    a separate column.
     """
     rows = []
     for index, row in enumerate(rating_rows, start=1):
         name = _safe_user_name(guild, row.user_id)
         if row.user_id in registrants:
             name = f'{name} \N{CHECK MARK}'
+        rating = round(row.rating)
+        rank = rank_for_rating(rating)
         rows.append((
             index,
             name,
             _safe_cf_handle(guild, row.user_id),
-            str(round(row.rating)),
+            f'{rating} · {rank.title_abbr}',
             str(row.games),
         ))
     return rows
@@ -368,17 +372,20 @@ def _format_akari_rating_debug(guild, rating_rows, registrants):
     played) so an admin can verify ratings and inactivity decay. ``*`` marks
     registered users.
     """
-    style = table.Style('{:<}  {:>}  {:>}  {:>}  {:>}  {:>}  {:>}')
+    style = table.Style('{:<}  {:>}  {:<}  {:>}  {:>}  {:>}  {:>}  {:>}')
     t = table.Table(style)
-    t += table.Header('Name', 'Rating', 'Games', 'Peak', 'LastD', 'Skip', 'Played')
+    t += table.Header(
+        'Name', 'Rating', 'Rk', 'Games', 'Peak', 'LastD', 'Skip', 'Played')
     t += table.Line()
     for row in rating_rows:
         name = _safe_user_name(guild, row.user_id).replace('`', '')
         if row.user_id in registrants:
             name = f'{name} *'
+        rank = rank_for_rating(round(row.rating))
         t += table.Data(
             name[:20],
             f'{row.rating:.1f}',
+            rank.title_abbr,
             str(row.games),
             f'{row.peak:.0f}',
             f'{row.last_delta:+.1f}',
@@ -1064,14 +1071,18 @@ class Minigames(commands.Cog):
                 f'`{_safe_member_name(member)}` has no rated '
                 f'{AKARI_GAME.display_name} days to plot yet.')
 
-        discord_file = plot_akari_rating(history, _safe_member_name(member))
+        rating = round(row.rating)
+        rank = rank_for_rating(rating)
+        peak_rank = rank_for_rating(round(row.peak))
+        discord_file = plot_akari_rating(
+            history, _safe_member_name(member), rank.title_abbr)
         embed = discord.Embed(
             title=f'{AKARI_GAME.display_name} rating — {_safe_member_name(member)}',
-            color=discord_common.random_cf_color(),
+            color=rank.color_embed,
         )
-        embed.add_field(name='Rating', value=str(round(row.rating)))
+        embed.add_field(name='Rating', value=f'{rating} ({rank.title})')
+        embed.add_field(name='Peak', value=f'{round(row.peak)} ({peak_rank.title})')
         embed.add_field(name='Games', value=str(row.games))
-        embed.add_field(name='Peak', value=str(round(row.peak)))
         embed.add_field(name='Last change', value=f'{row.last_delta:+.0f}')
         discord_common.attach_image(embed, discord_file)
         await ctx.send(embed=embed, file=discord_file)

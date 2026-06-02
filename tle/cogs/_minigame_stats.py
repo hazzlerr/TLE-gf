@@ -7,8 +7,8 @@ import numpy as np
 from matplotlib import pyplot as plt
 from matplotlib import dates as mdates
 
-from tle.util import codeforces_api as cf
 from tle.util import graph_common as gc
+from tle.util.akari_rating import AKARI_RANKS
 from tle.cogs._minigame_common import (
     compute_streak, compute_longest_streak, pick_best_results,
     normalize_puzzle_date, format_duration,
@@ -142,7 +142,7 @@ def plot_akari_stats(rows, display_name):
     return discord_file
 
 
-def plot_akari_rating(history, display_name):
+def plot_akari_rating(history, display_name, rank_abbr=None):
     """Plot one user's Daily Akari rating over time (``;plot rating`` style).
 
     ``history`` is the list of :class:`HistoryPoint` from
@@ -158,17 +158,20 @@ def plot_akari_rating(history, display_name):
     plt.plot(dates, ratings, linestyle='-', marker='o', markersize=3,
              markerfacecolor='white', markeredgewidth=0.5)
 
-    # CF rating bands give the same coloured-tier look as ;plot rating.
+    # Akari rating bands give the same coloured-tier look as ;plot rating.
     # Pad the y-window first so plot_rating_bg's axhspan covers it cleanly.
     min_rating = min(ratings)
     max_rating = max(ratings)
     plt.ylim(min(min_rating - 50, 1100), max(max_rating + 50, 1500))
-    gc.plot_rating_bg(cf.RATED_RANKS)
+    gc.plot_rating_bg(AKARI_RANKS)
 
     plt.gcf().autofmt_xdate()
-    label = gc.StrWrap(f'{display_name} ({round(ratings[-1])})')
-    plt.legend([label], bbox_to_anchor=(0, 1, 1, 0), loc='lower left',
-               mode='expand', ncol=1)
+    current = round(ratings[-1])
+    legend_text = (f'{display_name} ({current}, {rank_abbr})'
+                   if rank_abbr is not None else
+                   f'{display_name} ({current})')
+    plt.legend([gc.StrWrap(legend_text)], bbox_to_anchor=(0, 1, 1, 0),
+               loc='lower left', mode='expand', ncol=1)
 
     return gc.get_current_figure_as_file()
 
