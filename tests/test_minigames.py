@@ -1893,6 +1893,31 @@ class TestCogRating:
         assert a.last_puzzle == 500  # last day actually played
         assert a.rating > 1200       # decayed toward, but never past, the default
 
+    def test_debug_dump_command_sends_all_users(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._enable(db)
+        cog = Minigames(bot=None)
+
+        async def _seed():
+            await cog.on_message(self._akari_msg(1, 999, '\U0001f31f Perfect! \U0001f553 1:29'))
+            await cog.on_message(self._akari_msg(2, 888, '\U0001f3af 96% \U0001f553 1:00'))
+        asyncio.run(_seed())
+
+        sent = []
+
+        async def _send(content=None, **kwargs):
+            sent.append(content or '')
+        ctx = SimpleNamespace(
+            guild=_FakeGuild(1, members=[
+                _FakeDiscordMember(999, 'Alice'), _FakeDiscordMember(888, 'Bob')]),
+            send=_send)
+        asyncio.run(cog._cmd_akari_ratings_debug(ctx))
+
+        blob = '\n'.join(sent)
+        assert '```' in blob                     # rendered as a code block
+        assert 'Alice' in blob and 'Bob' in blob  # ALL users present
+        assert '2 players' in blob
+
     def test_recompute_never_raises_without_rating_table(self, monkeypatch):
         # Ingestion must survive even if the rating recompute fails internally.
         class _NoRatingDb(FakeMinigameDb):
