@@ -59,7 +59,10 @@ REMOTE_SNAPSHOT = _cfg("TLE_REMOTE_SNAPSHOT", "/tmp/tle_user_db_snapshot.db")
 KVS_KEY = _cfg("TLE_BACKUP_KVS_KEY", "last_backup_at")
 SSH_TIMEOUT = int(_cfg("TLE_SSH_TIMEOUT", "30"))
 KNOWN_HOSTS = _cfg("TLE_KNOWN_HOSTS", os.path.join(_HERE, "known_hosts"))
-LOCKFILE = _cfg("TLE_LOCKFILE", os.path.join(tempfile.gettempdir(), "tle-backup.lock"))
+# Resolve the temp default lazily (short-circuit): tempfile.gettempdir() probes
+# /tmp etc., which fails under a sandbox with no writable /tmp — only fall back to
+# it when TLE_LOCKFILE is unset.
+LOCKFILE = os.environ.get("TLE_LOCKFILE") or os.path.join(tempfile.gettempdir(), "tle-backup.lock")
 
 
 def connect():

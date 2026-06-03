@@ -13,6 +13,7 @@ TimeoutStartSec=600
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=read-only
-PrivateTmp=false
+# Private writable /tmp so tempfile/locking work even under ProtectSystem=strict.
+PrivateTmp=true
 # Allow writing only where backups + the pinned known_hosts live.
 ReadWritePaths=/var/backups/tle-gf /opt/tle-backup-service
