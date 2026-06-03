@@ -15,6 +15,7 @@ from tle import constants
 from tle.util import codeforces_common as cf_common
 from tle.util.codeforces_common import pretty_time_format
 from tle.util import discord_common
+from tle.util import tasks
 from tle.cogs._starboard_helpers import _parse_jump_url
 
 logger = logging.getLogger(__name__)
@@ -22,6 +23,20 @@ logger = logging.getLogger(__name__)
 _KNOWN_FEATURES = ['starboard_leaderboard', 'akari', 'guessgame', 'migration_ops']
 
 RESTART = 42
+
+# --- Off-site backup staleness watchdog -------------------------------------
+# The external tle-backup-service stamps kvs[_BACKUP_TS_KEY] (unix epoch) after
+# each successful backup. This watchdog pings admins in the logging channel when
+# that stamp goes stale, but ONLY once at least one backup has ever been
+# recorded -- a never-backed-up bot stays silent. The ping repeats at most every
+# _BACKUP_ALERT_INTERVAL while still stale, and resets the moment a fresh backup
+# lands so the next outage alerts immediately.
+_BACKUP_TS_KEY = 'last_backup_at'             # must match tle-backup-service KVS_KEY
+_BACKUP_ALERT_PING_KEY = 'backup_alert_last_ping_at'
+_BACKUP_ALERT_DISABLED_KEY = 'backup_alert_disabled'
+_BACKUP_STALE_THRESHOLD = 6 * 60 * 60         # alert if no backup within 6h
+_BACKUP_ALERT_INTERVAL = 6 * 60 * 60          # re-ping at most this often while stale
+_BACKUP_WATCHDOG_POLL = 30 * 60               # how often the watchdog checks
 
 
 # Adapted from numpy sources.
@@ -140,10 +155,61 @@ class Meta(commands.Cog):
         """Report when the off-site backup service last copied user.db."""
         await self._show_backup_status(ctx)
 
+    @backup.group(name='alert', brief='Admin alerts when backups go stale',
+                  invoke_without_command=True)
+    async def backup_alert(self, ctx):
+        """Show or change backup-staleness admin alerts (changes need Admin)."""
+        await self._show_backup_alert_status(ctx)
+
+    @backup_alert.command(name='on', brief='Enable backup-staleness alerts')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def backup_alert_on(self, ctx):
+        """Re-enable admin pings when no backup has run recently."""
+        cf_common.user_db.kvs_delete(_BACKUP_ALERT_DISABLED_KEY)
+        logger.info(f'CMD backup alert on: by user={ctx.author.id}')
+        await ctx.send(embed=discord_common.embed_success(
+            'Backup-staleness alerts **enabled**.'))
+
+    @backup_alert.command(name='off', brief='Disable backup-staleness alerts')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def backup_alert_off(self, ctx):
+        """Stop admin pings about stale backups."""
+        cf_common.user_db.kvs_set(_BACKUP_ALERT_DISABLED_KEY, '1')
+        logger.info(f'CMD backup alert off: by user={ctx.author.id}')
+        await ctx.send(embed=discord_common.embed_success(
+            'Backup-staleness alerts **disabled**.'))
+
+    @backup_alert.command(name='status', brief='Show the current alert setting')
+    async def backup_alert_status(self, ctx):
+        """Show whether backup-staleness alerts are enabled."""
+        await self._show_backup_alert_status(ctx)
+
+    async def _show_backup_alert_status(self, ctx):
+        disabled = cf_common.user_db.kvs_get(_BACKUP_ALERT_DISABLED_KEY)
+        state = 'disabled' if disabled else 'enabled'
+        lines = [
+            f'Backup-staleness alerts are **{state}**.',
+            f'When enabled, admins are pinged in the logging channel if no '
+            f'successful backup has run in '
+            f'{pretty_time_format(_BACKUP_STALE_THRESHOLD)}, re-pinging every '
+            f'{pretty_time_format(_BACKUP_ALERT_INTERVAL)} while still stale.',
+        ]
+        if not os.environ.get('LOGGING_COG_CHANNEL_ID'):
+            lines.append('\n\N{WARNING SIGN} `LOGGING_COG_CHANNEL_ID` is not set, '
+                         'so alerts cannot be delivered.')
+        last_ping = cf_common.user_db.kvs_get(_BACKUP_ALERT_PING_KEY)
+        if last_ping:
+            try:
+                ago = pretty_time_format(max(0, int(time.time() - float(last_ping))))
+                lines.append(f'Last alert fired **{ago}** ago.')
+            except (TypeError, ValueError):
+                pass
+        await ctx.send(embed=discord_common.embed_neutral('\n'.join(lines)))
+
     async def _show_backup_status(self, ctx):
         # 'last_backup_at' is written by the external tle-backup-service after each
         # successful backup; the key string must stay in sync with that service.
-        val = cf_common.user_db.kvs_get('last_backup_at')
+        val = cf_common.user_db.kvs_get(_BACKUP_TS_KEY)
         if not val:
             await ctx.send(embed=discord_common.embed_alert(
                 'No successful backup has been recorded yet.'))
@@ -159,6 +225,83 @@ class Meta(commands.Cog):
         ago = pretty_time_format(max(0, int(time.time() - ts)))
         await ctx.send(embed=discord_common.embed_success(
             f'Last successful backup: **{when}** ({ago} ago).'))
+
+    @commands.Cog.listener(name='on_ready')
+    @discord_common.once
+    async def _start_backup_watchdog(self):
+        """Launch the backup-staleness watchdog once the DB is available."""
+        for _ in range(30):
+            if cf_common.user_db is not None:
+                break
+            await asyncio.sleep(1)
+        if cf_common.user_db is None:
+            logger.warning('backup watchdog: user_db unavailable, not starting.')
+            return
+        self._backup_watchdog_task.start()
+
+    @tasks.task_spec(name='BackupStalenessWatchdog',
+                     waiter=tasks.Waiter.fixed_delay(_BACKUP_WATCHDOG_POLL))
+    async def _backup_watchdog_task(self, _):
+        db = cf_common.user_db
+        if db is None or db.kvs_get(_BACKUP_ALERT_DISABLED_KEY):
+            return
+        raw = db.kvs_get(_BACKUP_TS_KEY)
+        if not raw:
+            # No backup has ever been recorded -- stay silent until one runs.
+            return
+        try:
+            last_backup = float(raw)
+        except (TypeError, ValueError):
+            return
+        now = time.time()
+        if now - last_backup <= _BACKUP_STALE_THRESHOLD:
+            # Healthy again: clear ping state so the next outage alerts at once.
+            db.kvs_delete(_BACKUP_ALERT_PING_KEY)
+            return
+        last_ping = db.kvs_get(_BACKUP_ALERT_PING_KEY)
+        if last_ping:
+            try:
+                if now - float(last_ping) < _BACKUP_ALERT_INTERVAL:
+                    return  # Already pinged recently; wait out the interval.
+            except (TypeError, ValueError):
+                pass
+        if await self._send_backup_alert(last_backup, now):
+            db.kvs_set(_BACKUP_ALERT_PING_KEY, str(now))
+
+    async def _send_backup_alert(self, last_backup, now):
+        """Ping admins in the logging channel. Returns True if a message was sent."""
+        channel_id = os.environ.get('LOGGING_COG_CHANNEL_ID')
+        if not channel_id:
+            logger.warning('backup watchdog: LOGGING_COG_CHANNEL_ID not set; cannot alert.')
+            return False
+        try:
+            channel = self.bot.get_channel(int(channel_id))
+        except (TypeError, ValueError):
+            logger.warning('backup watchdog: invalid LOGGING_COG_CHANNEL_ID=%r.', channel_id)
+            return False
+        if channel is None:
+            logger.warning('backup watchdog: logging channel %s not found.', channel_id)
+            return False
+        when = datetime.datetime.fromtimestamp(
+            last_backup, datetime.timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        ago = pretty_time_format(max(0, int(now - last_backup)))
+        embed = discord_common.embed_alert(
+            f'\N{WARNING SIGN} No successful **user.db** backup in over '
+            f'{pretty_time_format(_BACKUP_STALE_THRESHOLD)}.\n'
+            f'Last successful backup: **{when}** ({ago} ago).\n'
+            f'The off-site backup service may be down - please investigate.')
+        role = discord.utils.get(getattr(channel.guild, 'roles', []),
+                                 name=constants.TLE_ADMIN)
+        try:
+            await channel.send(
+                content=role.mention if role else None,
+                embed=embed,
+                allowed_mentions=discord.AllowedMentions(roles=True))
+        except discord.HTTPException as e:
+            logger.warning('backup watchdog: failed to send alert: %s', e)
+            return False
+        logger.info('backup watchdog: alerted admins (last backup %s ago).', ago)
+        return True
 
     @meta.command(brief='Print bot guilds')
     @commands.has_role(constants.TLE_ADMIN)

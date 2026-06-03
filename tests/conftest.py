@@ -57,7 +57,7 @@ _commands_mod.CommandError = type('CommandError', (Exception,), {})
 # Stub commands.Cog so starboard.py can be imported for pure-function tests
 class _StubCog:
     @staticmethod
-    def listener():
+    def listener(*args, **kwargs):
         return lambda f: f
 _commands_mod.Cog = _StubCog
 _commands_mod.has_role = lambda role: (lambda f: f)

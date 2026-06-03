@@ -13,6 +13,16 @@ How it stays safe:
 - Stamping the backup time in the live DB is best-effort — a failed stamp never
   fails the backup.
 
+## Staleness alerts (bot side)
+
+The bot watches the same `kvs.last_backup_at` stamp. If no successful backup has
+landed in **6 hours**, it pings the admin role in the logging channel
+(`LOGGING_COG_CHANNEL_ID`) and re-pings every 6 hours while it stays stale. It
+stays silent until at least one backup has ever been recorded, so a fresh bot
+with no backups yet won't alert. Toggle with `;backup alert on` / `;backup alert
+off`; `;backup alert status` shows the current setting. (Implemented in
+`tle/cogs/meta.py`, not in this service.)
+
 ## Setup on the backup server
 
 ```bash
