@@ -116,6 +116,14 @@ class FakeMinigameDb(MinigameDbMixin):
             )
         ''')
         self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS akari_optout (
+                guild_id     TEXT NOT NULL,
+                user_id      TEXT NOT NULL,
+                opted_out_at REAL NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        self.conn.execute('''
             CREATE TABLE IF NOT EXISTS akari_ban (
                 guild_id   TEXT NOT NULL,
                 user_id    TEXT NOT NULL,
@@ -1843,26 +1851,64 @@ class TestSlashCtx:
 
 
 class TestRatingDb:
-    def test_register_is_idempotent(self, db):
-        assert db.register_akari_user(1, 999, 123.0) == 1
-        assert db.register_akari_user(1, 999, 124.0) == 0
+    def test_default_registered_for_anyone_not_opted_out(self, db):
+        # Default-opt-in: even a user we've never heard of is "registered" —
+        # is_akari_registered is the inverse of is_akari_opted_out.
         assert db.is_akari_registered(1, 999) is True
-        assert db.is_akari_registered(1, 888) is False
+        # register on a user with no opt-out is a no-op.
+        assert db.register_akari_user(1, 999) is False
+
+    def test_unregister_adds_optout_then_register_lifts_it(self, db):
+        # First unregister adds the opt-out; second is a no-op.
+        assert db.unregister_akari_user(1, 999, 1.0) is True
+        assert db.unregister_akari_user(1, 999, 2.0) is False
+        assert db.is_akari_registered(1, 999) is False
+        assert db.is_akari_opted_out(1, 999) is True
+        # register lifts the opt-out.
+        assert db.register_akari_user(1, 999) is True
+        assert db.is_akari_opted_out(1, 999) is False
+        assert db.is_akari_registered(1, 999) is True
+
+    def test_registrants_lists_users_with_results_minus_optouts(self, db):
+        # Only users with any result show up; opt-outs are excluded.
+        db.save_minigame_result(
+            'm1', 1, 'akari', 10, 999, 1,
+            '2026-06-03', 100, 60, True, 'raw')
+        db.save_minigame_result(
+            'm2', 1, 'akari', 10, 888, 2,
+            '2026-06-03', 100, 60, True, 'raw')
+        assert db.get_akari_registrants(1) == {'999', '888'}
+        db.unregister_akari_user(1, 888, 1.0)
         assert db.get_akari_registrants(1) == {'999'}
 
-    def test_unregister(self, db):
-        db.register_akari_user(1, 999, 1.0)
-        assert db.unregister_akari_user(1, 999) == 1
-        assert db.unregister_akari_user(1, 999) == 0
-        assert db.is_akari_registered(1, 999) is False
-        assert db.get_akari_registrants(1) == set()
-
     def test_registrants_are_guild_scoped(self, db):
-        db.register_akari_user(1, 999, 1.0)
-        db.register_akari_user(2, 999, 1.0)
-        db.unregister_akari_user(1, 999)
+        # Results in guild 1 don't surface in guild 2's registrants list.
+        db.save_minigame_result(
+            'a', 1, 'akari', 10, 999, 1,
+            '2026-06-03', 100, 60, True, 'raw')
+        db.save_minigame_result(
+            'b', 2, 'akari', 10, 999, 1,
+            '2026-06-03', 100, 60, True, 'raw')
+        db.unregister_akari_user(1, 999, 2.0)
         assert db.get_akari_registrants(1) == set()
         assert db.get_akari_registrants(2) == {'999'}
+
+    def test_registrants_dedupe_live_and_imported(self, db):
+        # The same user appearing in both tables is listed once.
+        db.save_minigame_result(
+            'l1', 1, 'akari', 10, 999, 1,
+            '2026-06-03', 100, 60, True, 'raw')
+        db.save_imported_minigame_result(
+            'i1', 1, 'akari', 10, 999, 1,
+            '2026-06-03', 100, 60, True, 'raw')
+        assert db.get_akari_registrants(1) == {'999'}
+
+    def test_imported_results_make_user_visible(self, db):
+        # An imported-only user (no live results) still appears in registrants.
+        db.save_imported_minigame_result(
+            'i1', 1, 'akari', 10, 999, 1,
+            '2026-06-03', 100, 60, True, 'raw')
+        assert db.get_akari_registrants(1) == {'999'}
 
     def test_replace_and_get_ratings_sorted_desc(self, db):
         states = [
@@ -1993,15 +2039,15 @@ class TestCogRating:
         assert a.last_puzzle == 500  # last day actually played
         assert a.rating > 1200       # decayed toward, but never past, the default
 
-    def test_debug_leaderboard_includes_shadow_rated(self, db, monkeypatch):
+    def test_debug_leaderboard_includes_opted_out(self, db, monkeypatch):
         # ;mg akari ratings debug is the admin variant: it must include users
-        # who haven't opted in via ;mg akari register (shadow-rated), with the ✓
-        # marker preserved so admins can still tell who's registered.
+        # who explicitly opted out — they're filtered out of the public
+        # ratings view but still appear here so admins can see everyone.
         monkeypatch.setattr(cf_common, 'user_db', db)
         self._no_puzzle_filter(monkeypatch)
         self._enable(db)
-        # Alice opts in; Bob is shadow-rated.
-        db.register_akari_user(1, 999, 1.0)
+        # Bob opts out explicitly; Alice stays at the default (opted-in).
+        db.unregister_akari_user(1, 888, 1.0)
         cog = Minigames(bot=None)
 
         async def _seed():

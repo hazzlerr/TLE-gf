@@ -310,40 +310,85 @@ class MinigameDbMixin:
         return live_rc + imported_rc
 
     # ── Akari rating: registration ───────────────────────────────────
+    #
+    # Default opt-in: everyone with any Akari result is registered (visible in
+    # rating displays).  The only way to be hidden is an explicit ``unregister``
+    # call, which writes a row to ``akari_optout``.  ``register`` just deletes
+    # any opt-out row for that user.
+    #
+    # ``akari_registrant`` is legacy — pre-default-opt-in rows live there but
+    # nothing currently writes or reads it.
 
-    def register_akari_user(self, guild_id, user_id, registered_at):
-        """Opt a user in to Akari ratings. Returns 1 if newly added, else 0."""
-        rc = self.conn.execute(
-            '''
-            INSERT OR IGNORE INTO akari_registrant (guild_id, user_id, registered_at)
-            VALUES (?, ?, ?)
-            ''',
-            (str(guild_id), str(user_id), float(registered_at))
-        ).rowcount
-        self.conn.commit()
-        return rc
+    def register_akari_user(self, guild_id, user_id):
+        """Clear any explicit opt-out so the user is visible again.
 
-    def unregister_akari_user(self, guild_id, user_id):
-        """Opt a user out. Returns the number of rows removed (1 or 0)."""
-        rc = self.conn.execute(
-            'DELETE FROM akari_registrant WHERE guild_id = ? AND user_id = ?',
+        Default visibility means users not in ``akari_optout`` are already
+        registered; this is a no-op for users who weren't opted out.  Returns
+        True iff an opt-out row was lifted.
+        """
+        cleared = self.conn.execute(
+            'DELETE FROM akari_optout WHERE guild_id = ? AND user_id = ?',
             (str(guild_id), str(user_id))
         ).rowcount
         self.conn.commit()
-        return rc
+        return cleared > 0
 
-    def is_akari_registered(self, guild_id, user_id):
+    def unregister_akari_user(self, guild_id, user_id, opted_out_at):
+        """Explicitly opt a user out of rating displays.
+
+        Sticky: the opt-out row persists until a future ``register`` call
+        clears it, so a user who unregisters never auto-rejoins regardless of
+        how many puzzles they post afterwards.  Returns True iff a new opt-out
+        row was added (False if they were already opted out).
+        """
+        added = self.conn.execute(
+            '''
+            INSERT OR IGNORE INTO akari_optout (guild_id, user_id, opted_out_at)
+            VALUES (?, ?, ?)
+            ''',
+            (str(guild_id), str(user_id), float(opted_out_at))
+        ).rowcount
+        self.conn.commit()
+        return added > 0
+
+    def is_akari_opted_out(self, guild_id, user_id):
         row = self.conn.execute(
-            'SELECT user_id FROM akari_registrant WHERE guild_id = ? AND user_id = ?',
+            'SELECT user_id FROM akari_optout WHERE guild_id = ? AND user_id = ?',
             (str(guild_id), str(user_id))
         ).fetchone()
         return row is not None
 
+    def is_akari_registered(self, guild_id, user_id):
+        """True iff the user is currently visible in rating displays.
+
+        Default-opt-in: just the inverse of explicit opt-out.  No result-count
+        check — even users with zero puzzles are formally "registered"; they
+        just have nothing to show in any display.
+        """
+        return not self.is_akari_opted_out(guild_id, user_id)
+
     def get_akari_registrants(self, guild_id):
-        """Return the set of opted-in user_ids (as TEXT) for a guild."""
+        """All currently-visible user_ids for a guild.
+
+        Users with any Akari result (live or imported), minus those in
+        ``akari_optout``.  Users with zero results are excluded because they'd
+        contribute nothing to any display anyway.
+        """
+        guild_id = str(guild_id)
         rows = self.conn.execute(
-            'SELECT user_id FROM akari_registrant WHERE guild_id = ?',
-            (str(guild_id),)
+            '''
+            SELECT DISTINCT user_id FROM (
+                SELECT user_id FROM minigame_result
+                WHERE guild_id = ? AND game = 'akari'
+                UNION
+                SELECT user_id FROM minigame_import_result
+                WHERE guild_id = ? AND game = 'akari'
+            )
+            WHERE user_id NOT IN (
+                SELECT user_id FROM akari_optout WHERE guild_id = ?
+            )
+            ''',
+            (guild_id, guild_id, guild_id)
         ).fetchall()
         return {row.user_id for row in rows}
 

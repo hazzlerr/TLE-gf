@@ -1299,7 +1299,7 @@ class Minigames(commands.Cog):
             f'**{format_duration(time_seconds)}**.'))
 
     async def _cmd_akari_ratings(self, ctx):
-        """Mod-gated guild leaderboard — registered, recently-active players only."""
+        """Guild leaderboard — registered, recently-active players only."""
         self._require_enabled(ctx.guild.id, AKARI_GAME)
         rows = cf_common.user_db.get_akari_ratings(ctx.guild.id)
         if not rows:
@@ -1791,33 +1791,34 @@ class Minigames(commands.Cog):
     async def akari_show(self, ctx):
         await self._cmd_show(ctx, AKARI_GAME)
 
-    @akari.command(name='register', brief='Opt in to Daily Akari ratings',
+    @akari.command(name='register', brief='Restore Daily Akari rating visibility',
                    usage='[@user (mods only)]')
     async def akari_register(self, ctx, member: CaseInsensitiveMember = None):
         target = self._resolve_registrar_target(ctx, member)
-        added = cf_common.user_db.register_akari_user(
-            ctx.guild.id, target.id, time.time())
+        changed = cf_common.user_db.register_akari_user(
+            ctx.guild.id, target.id)
         who = ('You are' if target.id == ctx.author.id
                else f'`{_safe_member_name(target)}` is')
-        msg = (f'{who} now registered for {AKARI_GAME.display_name} ratings.'
-               if added else
-               f'{who} already registered for {AKARI_GAME.display_name} ratings.')
+        if changed:
+            msg = (f'{who} opted back in to {AKARI_GAME.display_name} ratings.')
+        else:
+            msg = (f'{who} already visible in {AKARI_GAME.display_name} ratings '
+                   f'(everyone is opted in by default).')
         await ctx.send(embed=discord_common.embed_success(msg))
 
     @akari.command(name='unregister', brief='Opt out of Daily Akari ratings',
                    usage='[@user (mods only)]')
     async def akari_unregister(self, ctx, member: CaseInsensitiveMember = None):
         target = self._resolve_registrar_target(ctx, member)
-        removed = cf_common.user_db.unregister_akari_user(
-            ctx.guild.id, target.id)
-        if removed:
-            who = ('You are' if target.id == ctx.author.id
-                   else f'`{_safe_member_name(target)}` is')
-            msg = (f'{who} no longer registered for {AKARI_GAME.display_name} ratings. '
-                   f'Results are still recorded.')
+        changed = cf_common.user_db.unregister_akari_user(
+            ctx.guild.id, target.id, time.time())
+        who = ('You are' if target.id == ctx.author.id
+               else f'`{_safe_member_name(target)}` is')
+        if changed:
+            msg = (f'{who} opted out of {AKARI_GAME.display_name} ratings. '
+                   f'Results are still recorded; run `;mg akari register` to opt back in.')
         else:
-            msg = ('You were not registered.' if target.id == ctx.author.id
-                   else f'`{_safe_member_name(target)}` was not registered.')
+            msg = f'{who} already opted out.'
         await ctx.send(embed=discord_common.embed_success(msg))
 
     @akari.command(name='ban',
@@ -1832,14 +1833,15 @@ class Minigames(commands.Cog):
             raise MinigameCogError(
                 f'`{_safe_member_name(member)}` is already banned from '
                 f'{AKARI_GAME.display_name}.')
-        # Auto-unregister so the rating display state stays consistent.
-        unregistered = cf_common.user_db.unregister_akari_user(
-            ctx.guild.id, member.id)
+        # Auto opt them out so the rating display state stays consistent and
+        # the opt-out sticks past any later unban.
+        opted_out = cf_common.user_db.unregister_akari_user(
+            ctx.guild.id, member.id, time.time())
         lines = [f'`{_safe_member_name(member)}` is now banned from '
                  f'{AKARI_GAME.display_name} ingestion. New results from '
                  f'them will be dropped silently.']
-        if unregistered:
-            lines.append('Also removed from registrants.')
+        if opted_out:
+            lines.append('Also opted out of ratings.')
         if reason:
             lines.append(f'Reason: {reason}')
         await ctx.send(embed=discord_common.embed_success('\n'.join(lines)))
@@ -1952,16 +1954,14 @@ class Minigames(commands.Cog):
     async def akari_reparse(self, ctx):
         await self._cmd_reparse(ctx, AKARI_GAME)
 
-    @akari.group(name='ratings', brief='(Mod) Show Akari rating leaderboard',
+    @akari.group(name='ratings', brief='Show Akari rating leaderboard',
                  invoke_without_command=True)
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_ratings(self, ctx):
         await self._cmd_akari_ratings(ctx)
 
     @akari.group(name='rating',
-                 brief='(Mod) Show one registered user\'s Akari rating graph',
+                 brief='Show a registered user\'s Akari rating graph',
                  usage='[@user]', invoke_without_command=True)
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_rating(self, ctx, member: CaseInsensitiveMember = None):
         if member is None:
             member = ctx.author
@@ -1975,9 +1975,8 @@ class Minigames(commands.Cog):
         await self._cmd_akari_rating(ctx, member, require_registered=False)
 
     @akari.group(name='performance', aliases=['perf'],
-                 brief='(Mod) Show one registered user\'s Akari performance graph',
+                 brief='Show a registered user\'s Akari performance graph',
                  usage='[@user]', invoke_without_command=True)
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_performance(self, ctx, member: CaseInsensitiveMember = None):
         if member is None:
             member = ctx.author
@@ -1991,9 +1990,8 @@ class Minigames(commands.Cog):
         await self._cmd_akari_performance(ctx, member, require_registered=False)
 
     @akari.group(name='history',
-                 brief='(Mod) Paginated rating delta log for one registered user',
+                 brief='Paginated rating delta log for a registered user',
                  usage='[@user]', invoke_without_command=True)
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_history(self, ctx, member: CaseInsensitiveMember = None):
         if member is None:
             member = ctx.author
@@ -2221,14 +2219,9 @@ class Minigames(commands.Cog):
         except MinigameCogError as e:
             await self._slash_send_error(interaction, e)
 
-    @akari_slash.command(name='ratings', description='(Mod) Show Akari rating leaderboard')
+    @akari_slash.command(name='ratings', description='Show Akari rating leaderboard')
     async def slash_akari_ratings(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
         try:
             await self._cmd_akari_ratings(_SlashCtx(interaction))
         except MinigameCogError as e:
@@ -2237,18 +2230,13 @@ class Minigames(commands.Cog):
             logger.exception('Unhandled error in slash command')
             await self._slash_send_error(interaction, 'An unexpected error occurred.')
 
-    @akari_slash.command(name='rating', description="(Mod) Show one user's Akari rating graph")
+    @akari_slash.command(name='rating', description="Show a user's Akari rating graph")
     @app_commands.describe(member='Player (defaults to you)')
     async def slash_akari_rating(
         self, interaction: discord.Interaction,
         member: Optional[discord.Member] = None,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
         target = member or interaction.user
         try:
             await self._cmd_akari_rating(_SlashCtx(interaction), target)
@@ -2258,18 +2246,13 @@ class Minigames(commands.Cog):
             logger.exception('Unhandled error in slash command')
             await self._slash_send_error(interaction, 'An unexpected error occurred.')
 
-    @akari_slash.command(name='performance', description="(Mod) Show one user's Akari performance graph")
+    @akari_slash.command(name='performance', description="Show a user's Akari performance graph")
     @app_commands.describe(member='Player (defaults to you)')
     async def slash_akari_performance(
         self, interaction: discord.Interaction,
         member: Optional[discord.Member] = None,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
         target = member or interaction.user
         try:
             await self._cmd_akari_performance(_SlashCtx(interaction), target)
@@ -2279,18 +2262,13 @@ class Minigames(commands.Cog):
             logger.exception('Unhandled error in slash command')
             await self._slash_send_error(interaction, 'An unexpected error occurred.')
 
-    @akari_slash.command(name='history', description="(Mod) Show one user's Akari rating delta log")
+    @akari_slash.command(name='history', description="Show a user's Akari rating delta log")
     @app_commands.describe(member='Player (defaults to you)')
     async def slash_akari_history(
         self, interaction: discord.Interaction,
         member: Optional[discord.Member] = None,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
         target = member or interaction.user
         try:
             await self._cmd_akari_history(_SlashCtx(interaction), target)

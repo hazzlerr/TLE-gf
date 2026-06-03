@@ -661,3 +661,27 @@ def upgrade_1_27_0(db):
     ''')
     db.commit()
     logger.info('1.27.0: Upgrade complete')
+
+
+@registry.register('1.28.0', 'Akari explicit opt-out registry')
+def upgrade_1_28_0(db):
+    """Create the akari_optout table.
+
+    Registration flipped from explicit opt-in (row in akari_registrant) to
+    default opt-in for any user with results.  ``akari_optout`` records the
+    only signal that still matters: users who explicitly *unregistered*.  Once
+    a user appears here they stay invisible until they ``;mg akari register``,
+    which lifts the opt-out.  The older akari_registrant table is preserved
+    but is no longer read or written.
+    """
+    logger.info('1.28.0: Creating akari_optout table')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS akari_optout (
+            guild_id     TEXT NOT NULL,
+            user_id      TEXT NOT NULL,
+            opted_out_at REAL NOT NULL,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    ''')
+    db.commit()
+    logger.info('1.28.0: Upgrade complete')

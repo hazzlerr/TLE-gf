@@ -354,11 +354,23 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
         # Akari ratings (registrants + rebuildable rating snapshot).
         # Registration is akari-specific — guessgame doesn't have a rating
         # system, so the opt-in roster has no reason to be game-keyed.
+        # Default opt-in: anyone with an Akari result is visible in rating
+        # displays unless they appear in ``akari_optout``.  ``akari_registrant``
+        # is legacy from the explicit-opt-in era — nothing reads or writes it
+        # now; kept for the existing rows / future audit.
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS akari_registrant (
                 guild_id      TEXT NOT NULL,
                 user_id       TEXT NOT NULL,
                 registered_at REAL NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS akari_optout (
+                guild_id     TEXT NOT NULL,
+                user_id      TEXT NOT NULL,
+                opted_out_at REAL NOT NULL,
                 PRIMARY KEY (guild_id, user_id)
             )
         ''')
