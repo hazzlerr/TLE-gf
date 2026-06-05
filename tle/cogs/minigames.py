@@ -48,17 +48,16 @@ _AKARI_IMAGE_MARGIN = 20
 _AKARI_IMAGE_ROW_HEIGHT = 36
 _AKARI_IMAGE_HEADER_SPACING = 1.25
 _AKARI_IMAGE_COLUMN_MARGIN = 10
-# Two layouts share the same renderer.  ``_AKARI_RATING_COLS`` keeps the
-# 5-column shape (#, Name, Handle, Rating · Rank, Games) used by the rating
-# leaderboard image.  ``_AKARI_PUZZLE_COLS`` merges per-puzzle Result and Time
-# into a single column ("100% 1:34") so the table fits without compressing
-# Name / Handle.  Widths must sum to ``_AKARI_IMAGE_WIDTH − 2 × MARGIN`` (860).
+# Three layouts share the same renderer.  ``_AKARI_RATING_COLS`` and
+# ``_AKARI_PUZZLE_COLS`` are the 5-column shapes for the rating leaderboard
+# and the un-annotated puzzle table respectively.  ``_AKARI_PUZZLE_DELTA_COLS``
+# is the 6-column annotated puzzle table: Result and Time stay separate (it
+# reads better than the merged "100% 1:34" cell did) and a Δ column shows the
+# day's signed rating change for opted-in users.  Widths sum to
+# ``_AKARI_IMAGE_WIDTH − 2 × MARGIN`` (860).
 _AKARI_RATING_COLS = (54, 300, 260, 150, 96)
-_AKARI_PUZZLE_COLS = (54, 350, 296, 160)
-# Used when the per-puzzle table includes a Δ column for opted-in users —
-# rating context is shown next to the result instead of being hidden.  Same
-# Width budget as the others (sum = 860 = 900 − 2 × 20 margin).
-_AKARI_PUZZLE_DELTA_COLS = (54, 320, 260, 140, 86)
+_AKARI_PUZZLE_COLS = (54, 300, 260, 150, 96)
+_AKARI_PUZZLE_DELTA_COLS = (54, 316, 230, 90, 90, 80)
 
 
 # Per-puzzle table annotation for one opted-in player: pre-puzzle rating and
@@ -260,14 +259,13 @@ def _maybe_parse_puzzle_selector(arg):
 
 
 def _format_akari_result_status(row):
-    """Combined "accuracy + time" cell for the per-puzzle table.
+    """Accuracy cell for the per-puzzle table.
 
-    Uses ``100%`` instead of the word ``perfect`` so the cell fits next to the
-    time (e.g. ``100% 1:34`` or ``92% 2:15``) and the puzzle table can drop
-    its separate Time column.
+    Uses ``100%`` instead of the word ``perfect`` so the cell stays narrow;
+    time lives in its own column next to it.
     """
     pct = 100 if row.is_perfect else int(row.accuracy)
-    return f'{pct}% {format_duration(row.time_seconds)}'
+    return f'{pct}%'
 
 
 def _sort_akari_puzzle_results(rows):
@@ -309,6 +307,7 @@ def _akari_puzzle_table_rows(guild, rows, *, puzzle_info=None, registrants=None)
             name,
             _safe_cf_handle(guild, row.user_id),
             _format_akari_result_status(row),
+            format_duration(row.time_seconds),
         ]
         if annotated:
             cells.append(delta_cell)
@@ -317,9 +316,9 @@ def _akari_puzzle_table_rows(guild, rows, *, puzzle_info=None, registrants=None)
 
 
 def _format_akari_puzzle_table(guild, rows):
-    style = table.Style('{:>}  {:<}  {:<}  {:<}')
+    style = table.Style('{:>}  {:<}  {:<}  {:<}  {:>}')
     t = table.Table(style)
-    t += table.Header('#', 'Name', 'Handle', 'Result')
+    t += table.Header('#', 'Name', 'Handle', 'Result', 'Time')
     t += table.Line()
 
     for row in _akari_puzzle_table_rows(guild, rows):
@@ -328,8 +327,9 @@ def _format_akari_puzzle_table(guild, rows):
 
 
 def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
-                                  header=('#', 'Name', 'Handle', 'Result'),
+                                  header=('#', 'Name', 'Handle', 'Result', 'Time'),
                                   cols=_AKARI_PUZZLE_COLS,
+                                  right_align_cols=None,
                                   row_colors=None):
     title_height = _AKARI_IMAGE_ROW_HEIGHT if title is not None else 0
     footer_height = _AKARI_IMAGE_ROW_HEIGHT if footer is not None else 0
@@ -373,12 +373,17 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
             bold=bold,
         )
 
+    if right_align_cols is None:
+        # Default: rank (#) and the last column (Time / Games) right-align.
+        right_set = {0, len(cols) - 1}
+    else:
+        right_set = set(right_align_cols)
+
     def draw_row(row, y, color, *, bold=False):
         context.set_source_rgb(*(component / 255 for component in color))
         context.move_to(_AKARI_IMAGE_MARGIN, y)
-        last_idx = len(cols) - 1
         for i, (value, width) in enumerate(zip(row, cols)):
-            align = (Pango.Alignment.RIGHT if i == 0 or i == last_idx
+            align = (Pango.Alignment.RIGHT if i in right_set
                      else Pango.Alignment.LEFT)
             draw_cell(value, width, align=align, bold=bold)
 
@@ -427,14 +432,19 @@ def _get_akari_puzzle_table_image_file(guild, rows, title,
     if len(rows) > len(displayed_rows):
         footer = f'Showing top {len(displayed_rows)} of {len(rows)} results'
     if annotated:
-        header = ('#', 'Name', 'Handle', 'Result', '\N{INCREMENT}')
+        header = ('#', 'Name', 'Handle', 'Result', 'Time', '\N{INCREMENT}')
         cols = _AKARI_PUZZLE_DELTA_COLS
+        # Time and Δ both carry numeric content — right-align them so values
+        # line up at the column's right edge.
+        right_align_cols = (0, 4, 5)
     else:
-        header = ('#', 'Name', 'Handle', 'Result')
+        header = ('#', 'Name', 'Handle', 'Result', 'Time')
         cols = _AKARI_PUZZLE_COLS
+        right_align_cols = None  # default — # and Time right
     return _get_akari_puzzle_table_image(
         displayed_rows, title=title, footer=footer,
-        header=header, cols=cols, row_colors=row_colors)
+        header=header, cols=cols,
+        right_align_cols=right_align_cols, row_colors=row_colors)
 
 
 def _akari_rating_table_rows(guild, rating_rows, registrants, *, mark_registered=True):

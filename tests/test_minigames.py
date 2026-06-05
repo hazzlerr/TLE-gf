@@ -921,9 +921,9 @@ class TestFormatting:
 
         assert '#  Name' in table_str
         assert 'Handle' in table_str
-        assert '1  Alice  alice_cf  100% 1:00' in table_str
-        assert '2  Bob    bob_cf    100% 1:20' in table_str
-        assert '3  Cara   cara_cf   97% 0:50' in table_str
+        assert '1  Alice  alice_cf  100%    1:00' in table_str
+        assert '2  Bob    bob_cf    100%    1:20' in table_str
+        assert '3  Cara   cara_cf   97%     0:50' in table_str
 
     def test_get_akari_puzzle_table_image_returns_png_file(self, monkeypatch):
         class _Surface:
@@ -2341,8 +2341,9 @@ class TestRatingDisplayNoLeak:
             user_id='999', is_perfect=True, accuracy=100,
             time_seconds=89, message_id=1)
         out = _akari_puzzle_table_rows(guild, [result_row])
-        # (#, name, handle, result) — combined "100% M:SS" cell only, no 1200-ish number.
-        assert out[0][3] == '100% 1:29'
+        # (#, name, handle, result, time) — no rating/tier leaked.
+        assert out[0][3] == '100%'
+        assert out[0][4] == '1:29'
         assert '1200' not in ' '.join(str(c) for c in out[0])
 
     def test_annotated_puzzle_rows_include_pre_rating_and_delta(self, monkeypatch):
@@ -2369,15 +2370,17 @@ class TestRatingDisplayNoLeak:
         registrants = {'10', '20'}
         out = _rows_fn(guild, result_rows,
                        puzzle_info=puzzle_info, registrants=registrants)
-        assert len(out[0]) == 5
+        assert len(out[0]) == 6
         # Alice — opted in, rated 1304 (CM tier), gained ~12.
         assert '1304 CM' in out[0][1]
-        assert out[0][3] == '100% 1:00'
-        assert out[0][4] == '+12'
+        assert out[0][3] == '100%'
+        assert out[0][4] == '1:00'
+        assert out[0][5] == '+12'
         # Bob — opted in, rated 1191 (Specialist tier), lost ~9.
         assert '1191 S' in out[1][1]
-        assert out[1][3] == '88% 2:25'
-        assert out[1][4] == '-9'
+        assert out[1][3] == '88%'
+        assert out[1][4] == '2:25'
+        assert out[1][5] == '-9'
 
     def test_unregistered_users_have_empty_delta_in_annotated_table(self, monkeypatch):
         # Privacy: a user who isn't in the registrants set shows neither
@@ -2394,11 +2397,11 @@ class TestRatingDisplayNoLeak:
         registrants = set()  # hidden user is not opted in
         out = _rows_fn(guild, result_rows,
                        puzzle_info=puzzle_info, registrants=registrants)
-        # Annotated mode still emits 5 cells (so the renderer has them all),
+        # Annotated mode still emits 6 cells (so the renderer has them all),
         # but the rating/delta surface is empty for the opted-out user.
-        assert len(out[0]) == 5
+        assert len(out[0]) == 6
         assert '1700' not in out[0][1]
-        assert out[0][4] == ''
+        assert out[0][5] == ''
 
     def test_active_ranking_hides_inactive_and_garbage(self):
         import datetime as _dt
