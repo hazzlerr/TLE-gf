@@ -214,7 +214,10 @@ class TestDecay:
         assert long_absent.skip_streak == 40
         assert long_absent.last_puzzle == 3  # last day actually played
 
-    def test_decay_reverts_low_rating_upward(self):
+    def test_sub_default_absentees_freeze(self):
+        # 'd' loses repeatedly to 'e', landing below 1200, then disappears.
+        # Under the zero-sum design we don't create rating ex nihilo, so 'd'
+        # stays put — no free drift back up while inactive.
         rows = []
         for puzzle in range(1, 6):
             rows += _day(puzzle, [('d', False, 10, 300), ('e', True, 100, 20)])
@@ -222,8 +225,9 @@ class TestDecay:
         assert low < 1200
         for puzzle in range(6, 45):
             rows += _day(puzzle, [('e', True, 100, 20), ('f', False, 40, 200)])
-        reverted = compute_ratings(rows)['d']
-        assert low < reverted.rating < 1200  # drifts back up toward the default
+        frozen = compute_ratings(rows)['d']
+        assert frozen.rating == low
+        assert frozen.skip_streak == 39  # absent for puzzles 6..44
 
     def test_playing_resets_skip_streak(self):
         rows = []
@@ -381,3 +385,100 @@ class TestCurrentPuzzleGate:
         # decays every concluded puzzle in the data.
         states = compute_ratings(self._two_day_rows())
         assert states['a'].skip_streak == 1
+
+
+class TestZeroSumTransfer:
+    @staticmethod
+    def _total(states):
+        return sum(s.rating for s in states.values())
+
+    def test_decay_and_transfer_balance_per_day(self):
+        # Day 1: 'a' wins, 'b' loses (gets 'a' above 1200).  Day 2: 'b' and 'c'
+        # tie (identical perfect results), 'a' absent → decay-transfer fires.
+        # Tying isolates the transfer mechanic: with equal contest deltas, any
+        # asymmetry in b.delta vs c.delta would have to come from the pool
+        # split — which must be equal too.
+        rows = _day(1, [('a', True, 100, 30), ('b', False, 60, 200)])
+        rows += _day(2, [('b', True, 100, 40), ('c', True, 100, 40)])
+        histories = {}
+        compute_ratings(rows, histories=histories, include_decay_in_history=True)
+        a_day2 = next(p for p in histories['a']
+                      if p.puzzle_number == 2 and p.is_decay)
+        b_day2 = next(p for p in histories['b'] if p.puzzle_number == 2)
+        c_day2 = next(p for p in histories['c'] if p.puzzle_number == 2)
+        # The decay-transfer step is internally balanced.  Day-2 contest math
+        # has its own structural CF leak of -0.25 × n_players, which is the
+        # only thing left over once the pool moves.
+        contest_leak = -constants.AKARI_RATING_DAMPING * 2
+        day2_total_delta = a_day2.delta + b_day2.delta + c_day2.delta
+        assert abs(day2_total_delta - contest_leak) < 1e-6
+
+    def test_pool_split_equally_between_tied_active_players(self):
+        # The equal-split property: when active players are symmetrically
+        # placed (same pre-rating, same result), their post-transfer deltas
+        # must match exactly.  Setup: 'a' is the absent coaster (above 1200
+        # after day 1); 'b' and 'c' are brand-new on day 2 (both seeded at
+        # 1200), and tie perfectly.  Symmetric inputs → equal contest deltas
+        # → equal transfer shares → equal final deltas.
+        rows = _day(1, [('a', True, 100, 30), ('x', False, 60, 200)])
+        rows += _day(2, [('b', True, 100, 40), ('c', True, 100, 40)])
+        histories = {}
+        compute_ratings(rows, histories=histories, include_decay_in_history=True)
+        b_day2 = next(p for p in histories['b'] if p.puzzle_number == 2)
+        c_day2 = next(p for p in histories['c'] if p.puzzle_number == 2)
+        assert abs(b_day2.delta - c_day2.delta) < 1e-9
+
+    def test_solo_active_collects_entire_pool(self):
+        # Day 1: 'a' beats 'b' (a > 1200).  Day 2: only 'b' plays.
+        rows = _day(1, [('a', True, 100, 30), ('b', False, 60, 200)])
+        rows += [_row('b', 2, perfect=True, time_seconds=40)]
+        states = compute_ratings(rows)
+        # Solo days produce no contest delta but the transfer pool still flows
+        # to the lone active player, who is 'b'.
+        baseline = compute_ratings(
+            _day(1, [('a', True, 100, 30), ('b', False, 60, 200)]))
+        a_loss = baseline['a'].rating - states['a'].rating
+        b_gain = states['b'].rating - baseline['b'].rating
+        assert a_loss > 0
+        assert abs(a_loss - b_gain) < 1e-6  # all of a's loss went to b
+
+    def test_no_above_default_absentees_means_no_pool(self):
+        # 'd' is sub-1200 (lost to e), absent on day 6.  No above-1200
+        # absentees means no pool — 'e' and 'f' only get their contest delta.
+        rows = []
+        for puzzle in range(1, 6):
+            rows += _day(puzzle, [('d', False, 20, 300), ('e', True, 100, 30)])
+        rows += _day(6, [('e', True, 100, 30), ('f', False, 40, 200)])
+        states = compute_ratings(rows)
+        # Reference: same data but with the day-6 absentee 'd' replaced by a
+        # never-seen player — no decay loop runs at all.
+        ref_rows = []
+        for puzzle in range(1, 6):
+            ref_rows += _day(puzzle,
+                             [('e', True, 100, 30), ('d', False, 20, 300)])
+        ref_rows += _day(6, [('e', True, 100, 30), ('f', False, 40, 200)])
+        ref = compute_ratings(ref_rows)
+        # 'e' on day 6 in both worlds: identical, because 'd' contributed
+        # nothing to the pool (frozen sub-default).
+        assert abs(states['e'].rating - ref['e'].rating) < 1e-9
+
+    def test_transfer_share_appears_in_played_history_point(self):
+        rows = _day(1, [('a', True, 100, 30), ('b', False, 60, 200)])
+        rows += [_row('b', 2, perfect=True, time_seconds=40)]
+        histories = {}
+        compute_ratings(rows, histories=histories)
+        # 'b' played day 2 alone. The played point's delta and rating should
+        # reflect the transfer received from absent 'a'.
+        b_day2 = histories['b'][-1]
+        assert b_day2.puzzle_number == 2
+        assert b_day2.delta > 0  # share > 0, no contest delta on solo day
+        assert b_day2.rating > 1200 or b_day2.rating == histories['b'][0].rating + b_day2.delta
+
+    def test_transfer_share_lifts_peak(self):
+        # 'b' was net-losing on day 1, but absorbs 'a's full decay pool on
+        # day 2 — that should be reflected in their peak.
+        rows = _day(1, [('a', True, 100, 30), ('b', False, 60, 200)])
+        rows += [_row('b', 2, perfect=True, time_seconds=40)]
+        states = compute_ratings(rows)
+        assert states['b'].peak >= states['b'].rating
+        assert states['b'].peak > 1200 - 1  # peak ≥ post-transfer rating

@@ -20,8 +20,12 @@ kept as ``float`` throughout the replay (and stored as ``REAL``); callers round
 only for display.  At a quarter-strength damping, rounding every daily delta to
 an integer would floor most of them to zero and ratings would never move.
 
-Inactive players also decay back toward the default rating, with the pull
-growing the longer they stay away (see :func:`compute_ratings`).
+Inactive players above the default rating decay back toward it, with the pull
+growing the longer they stay away (see :func:`compute_ratings`).  The points
+they lose are pooled and redistributed equally to the day's active players —
+the rating ladder is zero-sum within each puzzle day, so coasters' rating
+funds the regulars instead of vanishing.  Sub-default absentees freeze rather
+than drift up: the engine refuses to create rating ex nihilo.
 """
 
 import math
@@ -274,9 +278,12 @@ def compute_ratings(rows, start_rating=None, damping=None,
 
     **Inactivity decay:** for every day present in the data, each previously seen
     player who did *not* submit that day has their consecutive-skip streak bumped
-    and their rating pulled toward ``start_rating`` by :func:`_decay_rate` of the
-    remaining gap — stronger the longer they stay away, and symmetric (under-1200
-    ratings drift back up).  Playing resets the streak.
+    and their above-default rating pulled toward ``start_rating`` by
+    :func:`_decay_rate` of the remaining gap — stronger the longer they stay
+    away.  Sub-default absentees freeze (no drift up) so the engine never
+    creates rating ex nihilo.  The lost points are pooled and split equally
+    among the day's active players, conserving total guild rating across the
+    day.  Playing resets the streak.
     The "days" counted are days the guild was active (puzzles in the data), so
     decay advances as others keep playing, not by wall-clock; it is therefore a
     pure, deterministic function of the result rows.
@@ -382,37 +389,66 @@ def compute_ratings(rows, start_rating=None, damping=None,
             skip_streak[user_id] = 0
             last_puzzle[user_id] = puzzle_number
 
+        # Suppress decay for the puzzle that is still "in progress" on the
+        # server's clock: that day has not concluded for absent players yet, so
+        # bumping their skip-streak / rating now would penalise them prematurely.
+        day_concluded = (current_puzzle_number is None
+                         or puzzle_number < current_puzzle_number)
+
+        # Absence-decay loop.  Two design choices, both serving the zero-sum
+        # invariant the guild has chosen for the rating ladder:
+        #   1. Only above-default ratings actually move — sub-default absentees
+        #      freeze.  Drifting low ratings back up to 1200 would create
+        #      rating ex nihilo; freezing is the honest answer to "no signal,
+        #      no change".
+        #   2. The lost rating is pooled and redistributed to today's active
+        #      players (below), so the day's total guild rating is conserved.
+        # Frozen absentees still get a HistoryPoint (delta=0) so the +decay
+        # graph stays a continuous line, not a dotted one.
+        absent_records = []  # (user_id, delta) for every absent user
+        decay_pool = 0.0
+        if day_concluded:
+            for user_id in ratings:
+                if user_id in day_rows:
+                    continue
+                skip_streak[user_id] += 1
+                raw = (start_rating - ratings[user_id]) * _decay_rate(
+                    skip_streak[user_id], decay_base, decay_max, decay_grace)
+                delta = min(0.0, raw)  # clamp out the sub-default drift-up
+                ratings[user_id] += delta
+                last_delta[user_id] = delta
+                absent_records.append((user_id, delta))
+                decay_pool -= delta  # delta ≤ 0 ⇒ pool grows positive
+
+        # Zero-sum transfer: today's pool funds today's participants equally.
+        # A solo active player banks the whole thing; a 5-active field shares
+        # it.  No active players means no payout (and no leak — the pool only
+        # forms on a day with at least one row, which is the only kind of day
+        # this loop iterates).
+        transfer_share = 0.0
+        if decay_pool > 0 and day_rows:
+            transfer_share = decay_pool / len(day_rows)
+            for user_id in day_rows:
+                ratings[user_id] += transfer_share
+                last_delta[user_id] = deltas[user_id] + transfer_share
+                if ratings[user_id] > peak[user_id]:
+                    peak[user_id] = ratings[user_id]
+
         if histories is not None:
             for user_id, row in day_rows.items():
                 histories.setdefault(user_id, []).append(HistoryPoint(
                     puzzle_number=puzzle_number,
                     puzzle_date=getattr(row, 'puzzle_date', None),
                     rating=ratings[user_id],
-                    delta=deltas.get(user_id, 0.0),
+                    delta=deltas.get(user_id, 0.0) + transfer_share,
                     performance=performances.get(user_id),
                     is_perfect=bool(row.is_perfect),
                     accuracy=int(getattr(row, 'accuracy', 0)),
                     time_seconds=int(getattr(row, 'time_seconds', 0)),
                 ))
 
-        # Absent previously-seen players accrue a skipped day and decay toward
-        # the default rating (independent per user, so order is irrelevant).
-        # Suppress decay for the puzzle that is still "in progress" on the
-        # server's clock: that day has not concluded for absent players yet, so
-        # bumping their skip-streak / rating now would penalise them prematurely.
-        day_concluded = (current_puzzle_number is None
-                         or puzzle_number < current_puzzle_number)
-        if not day_concluded:
-            continue
-        for user_id in ratings:
-            if user_id in day_rows:
-                continue
-            skip_streak[user_id] += 1
-            delta = (start_rating - ratings[user_id]) * _decay_rate(
-                skip_streak[user_id], decay_base, decay_max, decay_grace)
-            ratings[user_id] += delta
-            last_delta[user_id] = delta
-            if histories is not None and include_decay_in_history:
+        if histories is not None and include_decay_in_history:
+            for user_id, delta in absent_records:
                 histories.setdefault(user_id, []).append(HistoryPoint(
                     puzzle_number=puzzle_number,
                     puzzle_date=puzzle_date_for_day,
