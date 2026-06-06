@@ -32,30 +32,25 @@ _WATCHING_RATED_VC_WAIT_TIME = 5 * 60  # seconds
 _RATED_VC_EXTRA_TIME = 10 * 60  # seconds
 _MIN_RATED_CONTESTANTS_FOR_RATED_VC = 50
 
-# Codeforces rank colors keyed by rating (mirrors handles.rating_to_color);
-# used for per-row coloring in the probratimg table.
+_SMOKE_WHITE = (250, 250, 250)
+
+
 def _cf_rating_color(rating):
+    """Per-row text colour for the probratimg table — pulls the official
+    CF rank palette from ``cf.rating2rank().color_embed`` so colours stay
+    in sync with the rest of the codebase."""
     if rating is None:
         return (10, 10, 10)
-    if rating < 1200:
-        return (70, 70, 70)
-    if rating < 1400:
-        return (0, 140, 0)
-    if rating < 1600:
-        return (0, 165, 170)
-    if rating < 1900:
-        return (0, 0, 200)
-    if rating < 2100:
-        return (160, 0, 120)
-    if rating < 2400:
-        return (250, 140, 30)
-    return (255, 20, 20)
+    embed = cf.rating2rank(rating).color_embed
+    if embed is None:
+        return (10, 10, 10)
+    return ((embed >> 16) & 0xFF, (embed >> 8) & 0xFF, embed & 0xFF)
 
 
 def _render_problemratings_image(title, indices, official_ratings, predicted, *, from_cache):
-    """Render the probrat table using the same Cairo/Pango table renderer that
-    ``;mg akari ratings`` uses, with each row coloured by the predicted rating's
-    CF rank."""
+    """Render the probrat table using the same Cairo/Pango table renderer as
+    ``;mg akari ratings``. Each rating cell is coloured by its own value's
+    CF rank (Official and Predicted may land in different tiers)."""
     # Imported here to avoid pulling cairo/Pango (and the whole minigames cog)
     # into contests' module-load path if it's never invoked.
     from tle.cogs.minigames import _get_akari_puzzle_table_image
@@ -66,13 +61,17 @@ def _render_problemratings_image(title, indices, official_ratings, predicted, *,
          str(predicted[i]))
         for i, idx in enumerate(indices)
     ]
-    row_colors = [_cf_rating_color(predicted[i]) for i in range(len(indices))]
+    cell_colors = [
+        (_SMOKE_WHITE, _cf_rating_color(official_ratings[i]), _cf_rating_color(predicted[i]))
+        for i in range(len(indices))
+    ]
     return _get_akari_puzzle_table_image(
         rows, title=title,
         header=header,
-        cols=(80, 390, 390),
+        cols=(60, 200, 200),
         right_align_cols=(0, 1, 2),
-        row_colors=row_colors,
+        cell_colors=cell_colors,
+        width=500,
         filename='probrat.png',
     )
 

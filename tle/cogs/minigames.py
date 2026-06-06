@@ -331,6 +331,8 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
                                   cols=_AKARI_PUZZLE_COLS,
                                   right_align_cols=None,
                                   row_colors=None,
+                                  cell_colors=None,
+                                  width=_AKARI_IMAGE_WIDTH,
                                   filename='akari-results.png'):
     title_height = _AKARI_IMAGE_ROW_HEIGHT if title is not None else 0
     footer_height = _AKARI_IMAGE_ROW_HEIGHT if footer is not None else 0
@@ -339,10 +341,10 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
         + title_height + footer_height + 2 * _AKARI_IMAGE_MARGIN
     )
 
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, _AKARI_IMAGE_WIDTH, height)
+    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
     context = cairo.Context(surface)
     context.set_source_rgb(*_DISCORD_GRAY)
-    context.rectangle(0, 0, _AKARI_IMAGE_WIDTH, height)
+    context.rectangle(0, 0, width, height)
     context.fill()
 
     layout = PangoCairo.create_layout(context)
@@ -352,25 +354,25 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
 
     def draw_bg(y, color):
         context.set_source_rgb(*color)
-        context.rectangle(0, y, _AKARI_IMAGE_WIDTH, _AKARI_IMAGE_ROW_HEIGHT)
+        context.rectangle(0, y, width, _AKARI_IMAGE_ROW_HEIGHT)
         context.fill()
 
-    def draw_cell(text, width, *, align=Pango.Alignment.LEFT, bold=False):
+    def draw_cell(text, cell_width, *, align=Pango.Alignment.LEFT, bold=False):
         text = html.escape(str(text))
         if bold:
             text = f'<b>{text}</b>'
-        layout.set_width(max(1, int((width - _AKARI_IMAGE_COLUMN_MARGIN) * Pango.SCALE)))
+        layout.set_width(max(1, int((cell_width - _AKARI_IMAGE_COLUMN_MARGIN) * Pango.SCALE)))
         layout.set_alignment(align)
         layout.set_markup(text, -1)
         PangoCairo.show_layout(context, layout)
-        context.rel_move_to(width, 0)
+        context.rel_move_to(cell_width, 0)
 
     def draw_line(text, y, color, *, bold=False):
         context.set_source_rgb(*(component / 255 for component in color))
         context.move_to(_AKARI_IMAGE_MARGIN, y)
         draw_cell(
             text,
-            _AKARI_IMAGE_WIDTH - 2 * _AKARI_IMAGE_MARGIN,
+            width - 2 * _AKARI_IMAGE_MARGIN,
             bold=bold,
         )
 
@@ -380,13 +382,14 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
     else:
         right_set = set(right_align_cols)
 
-    def draw_row(row, y, color, *, bold=False):
-        context.set_source_rgb(*(component / 255 for component in color))
+    def draw_row(row, y, color, *, bold=False, per_cell=None):
         context.move_to(_AKARI_IMAGE_MARGIN, y)
-        for i, (value, width) in enumerate(zip(row, cols)):
+        for i, (value, cell_width) in enumerate(zip(row, cols)):
+            c = per_cell[i] if per_cell is not None else color
+            context.set_source_rgb(*(component / 255 for component in c))
             align = (Pango.Alignment.RIGHT if i in right_set
                      else Pango.Alignment.LEFT)
-            draw_cell(value, width, align=align, bold=bold)
+            draw_cell(value, cell_width, align=align, bold=bold)
 
     y = _AKARI_IMAGE_MARGIN
     if title is not None:
@@ -399,9 +402,11 @@ def _get_akari_puzzle_table_image(table_rows, *, title=None, footer=None,
     for i, row in enumerate(table_rows):
         draw_bg(y, _TABLE_ROW_COLORS[i % 2])
         # row_colors (when provided) gives the per-row text colour as a 0–255
-        # RGB tuple; otherwise everything stays black like the puzzle tables.
+        # RGB tuple; cell_colors gives per-cell colours and overrides row_colors;
+        # otherwise everything stays black like the puzzle tables.
         text_color = row_colors[i] if row_colors is not None else _BLACK
-        draw_row(row, y, text_color)
+        per_cell = cell_colors[i] if cell_colors is not None else None
+        draw_row(row, y, text_color, per_cell=per_cell)
         y += _AKARI_IMAGE_ROW_HEIGHT
 
     if footer is not None:
