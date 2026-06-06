@@ -2103,6 +2103,168 @@ class TestCogRating:
         bad.close()
 
 
+class TestAkariExcludeFilter:
+    """`+exclude=user1,user2,...` reshapes ratings without disturbing the cache."""
+
+    @staticmethod
+    def _enable(db, guild=1, channel=10):
+        db.set_guild_config(guild, 'akari', '1')
+        db.set_minigame_channel(guild, _GAME, channel)
+
+    @staticmethod
+    def _akari_msg_n(msg_id, user_id, puzzle, body, guild=1, channel=10):
+        return _FakeMessage(msg_id, guild, channel, user_id,
+                            f'Daily Akari {puzzle}\n✅2026-03-26✅\n{body}\n'
+                            f'https://dailyakari.com/')
+
+    @staticmethod
+    def _no_puzzle_filter(monkeypatch):
+        monkeypatch.setattr(minigames_module, 'expected_puzzle_number',
+                            lambda _date: 10 ** 9)
+
+    def test_extract_filters_parses_decay_and_exclude(self):
+        cog = Minigames(bot=None)
+        alice = _FakeDiscordMember(101, 'alice')
+        bob = _FakeDiscordMember(202, 'bob')
+        cara = _FakeDiscordMember(303, 'cara')
+        guild = _FakeGuild(1, members=[alice, bob, cara])
+        ctx = SimpleNamespace(
+            guild=guild,
+            bot=SimpleNamespace(get_guild=lambda gid: guild),
+        )
+        async def _go():
+            return await cog._extract_akari_filters(
+                ctx, ['+decay', '+exclude=alice,cara', 'remaining'])
+        remaining, include_decay, excluded = asyncio.run(_go())
+        assert include_decay is True
+        assert excluded == {'101', '303'}
+        assert remaining == ['remaining']
+
+    def test_extract_filters_ignores_empty_exclude_entries(self):
+        # `+exclude=alice,,,bob` should split cleanly without resolving an
+        # empty member name.
+        cog = Minigames(bot=None)
+        alice = _FakeDiscordMember(101, 'alice')
+        bob = _FakeDiscordMember(202, 'bob')
+        guild = _FakeGuild(1, members=[alice, bob])
+        ctx = SimpleNamespace(
+            guild=guild,
+            bot=SimpleNamespace(get_guild=lambda gid: guild),
+        )
+        async def _go():
+            return await cog._extract_akari_filters(
+                ctx, ['+exclude=alice,,bob,'])
+        _remaining, _include_decay, excluded = asyncio.run(_go())
+        assert excluded == {'101', '202'}
+
+    def test_filtered_rating_rows_drops_excluded_users(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
+        self._enable(db)
+        cog = Minigames(bot=None)
+
+        async def _inner():
+            await cog.on_message(self._akari_msg_n(
+                1, 100, 500, '\U0001f31f Perfect! \U0001f553 1:00'))
+            await cog.on_message(self._akari_msg_n(
+                2, 200, 500, '\U0001f3af 50% \U0001f553 5:00'))
+            await cog.on_message(self._akari_msg_n(
+                3, 300, 500, '\U0001f3af 70% \U0001f553 3:00'))
+        asyncio.run(_inner())
+        assert {r.user_id for r in db.get_akari_ratings(1)} == {'100', '200', '300'}
+        rows = cog._akari_filtered_rating_rows(1, {'200'})
+        assert {r.user_id for r in rows} == {'100', '300'}
+
+    def test_filtered_rating_rows_does_not_touch_cache(self, db, monkeypatch):
+        # The whole point of the ``+exclude`` design: the persisted snapshot
+        # stays canonical so subsequent un-filtered queries are still fast and
+        # consistent.  This pins that invariant.
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
+        self._enable(db)
+        cog = Minigames(bot=None)
+
+        async def _inner():
+            await cog.on_message(self._akari_msg_n(
+                1, 100, 500, '\U0001f31f Perfect! \U0001f553 1:00'))
+            await cog.on_message(self._akari_msg_n(
+                2, 200, 500, '\U0001f3af 50% \U0001f553 5:00'))
+            await cog.on_message(self._akari_msg_n(
+                3, 300, 500, '\U0001f3af 70% \U0001f553 3:00'))
+        asyncio.run(_inner())
+        before = {r.user_id: r.rating for r in db.get_akari_ratings(1)}
+        cog._akari_filtered_rating_rows(1, {'200'})
+        after = {r.user_id: r.rating for r in db.get_akari_ratings(1)}
+        assert before == after
+
+    def test_exclude_changes_remaining_players_rating(self, db, monkeypatch):
+        # Excluding a player shrinks the contest field; the surviving players'
+        # CF deltas change accordingly.  Without this, the feature would be a
+        # display-only hide — but it really replays the math.
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
+        self._enable(db)
+        cog = Minigames(bot=None)
+
+        async def _inner():
+            await cog.on_message(self._akari_msg_n(
+                1, 100, 500, '\U0001f31f Perfect! \U0001f553 1:00'))
+            await cog.on_message(self._akari_msg_n(
+                2, 200, 500, '\U0001f31f Perfect! \U0001f553 2:00'))
+            await cog.on_message(self._akari_msg_n(
+                3, 300, 500, '\U0001f3af 50% \U0001f553 5:00'))
+        asyncio.run(_inner())
+        baseline = {r.user_id: r.rating for r in db.get_akari_ratings(1)}
+        filtered = {r.user_id: r.rating
+                    for r in cog._akari_filtered_rating_rows(1, {'200'})}
+        assert '200' not in filtered
+        # 100 and 300 are both still in, but their ratings differ from the
+        # 3-player snapshot because the contest math is now binary.
+        assert filtered['100'] != baseline['100']
+        assert filtered['300'] != baseline['300']
+
+    def test_akari_user_data_replays_without_excluded_users(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
+        self._enable(db)
+        cog = Minigames(bot=None)
+
+        async def _inner():
+            await cog.on_message(self._akari_msg_n(
+                1, 100, 500, '\U0001f31f Perfect! \U0001f553 1:00'))
+            await cog.on_message(self._akari_msg_n(
+                2, 200, 500, '\U0001f3af 50% \U0001f553 5:00'))
+        asyncio.run(_inner())
+        # Without exclude: a 2-player contest, so the played day has a
+        # ``performance`` (the field exists).
+        _state, history = cog._akari_user_data(1, 100)
+        assert len(history) == 1
+        assert history[0].performance is not None
+        # Excluding 200 leaves 100 alone on the day → solo, no performance.
+        _state, history = cog._akari_user_data(1, 100, excluded_ids={'200'})
+        assert len(history) == 1
+        assert history[0].performance is None
+
+    def test_akari_puzzle_change_info_omits_excluded_users(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        self._no_puzzle_filter(monkeypatch)
+        self._enable(db)
+        cog = Minigames(bot=None)
+
+        async def _inner():
+            await cog.on_message(self._akari_msg_n(
+                1, 100, 500, '\U0001f31f Perfect! \U0001f553 1:00'))
+            await cog.on_message(self._akari_msg_n(
+                2, 200, 500, '\U0001f3af 50% \U0001f553 5:00'))
+            await cog.on_message(self._akari_msg_n(
+                3, 300, 500, '\U0001f3af 70% \U0001f553 3:00'))
+        asyncio.run(_inner())
+        full = cog._akari_puzzle_change_info(1, 500)
+        assert set(full) == {'100', '200', '300'}
+        partial = cog._akari_puzzle_change_info(1, 500, excluded_ids={'200'})
+        assert set(partial) == {'100', '300'}
+
+
 class TestRegisterTarget:
     """`;mg akari register [@user]` — anyone can self-register; only mods can
     pass a different @user."""
