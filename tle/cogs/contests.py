@@ -954,9 +954,11 @@ class Contests(commands.Cog):
         # keeps the embed wide enough for the (~25-char) table. NBSP gets
         # stripped by Discord's whitespace normalization; Hangul Filler is
         # treated as a normal character and survives.
-        pad_target = 55
-        if len(title) < pad_target:
-            title = title + '\u3164' * (pad_target - len(title))
+        # Hangul Filler is roughly full-width (~1.5x a normal title char),
+        # so each one widens the embed by about 1.5 chars worth.
+        # Visually-target the embed to ~45 normal-char widths.
+        deficit = max(0, 45 - len(title))
+        title = title + '\u3164' * (deficit * 2 // 3)
         table_pages = self._format_problemratings_table_pages(
             indices, official_ratings, predicted, from_cache=from_cache)
         await discord_common.send_paginated_embeds(ctx, table_pages, title=title, url=url)
