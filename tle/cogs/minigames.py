@@ -5,6 +5,7 @@ import html
 import io
 import logging
 import re
+import statistics
 import time
 from collections import namedtuple
 from typing import Optional
@@ -267,6 +268,40 @@ def _format_queens_result(entry):
         badges.append('no mistakes')
     suffix = f' ({", ".join(badges)})' if badges else ''
     return f'{entry.linkedin_name} — {format_duration(entry.time_seconds)}{suffix}'
+
+
+def _queens_best_results_by_number(rows):
+    return pick_best_results(
+        rows,
+        sort_key_fn=QUEENS_GAME.best_result_sort_key,
+        group_key_fn=QUEENS_GAME.result_group_key,
+    )
+
+
+def _queens_streak_info(rows):
+    best = _queens_best_results_by_number(rows)
+    if not best:
+        return 0, 0, None
+
+    latest_number = max(best)
+    current = 0
+    number = latest_number
+    while number in best and best[number].is_perfect:
+        current += 1
+        number -= 1
+
+    longest = 0
+    run = 0
+    previous = None
+    for number in sorted(best):
+        if best[number].is_perfect:
+            run = run + 1 if previous is not None and number == previous + 1 else 1
+            longest = max(longest, run)
+        else:
+            run = 0
+        previous = number
+
+    return current, longest, best[latest_number]
 
 
 def _legend_name_for(guild, member):
@@ -908,6 +943,114 @@ class Minigames(commands.Cog):
                 f'({linked_name}) — **{round(row.rating)}** '
                 f'({row.games} games)')
         await ctx.send(embed=discord_common.embed_neutral('\n'.join(lines)))
+
+    async def _cmd_queens_show(self, ctx):
+        enabled = self._is_enabled(ctx.guild.id, QUEENS_GAME.feature_flag)
+        links = cf_common.user_db.get_minigame_player_links(
+            ctx.guild.id, QUEENS_GAME.name)
+        rows = cf_common.user_db.get_minigame_results_for_guild(
+            ctx.guild.id, QUEENS_GAME.name)
+        numbers = {int(row.puzzle_number) for row in rows}
+        lines = [
+            f'feature: `{"enabled" if enabled else "disabled"}`',
+            'ingest: manual leaderboard import',
+            f'linked players: **{len(links)}**',
+            f'results: **{len(rows)}** across **{len(numbers)}** Queens number(s)',
+        ]
+        if not enabled:
+            lines.append(f'Enable it with `;meta config enable {QUEENS_GAME.feature_flag}`.')
+        await ctx.send(embed=discord_common.embed_neutral('\n'.join(lines)))
+
+    async def _cmd_queens_streak(self, ctx, *args):
+        self._require_enabled(ctx.guild.id, QUEENS_GAME)
+        filter_args = list(args)
+        member = ctx.author
+        if filter_args:
+            try:
+                member = await self._resolve_member(ctx, filter_args[0])
+                filter_args = filter_args[1:]
+            except MinigameCogError:
+                member = ctx.author
+
+        try:
+            dlo, dhi, plo, phi = parse_date_args(filter_args)
+        except ValueError as e:
+            raise MinigameCogError(str(e)) from e
+
+        rows = cf_common.user_db.get_minigame_results_for_user(
+            ctx.guild.id, QUEENS_GAME.name, member.id, dlo, dhi, plo, phi)
+        if not rows:
+            raise MinigameCogError(
+                f'No {QUEENS_GAME.display_name} results found for '
+                f'`{_safe_member_name(member)}`.')
+
+        current, longest, latest = _queens_streak_info(rows)
+        latest_status = (
+            'no hints & no mistakes'
+            if latest.is_perfect
+            else 'not clean'
+        )
+        description = '\n'.join([
+            f'`{_safe_member_name(member)}`: **{current}** consecutive clean Queens number(s)',
+            f'Longest clean streak: **{longest}** number(s)',
+            f'Latest result: **#{latest.puzzle_number}**, **{format_duration(latest.time_seconds)}**, {latest_status}',
+        ])
+        await ctx.send(embed=discord.Embed(
+            title=f'{QUEENS_GAME.display_name} Streak',
+            description=description,
+            color=discord_common.random_cf_color(),
+        ))
+
+    async def _cmd_queens_stats(self, ctx, *args):
+        self._require_enabled(ctx.guild.id, QUEENS_GAME)
+        filter_args = list(args)
+        member = ctx.author
+        if filter_args:
+            try:
+                member = await self._resolve_member(ctx, filter_args[0])
+                filter_args = filter_args[1:]
+            except MinigameCogError:
+                member = ctx.author
+
+        try:
+            dlo, dhi, plo, phi = parse_date_args(filter_args)
+        except ValueError as e:
+            raise MinigameCogError(str(e)) from e
+
+        rows = cf_common.user_db.get_minigame_results_for_user(
+            ctx.guild.id, QUEENS_GAME.name, member.id, dlo, dhi, plo, phi)
+        best = _queens_best_results_by_number(rows)
+        if not best:
+            raise MinigameCogError(
+                f'No {QUEENS_GAME.display_name} results found for '
+                f'`{_safe_member_name(member)}`.')
+
+        results = [best[number] for number in sorted(best)]
+        total = len(results)
+        clean = [row for row in results if row.is_perfect]
+        no_mistakes = [row for row in results if int(row.accuracy) == 100]
+        times = [int(row.time_seconds) for row in results]
+        current, longest, latest = _queens_streak_info(results)
+        clean_rate = len(clean) / total * 100 if total else 0
+        lines = [
+            f'Player: `{_safe_member_name(member)}`',
+            f'Queens numbers: **{total}**',
+            f'Clean: **{len(clean)}** ({clean_rate:.0f}%)',
+            f'No mistakes: **{len(no_mistakes)}**',
+            '',
+            f'Best time: **{format_duration(min(times))}**',
+            f'Average time: **{format_duration(sum(times) / len(times))}**',
+            f'Median time: **{format_duration(statistics.median(times))}**',
+            '',
+            f'Current clean streak: **{current}**',
+            f'Longest clean streak: **{longest}**',
+            f'Latest: **#{latest.puzzle_number}** in **{format_duration(latest.time_seconds)}**',
+        ]
+        await ctx.send(embed=discord.Embed(
+            title=f'{QUEENS_GAME.display_name} Stats',
+            description='\n'.join(lines),
+            color=discord_common.random_cf_color(),
+        ))
 
     # ── Listeners ───────────────────────────────────────────────────────
 
@@ -2689,6 +2832,11 @@ class Minigames(commands.Cog):
     async def queens(self, ctx):
         await ctx.send_help(ctx.command)
 
+    @queens.command(name='show', brief='Show LinkedIn Queens settings')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_show(self, ctx):
+        await self._cmd_queens_show(ctx)
+
     @queens.command(name='register',
                     brief='Link a Discord user to a LinkedIn Queens name',
                     usage='@user LinkedIn Name [profile_url]')
@@ -2760,6 +2908,31 @@ class Minigames(commands.Cog):
         paginator.paginate(
             self.bot, ctx.channel, pages, wait_time=300,
             set_pagenum_footers=True, author_id=ctx.author.id)
+
+    @queens.command(name='vs', brief='Head-to-head comparison',
+                    usage='@user1 @user2 [filters...]')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_vs(self, ctx, member1: CaseInsensitiveMember,
+                        member2: CaseInsensitiveMember, *args):
+        await self._cmd_vs(ctx, QUEENS_GAME, member1, member2, *args)
+
+    @queens.command(name='top', brief='Show fastest-result winners',
+                    usage='[filters...]')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_top(self, ctx, *args):
+        await self._cmd_top(ctx, QUEENS_GAME, *args)
+
+    @queens.command(name='streak', brief='Show current clean streak',
+                    usage='[@user] [filters...]')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_streak(self, ctx, *args):
+        await self._cmd_queens_streak(ctx, *args)
+
+    @queens.command(name='stats', brief='Show personal Queens stats',
+                    usage='[@user] [filters...]')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_stats(self, ctx, *args):
+        await self._cmd_queens_stats(ctx, *args)
 
     @queens.group(name='import', brief='Preview a pasted Queens leaderboard',
                   usage='number <pasted leaderboard>',
@@ -2834,11 +3007,21 @@ class Minigames(commands.Cog):
             ctx, QUEENS_GAME, member, parsed_number)
         self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
 
-    @queens.command(name='ratings', brief='Show Queens rating leaderboard')
+    @queens.group(name='ratings', brief='Show Queens rating leaderboard',
+                  invoke_without_command=True)
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def queens_ratings(self, ctx):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         await self._cmd_queens_ratings(ctx)
+
+    @queens_ratings.command(name='recompute',
+                            brief='(Mod) Rebuild the Queens rating snapshot')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_ratings_recompute(self, ctx):
+        self._require_enabled(ctx.guild.id, QUEENS_GAME)
+        self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
+        await ctx.send(embed=discord_common.embed_success(
+            f'{QUEENS_GAME.display_name} ratings recomputed.'))
 
     # ── GuessGame commands: ;minigames guessgame … ──────────────────────
 

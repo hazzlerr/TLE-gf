@@ -1007,6 +1007,108 @@ class TestQueensImport:
         assert akari.games == 1
 
 
+class TestQueensCommands:
+    @staticmethod
+    def _make_ctx(guild, author):
+        sent = {}
+
+        async def send(content=None, *, embed=None, **kwargs):
+            sent['content'] = content
+            sent['embed'] = embed
+            sent['kwargs'] = kwargs
+
+        return SimpleNamespace(
+            guild=guild,
+            author=author,
+            channel=_FakeChannel(200),
+            send=send,
+            sent=sent,
+        )
+
+    @staticmethod
+    def _save_queens_result(db, message_id, user_id, number, time_seconds,
+                            is_perfect=True, accuracy=100):
+        db.save_minigame_result(
+            message_id, 100, 'queens', 200, user_id, number, '1970-01-01',
+            accuracy, time_seconds, is_perfect, f'#{number}')
+
+    def test_stats_and_streak_use_queens_numbers(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(100, 'queens', '1')
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        guild = _FakeGuild(100, members=[alice])
+        ctx = self._make_ctx(guild, alice)
+        cog = Minigames(bot=None)
+
+        self._save_queens_result(db, 1, alice.id, 100, 5, True, 100)
+        self._save_queens_result(db, 2, alice.id, 101, 9, False, 0)
+        self._save_queens_result(db, 3, alice.id, 102, 4, True, 100)
+        self._save_queens_result(db, 4, alice.id, 103, 6, True, 100)
+
+        asyncio.run(cog._cmd_queens_stats(ctx))
+        stats = ctx.sent['embed']
+        assert stats.title == 'LinkedIn Queens Stats'
+        assert 'Queens numbers: **4**' in stats.description
+        assert 'Clean: **3**' in stats.description
+        assert 'Current clean streak: **2**' in stats.description
+        assert 'Latest: **#103**' in stats.description
+
+        asyncio.run(cog._cmd_queens_streak(ctx))
+        streak = ctx.sent['embed']
+        assert streak.title == 'LinkedIn Queens Streak'
+        assert '**2** consecutive clean Queens number(s)' in streak.description
+        assert 'Latest result: **#103**' in streak.description
+
+    def test_vs_uses_time_only_scoring(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(100, 'queens', '1')
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        bob = _FakeDiscordMember(301, 'bob', 'Bob')
+        guild = _FakeGuild(100, members=[alice, bob])
+        ctx = self._make_ctx(guild, alice)
+        cog = Minigames(bot=None)
+
+        self._save_queens_result(db, 1, alice.id, 100, 5, False, 0)
+        self._save_queens_result(db, 2, bob.id, 100, 7, True, 100)
+        self._save_queens_result(db, 3, alice.id, 101, 8, True, 100)
+        self._save_queens_result(db, 4, bob.id, 101, 8, False, 0)
+
+        asyncio.run(cog._cmd_vs(ctx, QUEENS_GAME, alice, bob))
+
+        embed = ctx.sent['embed']
+        assert embed.title == 'LinkedIn Queens Head to Head'
+        assert '`Alice`: **1.5** points, **1** wins' in embed.description
+        assert '`Bob`: **0.5** points, **0** wins' in embed.description
+        assert 'Ties: **1**' in embed.description
+
+    def test_top_counts_fastest_winners(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(100, 'queens', '1')
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        bob = _FakeDiscordMember(301, 'bob', 'Bob')
+        guild = _FakeGuild(100, members=[alice, bob])
+        ctx = self._make_ctx(guild, alice)
+        cog = Minigames(bot=object())
+
+        self._save_queens_result(db, 1, alice.id, 100, 5, False, 0)
+        self._save_queens_result(db, 2, bob.id, 100, 7, True, 100)
+        self._save_queens_result(db, 3, alice.id, 101, 8, True, 100)
+        self._save_queens_result(db, 4, bob.id, 101, 9, False, 0)
+
+        pages = []
+        monkeypatch.setattr(
+            minigames_module.paginator, 'paginate',
+            lambda _bot, _channel, page_list, **_kwargs: pages.extend(page_list))
+
+        asyncio.run(cog._cmd_top(ctx, QUEENS_GAME))
+
+        assert len(pages) == 1
+        embed = pages[0][1]
+        assert embed.title == 'LinkedIn Queens Winners'
+        assert '`Alice` — **2** wins' in embed.description
+        assert '`Bob`' not in embed.description
+
+
 class TestCogIngest:
     def test_ingests_only_enabled_configured_channel(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
