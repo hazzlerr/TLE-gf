@@ -1242,6 +1242,85 @@ class TestQueensCommands:
     def test_queens_link_command_is_not_registered(self):
         assert not hasattr(Minigames, 'queens_link')
 
+    def test_add_accepts_registered_linkedin_name(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_success',
+            lambda desc: SimpleNamespace(description=desc))
+        db.set_guild_config(100, 'queens', '1')
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        guild = _FakeGuild(100, members=[alice])
+        ctx = self._make_ctx(guild, alice)
+        cog = Minigames(bot=None)
+        db.set_minigame_player_link(
+            100, 'queens', alice.id, 'Alice LinkedIn',
+            normalize_queens_name('Alice LinkedIn'), None, 1.0, alice.id)
+
+        asyncio.run(Minigames.queens_add.__wrapped__(
+            cog, ctx,
+            args='Alice LinkedIn 2026-06-08 0:05 No hints & no mistakes'))
+
+        row = db.get_minigame_result_for_user_puzzle(
+            100, 'queens', alice.id, dt.date(2026, 6, 8).toordinal())
+        assert row is not None
+        assert row.time_seconds == 5
+        assert row.is_perfect == 1
+        assert db.get_minigame_rating(100, 'queens', alice.id) is not None
+        assert 'Added LinkedIn Queens result for `Alice`' in ctx.sent['embed'].description
+
+    def test_remove_accepts_registered_linkedin_name(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_success',
+            lambda desc: SimpleNamespace(description=desc))
+        db.set_guild_config(100, 'queens', '1')
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        guild = _FakeGuild(100, members=[alice])
+        ctx = self._make_ctx(guild, alice)
+        cog = Minigames(bot=None)
+        db.set_minigame_player_link(
+            100, 'queens', alice.id, 'Alice LinkedIn',
+            normalize_queens_name('Alice LinkedIn'), None, 1.0, alice.id)
+        self._save_queens_result(db, 1, alice.id, '2026-06-08', 5)
+
+        asyncio.run(Minigames.queens_remove.__wrapped__(
+            cog, ctx, args='Alice LinkedIn 2026-06-08'))
+
+        assert db.get_minigame_result_for_user_puzzle(
+            100, 'queens', alice.id, dt.date(2026, 6, 8).toordinal()) is None
+        assert 'Removed LinkedIn Queens result for `Alice`' in ctx.sent['embed'].description
+
+    def test_clear_removes_all_results_for_queens_date(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_success',
+            lambda desc: SimpleNamespace(description=desc))
+        db.set_guild_config(100, 'queens', '1')
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        bob = _FakeDiscordMember(301, 'bob', 'Bob')
+        guild = _FakeGuild(100, members=[alice, bob])
+        ctx = self._make_ctx(guild, alice)
+        cog = Minigames(bot=None)
+
+        self._save_queens_result(db, 1, alice.id, '2026-06-08', 5)
+        self._save_queens_result(db, 2, bob.id, '2026-06-08', 6)
+        self._save_queens_result(db, 3, alice.id, '2026-06-09', 4)
+        db.save_imported_minigame_result(
+            4, 100, 'queens', 200, bob.id,
+            dt.date(2026, 6, 8).toordinal(), '2026-06-08',
+            100, 7, True, 'imported')
+
+        asyncio.run(Minigames.queens_clear.__wrapped__(
+            cog, ctx, '2026-06-08'))
+
+        remaining = db.get_minigame_results_for_guild(100, 'queens')
+        assert [(row.user_id, row.puzzle_date) for row in remaining] == [
+            ('300', '2026-06-09'),
+        ]
+        assert 'Removed 3 LinkedIn Queens result(s) for 2026-06-08' in (
+            ctx.sent['embed'].description)
+        assert [row.user_id for row in db.get_minigame_ratings(100, 'queens')] == ['300']
+
     def test_ratings_use_image_and_default_to_registered_players(
             self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)

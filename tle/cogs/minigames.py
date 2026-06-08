@@ -1194,6 +1194,78 @@ class Minigames(commands.Cog):
             return link.external_name
         return _safe_member_name(member)
 
+    async def _resolve_queens_linked_player(self, ctx, player_text):
+        player_text = str(player_text or '').strip()
+        if not player_text:
+            raise MinigameCogError(
+                'A Discord user or registered LinkedIn name is required.')
+
+        try:
+            member = await self._resolve_member(ctx, player_text)
+        except MinigameCogError:
+            member = None
+        if member is not None:
+            link = cf_common.user_db.get_minigame_player_link(
+                ctx.guild.id, QUEENS_GAME.name, member.id)
+            if link is None:
+                raise MinigameCogError(
+                    f'`{_safe_member_name(member)}` is not registered for '
+                    f'{QUEENS_GAME.display_name}.')
+            return str(member.id), _safe_member_name(member), link
+
+        name = _clean_queens_linkedin_name(player_text)
+        link = cf_common.user_db.get_minigame_player_link_by_name(
+            ctx.guild.id, QUEENS_GAME.name, normalize_queens_name(name))
+        if link is None:
+            raise MinigameCogError(
+                f'Could not find a Discord user or registered LinkedIn name '
+                f'for `{discord.utils.escape_mentions(player_text)}`.')
+        member = ctx.guild.get_member(int(link.user_id))
+        label = (
+            _safe_member_name(member)
+            if member is not None
+            else _safe_user_name(ctx.guild, link.user_id)
+        )
+        return str(link.user_id), label, link
+
+    @staticmethod
+    def _parse_queens_add_args(args):
+        tokens = str(args or '').split()
+        if len(tokens) < 3:
+            raise MinigameCogError(
+                'Usage: `;queens add <@user|LinkedIn Name> DATE time '
+                '[status...]`.')
+        for index in range(1, len(tokens) - 1):
+            try:
+                parsed_date = _parse_queens_date(tokens[index])
+                parse_queens_time(tokens[index + 1])
+            except (MinigameCogError, ValueError):
+                continue
+            player_text = ' '.join(tokens[:index]).strip()
+            status = ' '.join(tokens[index + 2:]).strip()
+            return (
+                player_text,
+                parsed_date,
+                tokens[index + 1],
+                status or 'No hints & no mistakes',
+            )
+        raise MinigameCogError(
+            'Usage: `;queens add <@user|LinkedIn Name> DATE time [status...]`.')
+
+    @staticmethod
+    def _parse_queens_remove_args(args):
+        tokens = str(args or '').split()
+        if len(tokens) < 2:
+            raise MinigameCogError(
+                'Usage: `;queens remove <@user|LinkedIn Name> DATE`.')
+        try:
+            parsed_date = _parse_queens_date(tokens[-1])
+        except MinigameCogError as exc:
+            raise MinigameCogError(
+                'Usage: `;queens remove <@user|LinkedIn Name> DATE`.') from exc
+        player_text = ' '.join(tokens[:-1]).strip()
+        return player_text, parsed_date
+
     async def _extract_queens_rating_filters(self, ctx, args):
         (remaining, include_decay, excluded_ids, included_ids,
          _include_inactive) = await self._extract_akari_filters(ctx, args)
@@ -3609,29 +3681,24 @@ class Minigames(commands.Cog):
 
     @queens.command(name='add',
                     brief='Manually add a Queens result',
-                    usage='@user date time [status...]')
+                    usage='<@user|LinkedIn Name> date time [status...]')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
-    async def queens_add(self, ctx, member: CaseInsensitiveMember,
-                         puzzle_date: str, time_text: str, *,
-                         status: str = 'No hints & no mistakes'):
+    async def queens_add(self, ctx, *, args: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
-        linked = cf_common.user_db.get_minigame_player_link(
-            ctx.guild.id, QUEENS_GAME.name, member.id)
-        if linked is None:
-            raise MinigameCogError(
-                f'`{_safe_member_name(member)}` is not registered for '
-                f'{QUEENS_GAME.display_name}.')
+        player_text, parsed_date, time_text, status = (
+            self._parse_queens_add_args(args))
+        user_id, label, linked = await self._resolve_queens_linked_player(
+            ctx, player_text)
         self._ensure_not_minigame_banned(
-            ctx.guild.id, QUEENS_GAME, member.id, _safe_member_name(member))
-        parsed_date = _parse_queens_date(puzzle_date)
+            ctx.guild.id, QUEENS_GAME, user_id, label)
         parsed_number = _queens_puzzle_number_for_date(parsed_date)
         no_hints, no_mistakes, _status_text = queens_status_flags(status)
         time_seconds = parse_queens_time(time_text)
         cf_common.user_db.delete_minigame_result_for_user_puzzle(
-            ctx.guild.id, QUEENS_GAME.name, member.id, parsed_number)
+            ctx.guild.id, QUEENS_GAME.name, user_id, parsed_number)
         cf_common.user_db.save_minigame_result(
-            _queens_result_message_id(ctx.guild.id, parsed_date, member.id),
-            ctx.guild.id, QUEENS_GAME.name, ctx.channel.id, member.id,
+            _queens_result_message_id(ctx.guild.id, parsed_date, user_id),
+            ctx.guild.id, QUEENS_GAME.name, ctx.channel.id, user_id,
             parsed_number, _queens_puzzle_date_text(parsed_date),
             100 if no_mistakes else 0, time_seconds, no_hints and no_mistakes,
             f'{linked.external_name}\n{status}\n{time_text}',
@@ -3639,27 +3706,49 @@ class Minigames(commands.Cog):
         self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
         await ctx.send(embed=discord_common.embed_success(
             f'Added {QUEENS_GAME.display_name} result for '
-            f'`{_safe_member_name(member)}` on {parsed_date.isoformat()}: '
+            f'`{label}` on {parsed_date.isoformat()}: '
             f'**{format_duration(time_seconds)}**.'))
 
     @queens.command(name='remove', brief='Remove a Queens result',
-                    usage='@user date')
+                    usage='<@user|LinkedIn Name> date')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
-    async def queens_remove(self, ctx, member: CaseInsensitiveMember,
-                            puzzle_date: str):
+    async def queens_remove(self, ctx, *, args: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
-        parsed_date = _parse_queens_date(puzzle_date)
+        player_text, parsed_date = self._parse_queens_remove_args(args)
+        user_id, label, _linked = await self._resolve_queens_linked_player(
+            ctx, player_text)
         parsed_number = _queens_puzzle_number_for_date(parsed_date)
         rc = cf_common.user_db.delete_minigame_result_for_user_puzzle(
-            ctx.guild.id, QUEENS_GAME.name, member.id, parsed_number)
+            ctx.guild.id, QUEENS_GAME.name, user_id, parsed_number)
         if not rc:
             raise MinigameCogError(
                 f'No {QUEENS_GAME.display_name} result found for '
-                f'`{_safe_member_name(member)}` on {parsed_date.isoformat()}.')
+                f'`{label}` on {parsed_date.isoformat()}.')
         self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
         await ctx.send(embed=discord_common.embed_success(
             f'Removed {QUEENS_GAME.display_name} result for '
-            f'`{_safe_member_name(member)}` on {parsed_date.isoformat()}.'))
+            f'`{label}` on {parsed_date.isoformat()}.'))
+
+    @queens.command(name='clear', aliases=['delete'],
+                    brief='(Mod) Remove all Queens results for a date',
+                    usage='date')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_clear(self, ctx, puzzle_date: str = None):
+        self._require_enabled(ctx.guild.id, QUEENS_GAME)
+        if puzzle_date is None:
+            raise MinigameCogError('Usage: `;queens clear DATE`.')
+        parsed_date = _parse_queens_date(puzzle_date)
+        parsed_number = _queens_puzzle_number_for_date(parsed_date)
+        deleted = cf_common.user_db.delete_minigame_results_for_puzzle(
+            ctx.guild.id, QUEENS_GAME.name, parsed_number)
+        if not deleted:
+            raise MinigameCogError(
+                f'No {QUEENS_GAME.display_name} results found for '
+                f'{parsed_date.isoformat()}.')
+        self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
+        await ctx.send(embed=discord_common.embed_success(
+            f'Removed {deleted} {QUEENS_GAME.display_name} result(s) for '
+            f'{parsed_date.isoformat()}.'))
 
     @queens.group(name='ratings', brief='Show Queens rating leaderboard',
                   usage='[+exclude=…] [+include=…]',
