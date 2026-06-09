@@ -105,6 +105,8 @@ _BLACK = (0, 0, 0)
 _SMOKE_WHITE = (250, 250, 250)
 _URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
 _QUEENS_CONNECTION_ACCOUNT_KEY = 'queens_connection_account'
+_QUEENS_ANCHOR_DATE = dt.date(2026, 6, 8)
+_QUEENS_ANCHOR_NUMBER = 769
 
 
 class MinigameCogError(commands.CommandError):
@@ -251,7 +253,34 @@ def _parse_queens_date(date_text):
 
 
 def _queens_puzzle_number_for_date(puzzle_date):
-    return normalize_puzzle_date(puzzle_date).toordinal()
+    puzzle_date = normalize_puzzle_date(puzzle_date)
+    return _QUEENS_ANCHOR_NUMBER + (puzzle_date - _QUEENS_ANCHOR_DATE).days
+
+
+def _queens_date_for_puzzle_number(puzzle_number):
+    return _QUEENS_ANCHOR_DATE + dt.timedelta(
+        days=int(puzzle_number) - _QUEENS_ANCHOR_NUMBER)
+
+
+def _parse_queens_date_or_number(value):
+    try:
+        return _parse_queens_date(value)
+    except MinigameCogError:
+        text = str(value).strip()
+        if text.startswith('#'):
+            text = text[1:]
+        if text.isdigit():
+            return _queens_date_for_puzzle_number(int(text))
+        raise
+
+
+def _queens_puzzle_numbers_for_date(puzzle_date):
+    puzzle_date = normalize_puzzle_date(puzzle_date)
+    numbers = [_queens_puzzle_number_for_date(puzzle_date)]
+    legacy_number = puzzle_date.toordinal()
+    if legacy_number != numbers[0]:
+        numbers.append(legacy_number)
+    return numbers
 
 
 def _queens_puzzle_date_text(puzzle_date):
@@ -1079,12 +1108,14 @@ class Minigames(commands.Cog):
             return 0
         for row in rows:
             puzzle_date = normalize_puzzle_date(row.puzzle_date)
-            cf_common.user_db.delete_minigame_result_for_user_puzzle(
-                guild_id, QUEENS_GAME.name, user_id, row.puzzle_number)
+            puzzle_number = _queens_puzzle_number_for_date(puzzle_date)
+            for existing_number in _queens_puzzle_numbers_for_date(puzzle_date):
+                cf_common.user_db.delete_minigame_result_for_user_puzzle(
+                    guild_id, QUEENS_GAME.name, user_id, existing_number)
             cf_common.user_db.save_minigame_result(
                 _queens_result_message_id(guild_id, puzzle_date, user_id),
                 guild_id, QUEENS_GAME.name, row.channel_id, user_id,
-                row.puzzle_number, row.puzzle_date, row.accuracy,
+                puzzle_number, row.puzzle_date, row.accuracy,
                 row.time_seconds, row.is_perfect, row.raw_content)
         cf_common.user_db.delete_minigame_unresolved_results_for_name(
             guild_id, QUEENS_GAME.name, normalized_name)
@@ -1155,8 +1186,8 @@ class Minigames(commands.Cog):
 
     def _format_queens_import_preview(self, ctx, preview):
         lines = [
-            f'{QUEENS_GAME.display_name} import preview for '
-            f'{preview.puzzle_date.isoformat()}',
+            f'{QUEENS_GAME.display_name} #{preview.puzzle_number} '
+            f'import preview for {preview.puzzle_date.isoformat()}',
             '',
             'Registered:',
         ]
@@ -1182,10 +1213,11 @@ class Minigames(commands.Cog):
         return '\n'.join(lines)
 
     def _save_queens_import(self, ctx, preview):
-        cf_common.user_db.delete_minigame_results_for_puzzle(
-            ctx.guild.id, QUEENS_GAME.name, preview.puzzle_number)
-        cf_common.user_db.delete_minigame_unresolved_results_for_puzzle(
-            ctx.guild.id, QUEENS_GAME.name, preview.puzzle_number)
+        for puzzle_number in _queens_puzzle_numbers_for_date(preview.puzzle_date):
+            cf_common.user_db.delete_minigame_results_for_puzzle(
+                ctx.guild.id, QUEENS_GAME.name, puzzle_number)
+            cf_common.user_db.delete_minigame_unresolved_results_for_puzzle(
+                ctx.guild.id, QUEENS_GAME.name, puzzle_number)
         for entry in preview.resolved:
             cf_common.user_db.save_minigame_result(
                 _queens_result_message_id(
@@ -1288,11 +1320,11 @@ class Minigames(commands.Cog):
         tokens = str(args or '').split()
         if len(tokens) < 3:
             raise MinigameCogError(
-                'Usage: `;queens add <@user|LinkedIn Name> DATE time '
+                'Usage: `;queens add <@user|LinkedIn Name> DATE/# time '
                 '[status...]`.')
         for index in range(1, len(tokens) - 1):
             try:
-                parsed_date = _parse_queens_date(tokens[index])
+                parsed_date = _parse_queens_date_or_number(tokens[index])
                 parse_queens_time(tokens[index + 1])
             except (MinigameCogError, ValueError):
                 continue
@@ -1305,19 +1337,19 @@ class Minigames(commands.Cog):
                 status or 'No hints & no mistakes',
             )
         raise MinigameCogError(
-            'Usage: `;queens add <@user|LinkedIn Name> DATE time [status...]`.')
+            'Usage: `;queens add <@user|LinkedIn Name> DATE/# time [status...]`.')
 
     @staticmethod
     def _parse_queens_remove_args(args):
         tokens = str(args or '').split()
         if len(tokens) < 2:
             raise MinigameCogError(
-                'Usage: `;queens remove <@user|LinkedIn Name> DATE`.')
+                'Usage: `;queens remove <@user|LinkedIn Name> DATE/#`.')
         try:
-            parsed_date = _parse_queens_date(tokens[-1])
+            parsed_date = _parse_queens_date_or_number(tokens[-1])
         except MinigameCogError as exc:
             raise MinigameCogError(
-                'Usage: `;queens remove <@user|LinkedIn Name> DATE`.') from exc
+                'Usage: `;queens remove <@user|LinkedIn Name> DATE/#`.') from exc
         player_text = ' '.join(tokens[:-1]).strip()
         return player_text, parsed_date
 
@@ -1675,11 +1707,13 @@ class Minigames(commands.Cog):
                                      show_all=False, excluded_ids=None,
                                      included_ids=None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
-        puzzle_date = _parse_queens_date(date_arg)
+        puzzle_date = _parse_queens_date_or_number(date_arg)
         puzzle_number = _queens_puzzle_number_for_date(puzzle_date)
+        day_start = dt.datetime.combine(puzzle_date, dt.time.min).timestamp()
+        day_end = dt.datetime.combine(
+            puzzle_date + dt.timedelta(days=1), dt.time.min).timestamp()
         rows = cf_common.user_db.get_minigame_results_for_guild(
-            ctx.guild.id, QUEENS_GAME.name,
-            plo=puzzle_number, phi=puzzle_number + 1)
+            ctx.guild.id, QUEENS_GAME.name, dlo=day_start, dhi=day_end)
         rows = self._filter_minigame_banned_rows(ctx.guild.id, QUEENS_GAME, rows)
         rows = self._filter_akari_rows(
             rows, excluded_ids=excluded_ids, included_ids=included_ids)
@@ -1688,18 +1722,23 @@ class Minigames(commands.Cog):
                 f'No {QUEENS_GAME.display_name} results found for '
                 f'`{puzzle_date.isoformat()}`.')
 
-        puzzle_info = self._minigame_puzzle_change_info(
-            ctx.guild.id, QUEENS_GAME, puzzle_number,
-            excluded_ids=excluded_ids, included_ids=included_ids)
         links_by_user = self._queens_links_by_user(ctx.guild.id)
-        registrants = (
-            set(puzzle_info.keys())
-            if show_all
-            else set(links_by_user)
-        )
+        puzzle_numbers = {int(row.puzzle_number) for row in rows}
+        puzzle_info = None
+        registrants = None
+        if len(puzzle_numbers) == 1:
+            puzzle_info = self._minigame_puzzle_change_info(
+                ctx.guild.id, QUEENS_GAME, next(iter(puzzle_numbers)),
+                excluded_ids=excluded_ids, included_ids=included_ids)
+            registrants = (
+                set(puzzle_info.keys())
+                if show_all
+                else set(links_by_user)
+            )
         discord_file = _get_akari_puzzle_table_image_file(
             ctx.guild, rows,
-            f'{QUEENS_GAME.display_name} {puzzle_date.isoformat()} Results',
+            f'{QUEENS_GAME.display_name} #{puzzle_number} '
+            f'{puzzle_date.isoformat()} Results',
             puzzle_info=puzzle_info,
             registrants=registrants,
             identity_label='LinkedIn',
@@ -3687,19 +3726,35 @@ class Minigames(commands.Cog):
     async def queens_stats(self, ctx, *args):
         await self._cmd_queens_stats(ctx, *args)
 
-    @queens_stats.command(name='debug',
-                          brief='(Mod) Date results with ratings for ALL players',
-                          usage='<date> [+exclude=…] [+include=…]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
-    async def queens_stats_debug(self, ctx, *args):
+    @queens.group(name='results', brief='Show Queens date leaderboard',
+                  usage='[date|number] [+exclude=…] [+include=…]',
+                  invoke_without_command=True)
+    async def queens_results(self, ctx, *args):
         remaining, excluded_ids, included_ids = (
             await self._extract_queens_rating_filters(ctx, args))
-        if len(remaining) != 1:
+        if len(remaining) > 1:
             raise MinigameCogError(
-                'Usage: `;queens stats debug <date> '
+                'Usage: `;queens results [date|number] '
                 '[+exclude=…] [+include=…]`.')
+        date_arg = remaining[0] if remaining else dt.date.today().isoformat()
         await self._cmd_queens_stats_date(
-            ctx, remaining[0], show_all=True,
+            ctx, date_arg,
+            excluded_ids=excluded_ids, included_ids=included_ids)
+
+    @queens_results.command(name='debug',
+                            brief='(Mod) Date results with ratings for ALL players',
+                            usage='[date|number] [+exclude=…] [+include=…]')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_results_debug(self, ctx, *args):
+        remaining, excluded_ids, included_ids = (
+            await self._extract_queens_rating_filters(ctx, args))
+        if len(remaining) > 1:
+            raise MinigameCogError(
+                'Usage: `;queens results debug [date|number] '
+                '[+exclude=…] [+include=…]`.')
+        date_arg = remaining[0] if remaining else dt.date.today().isoformat()
+        await self._cmd_queens_stats_date(
+            ctx, date_arg, show_all=True,
             excluded_ids=excluded_ids, included_ids=included_ids)
 
     @queens.group(name='import', brief='Preview a pasted Queens leaderboard',
@@ -3734,11 +3789,12 @@ class Minigames(commands.Cog):
         )
         await ctx.send(embed=discord_common.embed_success(
             f'Saved {saved.resolved} registered {QUEENS_GAME.display_name} '
-            f'result(s) for {preview.puzzle_date.isoformat()}.{unresolved}'))
+            f'result(s) for #{preview.puzzle_number} '
+            f'{preview.puzzle_date.isoformat()}.{unresolved}'))
 
     @queens.command(name='add',
                     brief='Manually add a Queens result',
-                    usage='<@user|LinkedIn Name> date time [status...]')
+                    usage='<@user|LinkedIn Name> date|number time [status...]')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def queens_add(self, ctx, *, args: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
@@ -3751,8 +3807,9 @@ class Minigames(commands.Cog):
         parsed_number = _queens_puzzle_number_for_date(parsed_date)
         no_hints, no_mistakes, _status_text = queens_status_flags(status)
         time_seconds = parse_queens_time(time_text)
-        cf_common.user_db.delete_minigame_result_for_user_puzzle(
-            ctx.guild.id, QUEENS_GAME.name, user_id, parsed_number)
+        for puzzle_number in _queens_puzzle_numbers_for_date(parsed_date):
+            cf_common.user_db.delete_minigame_result_for_user_puzzle(
+                ctx.guild.id, QUEENS_GAME.name, user_id, puzzle_number)
         cf_common.user_db.save_minigame_result(
             _queens_result_message_id(ctx.guild.id, parsed_date, user_id),
             ctx.guild.id, QUEENS_GAME.name, ctx.channel.id, user_id,
@@ -3763,20 +3820,21 @@ class Minigames(commands.Cog):
         self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
         await ctx.send(embed=discord_common.embed_success(
             f'Added {QUEENS_GAME.display_name} result for '
-            f'`{label}` on {parsed_date.isoformat()}: '
+            f'`{label}` on #{parsed_number} {parsed_date.isoformat()}: '
             f'**{format_duration(time_seconds)}**.'))
 
     @queens.command(name='remove', brief='Remove a Queens result',
-                    usage='<@user|LinkedIn Name> date')
+                    usage='<@user|LinkedIn Name> date|number')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def queens_remove(self, ctx, *, args: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         player_text, parsed_date = self._parse_queens_remove_args(args)
         user_id, label, _linked = await self._resolve_queens_linked_player(
             ctx, player_text)
-        parsed_number = _queens_puzzle_number_for_date(parsed_date)
-        rc = cf_common.user_db.delete_minigame_result_for_user_puzzle(
-            ctx.guild.id, QUEENS_GAME.name, user_id, parsed_number)
+        rc = 0
+        for puzzle_number in _queens_puzzle_numbers_for_date(parsed_date):
+            rc += cf_common.user_db.delete_minigame_result_for_user_puzzle(
+                ctx.guild.id, QUEENS_GAME.name, user_id, puzzle_number)
         if not rc:
             raise MinigameCogError(
                 f'No {QUEENS_GAME.display_name} result found for '
@@ -3784,23 +3842,27 @@ class Minigames(commands.Cog):
         self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
         await ctx.send(embed=discord_common.embed_success(
             f'Removed {QUEENS_GAME.display_name} result for '
-            f'`{label}` on {parsed_date.isoformat()}.'))
+            f'`{label}` on #{_queens_puzzle_number_for_date(parsed_date)} '
+            f'{parsed_date.isoformat()}.'))
 
     @queens.command(name='clear', aliases=['delete'],
                     brief='(Mod) Remove all Queens results for a date',
-                    usage='date')
+                    usage='date|number')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def queens_clear(self, ctx, puzzle_date: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         if puzzle_date is None:
-            raise MinigameCogError('Usage: `;queens clear DATE`.')
-        parsed_date = _parse_queens_date(puzzle_date)
+            raise MinigameCogError('Usage: `;queens clear DATE/#`.')
+        parsed_date = _parse_queens_date_or_number(puzzle_date)
         parsed_number = _queens_puzzle_number_for_date(parsed_date)
-        deleted = cf_common.user_db.delete_minigame_results_for_puzzle(
-            ctx.guild.id, QUEENS_GAME.name, parsed_number)
-        unresolved_deleted = (
-            cf_common.user_db.delete_minigame_unresolved_results_for_puzzle(
-                ctx.guild.id, QUEENS_GAME.name, parsed_number))
+        deleted = 0
+        unresolved_deleted = 0
+        for puzzle_number in _queens_puzzle_numbers_for_date(parsed_date):
+            deleted += cf_common.user_db.delete_minigame_results_for_puzzle(
+                ctx.guild.id, QUEENS_GAME.name, puzzle_number)
+            unresolved_deleted += (
+                cf_common.user_db.delete_minigame_unresolved_results_for_puzzle(
+                    ctx.guild.id, QUEENS_GAME.name, puzzle_number))
         if not deleted and not unresolved_deleted:
             raise MinigameCogError(
                 f'No {QUEENS_GAME.display_name} results found for '
@@ -3808,7 +3870,8 @@ class Minigames(commands.Cog):
         self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
         await ctx.send(embed=discord_common.embed_success(
             f'Removed {deleted} registered and {unresolved_deleted} unresolved '
-            f'{QUEENS_GAME.display_name} result(s) for {parsed_date.isoformat()}.'))
+            f'{QUEENS_GAME.display_name} result(s) for '
+            f'#{parsed_number} {parsed_date.isoformat()}.'))
 
     @queens.group(name='ratings', brief='Show Queens rating leaderboard',
                   usage='[+exclude=…] [+include=…]',
