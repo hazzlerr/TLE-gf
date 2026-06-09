@@ -967,7 +967,7 @@ class _FakeMessage:
 
 
 class TestQueensImport:
-    def test_importer_must_be_linked_for_you_row(self, db, monkeypatch):
+    def test_importer_must_be_linked(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         guild = _FakeGuild(100, members=[
             _FakeDiscordMember(300, 'ali', 'Ali'),
@@ -989,7 +989,7 @@ class TestQueensImport:
         with pytest.raises(MinigameCogError, match='Register the importer'):
             cog._make_queens_import_preview(ctx, '2026-06-08', content)
 
-    def test_import_stores_unresolved_names_without_registered_importer(
+    def test_importer_must_be_linked_even_for_unresolved_only_board(
             self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         guild = _FakeGuild(100, members=[
@@ -1002,16 +1002,12 @@ class TestQueensImport:
             message=SimpleNamespace(id=555),
         )
         cog = Minigames(bot=None)
-        preview = cog._make_queens_import_preview(ctx, '2026-06-08', (
-            'Alice LinkedIn\n'
-            '\U0001f913\U0001f48e No hints & no mistakes!\n'
-            '0:04\n'
-        ))
-
-        assert preview.resolved == []
-        assert [entry.linkedin_name for entry in preview.unresolved] == [
-            'Alice LinkedIn',
-        ]
+        with pytest.raises(MinigameCogError, match='Register the importer'):
+            cog._make_queens_import_preview(ctx, '2026-06-08', (
+                'Alice LinkedIn\n'
+                '\U0001f913\U0001f48e No hints & no mistakes!\n'
+                '0:04\n'
+            ))
 
     def test_preview_resolves_linked_names_and_you_then_saves_ratings(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)

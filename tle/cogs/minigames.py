@@ -1095,7 +1095,12 @@ class Minigames(commands.Cog):
         if not entries:
             raise MinigameCogError('No LinkedIn Queens leaderboard rows found.')
 
-        importer_link = None
+        importer_link = cf_common.user_db.get_minigame_player_link(
+            ctx.guild.id, QUEENS_GAME.name, ctx.author.id)
+        if importer_link is None:
+            raise MinigameCogError(
+                'Register the importer with `;queens register` before importing '
+                'LinkedIn Queens leaderboard results.')
         resolved = []
         unresolved = []
         seen_users = set()
@@ -1103,14 +1108,6 @@ class Minigames(commands.Cog):
         for entry in entries:
             normalized = normalize_queens_name(entry.linkedin_name)
             if entry.is_you:
-                if importer_link is None:
-                    importer_link = cf_common.user_db.get_minigame_player_link(
-                        ctx.guild.id, QUEENS_GAME.name, ctx.author.id)
-                if importer_link is None:
-                    raise MinigameCogError(
-                        'Register the importer with `;queens register` before '
-                        'importing a LinkedIn Queens leaderboard that contains '
-                        '`You`.')
                 link = importer_link
             else:
                 link = cf_common.user_db.get_minigame_player_link_by_name(
