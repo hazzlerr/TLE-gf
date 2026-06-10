@@ -79,9 +79,15 @@ from playwright.async_api import async_playwright
 _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 try:
-    from tle.cogs._minigame_queens import parse_queens_leaderboard  # noqa: E402
+    from tle.cogs._minigame_queens import (  # noqa: E402
+        normalize_queens_name,
+        parse_queens_leaderboard,
+    )
 except ImportError:
     parse_queens_leaderboard = None
+
+    def normalize_queens_name(name):
+        return ' '.join(str(name).strip().casefold().split())
 
 
 _STATE_PATH = _REPO_ROOT / 'extra' / '.queens_state.json'
@@ -90,6 +96,7 @@ _STATE_PATH = _REPO_ROOT / 'extra' / '.queens_state.json'
 # completed play.
 _QUEENS_URL = 'https://www.linkedin.com/games/queens/results/'
 _QUEENS_PLAY_URL = 'https://www.linkedin.com/games/queens/'
+_INVITATIONS_URL = 'https://www.linkedin.com/mynetwork/invitation-manager/received/'
 _LOGIN_URL = 'https://www.linkedin.com/login'
 
 # Tried in order.  The leaderboard sits inside the post-game / results modal
@@ -471,15 +478,42 @@ async def _dismiss_consent_banner(page):
     of the page on first visit; until you accept or reject, every click into
     the body underneath either misses or hits the banner instead.
     """
-    for label in ('Accept', 'Reject', 'Got it', 'OK', 'Agree'):
-        try:
-            btn = page.get_by_role('button', name=re.compile(rf'^{label}', re.I))
-            if await btn.count():
-                await btn.first.click(timeout=2000)
-                await page.wait_for_timeout(300)
-                return
-        except Exception:
-            continue
+    clicked = await page.evaluate(r"""
+    () => {
+      const actionRe = /^(accept(?: all)?(?: cookies)?|reject(?: all)?(?: cookies)?|got it|ok|agree)$/i;
+      const consentRe = /cookie|privacy|consent|we respect your privacy|use cookies|personalized ads/i;
+      const invitationRe = /invitation|mutual connection|followers?|ignore/i;
+      const visible = (el) => {
+        const rect = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        return rect.width > 0 && rect.height > 0
+          && cs.visibility !== 'hidden'
+          && cs.display !== 'none';
+      };
+      const buttons = Array.from(document.querySelectorAll('button,[role="button"]'));
+      for (const button of buttons) {
+        const label = (
+          button.innerText
+          || button.getAttribute('aria-label')
+          || button.getAttribute('value')
+          || ''
+        ).replace(/\s+/g, ' ').trim();
+        if (!visible(button) || !actionRe.test(label)) continue;
+        let context = '';
+        let node = button;
+        for (let depth = 0; node && node !== document.body && depth < 5; depth += 1) {
+          context += ' ' + (node.innerText || '');
+          node = node.parentElement;
+        }
+        if (!consentRe.test(context) || invitationRe.test(context)) continue;
+        button.click();
+        return true;
+      }
+      return false;
+    }
+    """)
+    if clicked:
+        await page.wait_for_timeout(300)
 
 
 async def _click_first(page, *candidates, timeout=3000):
@@ -505,7 +539,10 @@ async def _click_first(page, *candidates, timeout=3000):
     # Text-fallback: click the first visible node whose text matches.
     for _role, name in candidates:
         try:
-            loc = page.locator(f'text={name.pattern if hasattr(name, "pattern") else name}').first
+            if hasattr(name, 'pattern'):
+                loc = page.get_by_text(name).first
+            else:
+                loc = page.locator(f'text={name}').first
             if not await loc.count():
                 continue
             if not await loc.is_visible():
@@ -888,6 +925,316 @@ async def _click_see_more_until_done(page):
     return clicks
 
 
+_INVITATION_CANDIDATES_JS = r"""
+() => {
+  function visible(el) {
+    const rect = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
+    return rect.width > 0 && rect.height > 0
+      && cs.visibility !== 'hidden'
+      && cs.display !== 'none';
+  }
+
+  function cleanName(text) {
+    let value = (text || '').replace(/\s+/g, ' ').trim();
+    if (!value) return '';
+    value = value.replace(/^accept\s+/i, '');
+    value = value.replace(/^invitation\s+from\s+/i, '');
+    value = value.replace(/[’']s\s+invitation.*$/i, '');
+    value = value.replace(/\s+invitation.*$/i, '');
+    value = value.replace(/[’']s$/i, '');
+    value = value.replace(/^view\s+/i, '');
+    value = value.replace(/\s+profile$/i, '');
+    value = value.trim();
+    if (!value) return '';
+    const lower = value.toLowerCase();
+    const rejects = [
+      'accept', 'ignore', 'message', 'view profile', 'connect',
+      'show more', 'see more'
+    ];
+    if (rejects.includes(lower)) return '';
+    if (lower.includes('mutual connection')) return '';
+    if (lower.includes('follower')) return '';
+    if (lower.includes('invitation')) return '';
+    if (value.length > 100) return '';
+    return value;
+  }
+
+  const buttons = Array.from(document.querySelectorAll('button'));
+  const out = [];
+  buttons.forEach((button, buttonIndex) => {
+    const label = (
+      button.innerText || button.getAttribute('aria-label') || ''
+    ).trim();
+    const aria = (button.getAttribute('aria-label') || '').trim();
+    if (!/^accept\b/i.test(label) && !/^accept\b/i.test(aria)) return;
+    if (!visible(button)) return;
+
+    let card = button;
+    let node = button;
+    for (let depth = 0; node && depth < 8; depth += 1, node = node.parentElement) {
+      const text = (node.innerText || '').trim();
+      if (!text) continue;
+      const buttonCount = node.querySelectorAll('button').length;
+      if (/accept/i.test(text) && (/ignore/i.test(text) || buttonCount <= 6)) {
+        card = node;
+        break;
+      }
+    }
+    const cardText = (card.innerText || '').trim();
+    const isInvitationAction = /ignore/i.test(cardText)
+      || /invitation/i.test(cardText)
+      || /invitation/i.test(aria);
+    if (!isInvitationAction) return;
+
+    const names = [];
+    const push = (value) => {
+      const cleaned = cleanName(value);
+      if (cleaned && !names.includes(cleaned)) names.push(cleaned);
+    };
+
+    push(aria);
+    for (const link of card.querySelectorAll('a[href*="/in/"]')) {
+      push(link.innerText || link.getAttribute('aria-label') || '');
+    }
+    for (const el of card.querySelectorAll('[aria-label]')) {
+      const value = el.getAttribute('aria-label') || '';
+      if (/profile|invitation|accept/i.test(value)) push(value);
+    }
+    const lines = (card.innerText || '')
+      .split(/\n+/)
+      .map(line => line.trim())
+      .filter(Boolean);
+    for (const line of lines.slice(0, 8)) push(line);
+
+    out.push({
+      button_index: buttonIndex,
+      names,
+      text_preview: lines.slice(0, 8).join(' | '),
+    });
+  });
+  return out;
+}
+"""
+
+
+async def _load_received_invitations(page, *, click_more=True):
+    """Best-effort scroll/load pass for the received invitations page."""
+    last_height = -1
+    for _ in range(6):
+        if click_more:
+            clicked = await _click_first(
+                page,
+                ('button', _SEE_MORE_RE),
+                ('link', _SEE_MORE_RE),
+                timeout=2000,
+            )
+            if clicked:
+                await page.wait_for_timeout(800)
+                continue
+        try:
+            height = await page.evaluate('document.body.scrollHeight')
+            await page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+            await page.wait_for_timeout(700)
+        except Exception:
+            break
+        if height == last_height:
+            break
+        last_height = height
+
+
+async def _find_matching_invitation(page, remaining):
+    """Return ``(candidate, normalized_name)`` for the first exact name match."""
+    candidates = await page.evaluate(_INVITATION_CANDIDATES_JS)
+    for candidate in candidates:
+        candidate_names = candidate.get('names') or []
+        normalized_candidates = {
+            normalize_queens_name(name)
+            for name in candidate_names
+            if normalize_queens_name(name)
+        }
+        for normalized in remaining:
+            if normalized in normalized_candidates:
+                return candidate, normalized
+    return None, None
+
+
+async def cmd_connect(state_path, names, *, headless, debug, json_out,
+                      dry_run=False):
+    if not state_path.exists():
+        payload = {'status': 'session_missing',
+                   'error': f'No saved session at {state_path}.'}
+        if json_out:
+            print(json.dumps(payload))
+        else:
+            print(payload['error'], file=sys.stderr)
+        return 1
+    targets = {}
+    for name in names:
+        normalized = normalize_queens_name(name)
+        if normalized:
+            targets[normalized] = name
+    if not targets:
+        payload = {'status': 'no_targets', 'accepted': [], 'missing': []}
+        if json_out:
+            print(json.dumps(payload))
+        else:
+            print('No names supplied.', file=sys.stderr)
+        return 1
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        context = await browser.new_context(storage_state=str(state_path))
+        page = await context.new_page()
+        try:
+            await page.goto(_INVITATIONS_URL, wait_until='domcontentloaded',
+                            timeout=60000)
+        except Exception as exc:
+            await browser.close()
+            payload = {'status': 'error', 'error': f'Navigation failed: {exc}'}
+            if json_out:
+                print(json.dumps(payload))
+            else:
+                print(payload['error'], file=sys.stderr)
+            return 1
+
+        if any(f in page.url for f in _SESSION_EXPIRED_URL_FRAGMENTS):
+            current = page.url
+            await browser.close()
+            payload = {'status': 'session_expired', 'current_url': current}
+            if json_out:
+                print(json.dumps(payload))
+            else:
+                print(f'Session expired (landed on {current}).', file=sys.stderr)
+            return 1
+
+        if not dry_run:
+            await _dismiss_consent_banner(page)
+        try:
+            await page.wait_for_selector('button', timeout=10000)
+        except Exception:
+            pass
+        await _load_received_invitations(page, click_more=not dry_run)
+
+        candidates = await page.evaluate(_INVITATION_CANDIDATES_JS)
+        seen_before = []
+        for candidate in candidates:
+            for name in candidate.get('names') or []:
+                if name not in seen_before:
+                    seen_before.append(name)
+        if dry_run:
+            target_names = set(targets)
+            matches = []
+            for candidate in candidates:
+                for name in candidate.get('names') or []:
+                    normalized = normalize_queens_name(name)
+                    if normalized in target_names and name not in matches:
+                        matches.append(name)
+
+            if debug:
+                screenshot_path = _REPO_ROOT / 'queens-connect-debug.png'
+                text_path = _REPO_ROOT / 'queens-connect-debug.txt'
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+                try:
+                    text = await page.locator('body').inner_text()
+                except Exception:
+                    text = ''
+                text_path.write_text(text or '', encoding='utf-8')
+                if not json_out:
+                    print(f'Saved screenshot to {screenshot_path}')
+                    print(f'Saved page text to    {text_path}')
+
+            await browser.close()
+            payload = {
+                'status': 'ok',
+                'dry_run': True,
+                'candidate_count': len(candidates),
+                'names': seen_before,
+                'matches': matches,
+                'accepted': [],
+                'accepted_normalized': [],
+                'missing': [
+                    name for normalized, name in targets.items()
+                    if normalized not in {
+                        normalize_queens_name(match) for match in matches
+                    }
+                ],
+            }
+            if json_out:
+                print(json.dumps(payload))
+            else:
+                print(f'Found {len(seen_before)} received invitation name(s).')
+                for name in seen_before:
+                    print(f'  {name}')
+            return 0
+
+        accepted = []
+        failed = []
+        remaining = dict(targets)
+        for _ in range(len(targets)):
+            candidate, normalized = await _find_matching_invitation(page, remaining)
+            if candidate is None:
+                break
+            button_index = candidate['button_index']
+            try:
+                button = page.locator('button').nth(button_index)
+                await button.scroll_into_view_if_needed(timeout=2000)
+                await button.click(timeout=5000)
+                await page.wait_for_timeout(1200)
+            except Exception as exc:
+                failed.append({'name': remaining[normalized], 'error': str(exc)})
+                remaining.pop(normalized, None)
+                continue
+            accepted.append(remaining.pop(normalized))
+
+        seen = []
+        try:
+            for candidate in await page.evaluate(_INVITATION_CANDIDATES_JS):
+                for name in candidate.get('names') or []:
+                    if name not in seen:
+                        seen.append(name)
+        except Exception:
+            pass
+
+        if debug:
+            screenshot_path = _REPO_ROOT / 'queens-connect-debug.png'
+            text_path = _REPO_ROOT / 'queens-connect-debug.txt'
+            await page.screenshot(path=str(screenshot_path), full_page=True)
+            try:
+                text = await page.locator('body').inner_text()
+            except Exception:
+                text = ''
+            text_path.write_text(text or '', encoding='utf-8')
+            if not json_out:
+                print(f'Saved screenshot to {screenshot_path}')
+                print(f'Saved page text to    {text_path}')
+
+        await browser.close()
+
+    payload = {
+        'status': 'ok',
+        'accepted': accepted,
+        'accepted_normalized': [
+            normalize_queens_name(name) for name in accepted
+        ],
+        'missing': list(remaining.values()),
+        'failed': failed,
+        'seen_before': seen_before[:50],
+        'seen': seen[:50],
+    }
+    if json_out:
+        print(json.dumps(payload))
+    else:
+        print(f'Accepted {len(accepted)} connection request(s).')
+        for name in accepted:
+            print(f'  accepted: {name}')
+        for name in remaining.values():
+            print(f'  missing:  {name}')
+        for item in failed:
+            print(f'  failed:   {item["name"]}: {item["error"]}')
+    return 0 if accepted or not failed else 2
+
+
 async def _extract_leaderboard_text(page):
     for selector in _LEADERBOARD_SELECTORS:
         try:
@@ -1176,6 +1523,25 @@ def main(argv=None):
         '--no-slow', dest='slow', action='store_false', default=True,
         help='Disable human-pacing delays during auto-play (testing only).')
 
+    connect_p = sub.add_parser(
+        'connect',
+        help='Accept received LinkedIn connection requests for matching names.')
+    connect_p.add_argument(
+        '--name', dest='names', action='append', default=[],
+        help='LinkedIn display name to match exactly. Repeat for multiple names.')
+    connect_p.add_argument(
+        '--headed', action='store_true',
+        help='Show the browser window (default: headless).')
+    connect_p.add_argument(
+        '--debug', action='store_true',
+        help='Save a screenshot and raw page text for inspection.')
+    connect_p.add_argument(
+        '--json', dest='json_out', action='store_true',
+        help='Emit a machine-readable JSON object on stdout. Used by the bot.')
+    connect_p.add_argument(
+        '--dry-run', action='store_true',
+        help='Only report matching received invitations; do not accept any.')
+
     solve_p = sub.add_parser(
         'solve', help='Read the puzzle grid, print the solution, never click.')
     solve_p.add_argument('--headed', action='store_true')
@@ -1212,6 +1578,10 @@ def main(argv=None):
         return asyncio.run(cmd_fetch(
             state_path, headless=not args.headed, debug=args.debug,
             json_out=args.json_out, auto_play=args.auto_play, slow=args.slow))
+    if args.cmd == 'connect':
+        return asyncio.run(cmd_connect(
+            state_path, args.names, headless=not args.headed,
+            debug=args.debug, json_out=args.json_out, dry_run=args.dry_run))
     if args.cmd == 'solve':
         return asyncio.run(cmd_solve(
             state_path, headless=not args.headed, debug=args.debug))

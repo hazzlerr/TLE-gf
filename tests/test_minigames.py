@@ -1155,8 +1155,8 @@ class TestQueensImport:
             send=send,
             sent=sent,
         )
-        asyncio.run(Minigames.queens_register.__wrapped__(
-            cog, register_ctx, 'Alice', linkedin='LinkedIn'))
+        claimed_count = cog._cmd_queens_register_link(
+            register_ctx, alice, 'Alice LinkedIn')
 
         claimed = db.get_minigame_result_for_user_puzzle(
             100, 'queens', alice.id, _queens_number('2026-06-08'))
@@ -1167,8 +1167,7 @@ class TestQueensImport:
         assert [row.user_id for row in db.get_minigame_ratings(100, 'queens')] == [
             '301', '300',
         ]
-        assert 'Claimed 1 stored Queens result(s)' in (
-            sent['embed'].description)
+        assert claimed_count == 1
 
     def test_register_normalizes_legacy_unresolved_puzzle_number(
             self, db, monkeypatch):
@@ -1199,14 +1198,14 @@ class TestQueensImport:
             '2026-06-08', 100, 4, True, 'legacy')
         cog = Minigames(bot=None)
 
-        asyncio.run(Minigames.queens_register.__wrapped__(
-            cog, ctx, 'Alice', linkedin='LinkedIn'))
+        claimed_count = cog._cmd_queens_register_link(
+            ctx, alice, 'Alice LinkedIn')
 
         assert db.get_minigame_result_for_user_puzzle(
             100, 'queens', alice.id, _queens_number('2026-06-08')) is not None
         assert db.get_minigame_result_for_user_puzzle(
             100, 'queens', alice.id, dt.date(2026, 6, 8).toordinal()) is None
-        assert 'Claimed 1 stored Queens result(s)' in sent['embed'].description
+        assert claimed_count == 1
 
     def test_you_row_prefers_importer_even_when_name_is_copied(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
@@ -1352,8 +1351,11 @@ class TestQueensCommands:
         assert '**2** consecutive clean day(s)' in streak.description
         assert 'Latest result: **2026-06-11**' in streak.description
 
-    def test_register_self_includes_connection_instruction(self, db, monkeypatch):
+    def test_register_self_queues_connection_check(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_neutral',
+            lambda desc: SimpleNamespace(description=desc))
         db.set_guild_config(100, 'queens', '1')
         alice = _FakeDiscordMember(300, 'alice', 'Alice')
         guild = _FakeGuild(100, members=[alice])
@@ -1366,17 +1368,20 @@ class TestQueensCommands:
             cog, ctx, 'Alice', linkedin='LinkedIn'))
 
         row = db.get_minigame_player_link(100, 'queens', alice.id)
-        assert row.external_name == 'Alice LinkedIn'
-        assert row.external_url is None
+        assert row is None
+        pending = cog._queens_pending_registrations[('100', '300')]
+        assert pending.name == 'Alice LinkedIn'
         instruction = cog._queens_connection_instruction(100)
-        assert '[this](https://www.linkedin.com/in/linked/) account' in instruction
-        assert 'with the note "GF Queens"' in instruction
+        assert 'https://www.linkedin.com/in/linked/' in instruction
+        assert 'note' not in instruction
         assert 'Linked User' not in instruction
+        assert 'registration is pending as `Alice LinkedIn`' in (
+            ctx.sent['embed'].description)
 
-    def test_register_other_accepts_discord_username(self, db, monkeypatch):
+    def test_register_other_accepts_after_linkedin_match(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         monkeypatch.setattr(
-            minigames_module.discord_common, 'embed_success',
+            minigames_module.discord_common, 'embed_neutral',
             lambda desc: SimpleNamespace(description=desc))
         db.set_guild_config(100, 'queens', '1')
         mod = _FakeDiscordMember(
@@ -1390,11 +1395,55 @@ class TestQueensCommands:
         asyncio.run(Minigames.queens_register.__wrapped__(
             cog, ctx, '+username', linkedin='bob Bob LinkedIn'))
 
+        assert db.get_minigame_player_link(100, 'queens', bob.id) is None
+        pending = list(cog._queens_pending_registrations.values())
+        assert pending[0].name == 'Bob LinkedIn'
+        assert '`Bob`' in ctx.sent['embed'].description
+
+        async def fake_connect(guild_id, names):
+            assert str(guild_id) == '100'
+            assert names == ['Bob LinkedIn']
+            return {
+                'status': 'ok',
+                'accepted': ['Bob LinkedIn'],
+                'accepted_normalized': [normalize_queens_name('Bob LinkedIn')],
+            }, None
+
+        monkeypatch.setattr(cog, '_run_queens_connect', fake_connect)
+        asyncio.run(cog._process_queens_pending_registrations(100, pending))
+
         row = db.get_minigame_player_link(100, 'queens', bob.id)
         assert row.external_name == 'Bob LinkedIn'
         assert row.normalized_name == normalize_queens_name('Bob LinkedIn')
-        assert '`Bob` is registered for LinkedIn Queens' in (
-            ctx.sent['embed'].description)
+        assert cog._queens_pending_registrations == {}
+
+    def test_pending_register_expires_after_linkedin_scan_without_match(
+            self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_neutral',
+            lambda desc: SimpleNamespace(description=desc))
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_alert',
+            lambda desc: SimpleNamespace(description=desc))
+        db.set_guild_config(100, 'queens', '1')
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        guild = _FakeGuild(100, members=[alice])
+        ctx = self._make_ctx(guild, alice)
+        cog = Minigames(bot=None)
+
+        asyncio.run(Minigames.queens_register.__wrapped__(
+            cog, ctx, 'Alice', linkedin='LinkedIn'))
+        pending = list(cog._queens_pending_registrations.values())
+
+        async def fake_connect(_guild_id, _names):
+            return {'status': 'ok', 'accepted': [], 'accepted_normalized': []}, None
+
+        monkeypatch.setattr(cog, '_run_queens_connect', fake_connect)
+        asyncio.run(cog._process_queens_pending_registrations(100, pending))
+
+        assert cog._queens_pending_registrations == {}
+        assert db.get_minigame_player_link(100, 'queens', alice.id) is None
 
     def test_register_plain_username_stays_linkedin_name(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
@@ -1408,8 +1457,9 @@ class TestQueensCommands:
         asyncio.run(Minigames.queens_register.__wrapped__(
             cog, ctx, 'bob', linkedin='Bob LinkedIn'))
 
-        alice_link = db.get_minigame_player_link(100, 'queens', alice.id)
-        assert alice_link.external_name == 'bob Bob LinkedIn'
+        pending = cog._queens_pending_registrations[('100', '300')]
+        assert pending.name == 'bob Bob LinkedIn'
+        assert db.get_minigame_player_link(100, 'queens', alice.id) is None
         assert db.get_minigame_player_link(100, 'queens', bob.id) is None
 
     def test_register_non_username_plus_token_stays_linkedin_name(
@@ -1424,8 +1474,9 @@ class TestQueensCommands:
         asyncio.run(Minigames.queens_register.__wrapped__(
             cog, ctx, '+bob', linkedin='Bob LinkedIn'))
 
-        alice_link = db.get_minigame_player_link(100, 'queens', alice.id)
-        assert alice_link.external_name == '+bob Bob LinkedIn'
+        pending = cog._queens_pending_registrations[('100', '300')]
+        assert pending.name == '+bob Bob LinkedIn'
+        assert db.get_minigame_player_link(100, 'queens', alice.id) is None
 
     def test_register_plain_mention_stays_linkedin_name(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
@@ -1439,17 +1490,20 @@ class TestQueensCommands:
         asyncio.run(Minigames.queens_register.__wrapped__(
             cog, ctx, '<@301>', linkedin='Bob LinkedIn'))
 
-        alice_link = db.get_minigame_player_link(100, 'queens', alice.id)
-        assert alice_link.external_name == '<@301> Bob LinkedIn'
+        pending = cog._queens_pending_registrations[('100', '300')]
+        assert pending.name == '<@301> Bob LinkedIn'
+        assert db.get_minigame_player_link(100, 'queens', alice.id) is None
         assert db.get_minigame_player_link(100, 'queens', bob.id) is None
 
     def test_slash_register_self(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         monkeypatch.setattr(
-            minigames_module.discord_common, 'embed_success',
+            minigames_module.discord_common, 'embed_neutral',
             lambda desc: SimpleNamespace(description=desc))
         db.set_guild_config(100, 'queens', '1')
-        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        alice = _FakeDiscordMember(
+            300, 'alice', 'Alice',
+            roles=[SimpleNamespace(name=constants.TLE_MODERATOR)])
         guild = _FakeGuild(100, members=[alice])
         interaction = SimpleNamespace(
             id=999,
@@ -1466,9 +1520,11 @@ class TestQueensCommands:
             interaction, 'Alice LinkedIn'))
 
         row = db.get_minigame_player_link(100, 'queens', alice.id)
-        assert row.external_name == 'Alice LinkedIn'
+        assert row is None
+        assert cog._queens_pending_registrations[('100', '300')].name == (
+            'Alice LinkedIn')
         assert interaction.response.deferred is True
-        assert 'You are registered for LinkedIn Queens' in (
+        assert 'registration is pending as `Alice LinkedIn`' in (
             interaction.followup.sent[0]['embed'].description)
 
     def test_update_sends_slow_notice_when_not_rate_limited(
@@ -1548,6 +1604,9 @@ class TestQueensCommands:
         monkeypatch.setattr(
             minigames_module.discord_common, 'embed_success',
             lambda desc: SimpleNamespace(description=desc))
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_neutral',
+            lambda desc: SimpleNamespace(description=desc))
         db.set_guild_config(100, 'queens', '1')
         alice = _FakeDiscordMember(300, 'alice', 'Alice')
         guild = _FakeGuild(100, members=[alice])
@@ -1558,12 +1617,27 @@ class TestQueensCommands:
             cog, ctx, '+anon', linkedin='Alice LinkedIn'))
 
         row = db.get_minigame_player_link(100, 'queens', alice.id)
+        assert row is None
+        pending = list(cog._queens_pending_registrations.values())
+        assert pending[0].name == 'Alice LinkedIn'
+        assert 'Anonymous' in ctx.sent['embed'].description
+        assert 'Alice LinkedIn' not in ctx.sent['embed'].description
+
+        async def fake_connect(_guild_id, _names):
+            return {
+                'status': 'ok',
+                'accepted': ['Alice LinkedIn'],
+                'accepted_normalized': [normalize_queens_name('Alice LinkedIn')],
+            }, None
+
+        monkeypatch.setattr(cog, '_run_queens_connect', fake_connect)
+        asyncio.run(cog._process_queens_pending_registrations(100, pending))
+
+        row = db.get_minigame_player_link(100, 'queens', alice.id)
         assert row.external_name == 'Alice LinkedIn'
         assert row.normalized_name == normalize_queens_name('Alice LinkedIn')
         assert row.external_url == (
             minigames_module._QUEENS_ANONYMOUS_LINK_MARKER)
-        assert 'Anonymous' in ctx.sent['embed'].description
-        assert 'Alice LinkedIn' not in ctx.sent['embed'].description
 
         pages = []
         monkeypatch.setattr(
@@ -1617,6 +1691,7 @@ class TestQueensCommands:
         interaction = SimpleNamespace(
             guild=guild,
             user=alice,
+            channel_id=200,
             response=Response(),
         )
         asyncio.run(view.children[0].callback(interaction))
@@ -1626,9 +1701,9 @@ class TestQueensCommands:
         asyncio.run(modal.on_submit(interaction))
 
         row = db.get_minigame_player_link(100, 'queens', alice.id)
-        assert row.external_name == 'Alice LinkedIn'
-        assert row.external_url == (
-            minigames_module._QUEENS_ANONYMOUS_LINK_MARKER)
+        assert row is None
+        assert cog._queens_pending_registrations[('100', '300')].name == (
+            'Alice LinkedIn')
         assert captured['ephemeral'] is True
         assert 'Anonymous' in captured['embed'].description
         assert 'Alice LinkedIn' not in captured['embed'].description
@@ -1636,9 +1711,7 @@ class TestQueensCommands:
     def test_connection_set_requires_and_stores_profile_url(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         db.set_guild_config(100, 'queens', '1')
-        mod = _FakeDiscordMember(
-            999, 'mod', 'Mod',
-            roles=[SimpleNamespace(name=constants.TLE_MODERATOR)])
+        mod = _FakeDiscordMember(999, 'mod', 'Mod')
         guild = _FakeGuild(100, members=[mod])
         ctx = self._make_ctx(guild, mod)
         cog = Minigames(bot=None)
@@ -1657,8 +1730,8 @@ class TestQueensCommands:
             'url': 'https://www.linkedin.com/in/linked/',
         }
         instruction = cog._queens_connection_instruction(100)
-        assert '[this](https://www.linkedin.com/in/linked/) account' in instruction
-        assert 'with the note "GF Queens"' in instruction
+        assert 'https://www.linkedin.com/in/linked/' in instruction
+        assert 'note' not in instruction
         assert 'Linked User' not in instruction
 
     def test_register_rejects_url_input(self, db, monkeypatch):
