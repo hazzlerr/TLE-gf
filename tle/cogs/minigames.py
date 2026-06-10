@@ -12,7 +12,6 @@ import statistics
 import sys
 import time
 from collections import namedtuple
-from types import SimpleNamespace
 from typing import Optional
 
 import cairo
@@ -118,7 +117,8 @@ _QUEENS_ANCHOR_NUMBER = 769
 #  - Optional override for the storage_state.json path
 # Rate-limit bookkeeping for `;queens update` lives in kvs under
 # `queens_update_throttle:{guild_id}`.
-_QUEENS_IMPORTER_KEY = 'queens_importer_user'
+_QUEENS_IMPORTER_KEY = 'queens_importer_user'  # legacy — cleared on login
+_QUEENS_LINKEDIN_NAME_KEY = 'queens_linkedin_name'  # display only
 _QUEENS_STATE_PATH_KEY = 'queens_state_path'
 _QUEENS_UPDATE_THROTTLE_PREFIX = 'queens_update_throttle:'
 _QUEENS_UPDATE_THROTTLE_SECONDS = 60
@@ -1345,29 +1345,29 @@ class Minigames(commands.Cog):
             guild_id, QUEENS_GAME.name, normalized_name)
         return len(rows)
 
-    def _resolve_queens_leaderboard(self, ctx, leaderboard):
+    def _resolve_queens_leaderboard(self, ctx, leaderboard, *,
+                                    skip_importer=False):
+        """Resolve a parsed leaderboard into rated rows + unresolved names.
+
+        ``skip_importer=True`` is the bot-driven mode used by ``;queens play``
+        / ``;queens update``: no Discord user is treated as the importer, and
+        the "You" row (the bot's own scraper-paced solve) is dropped on sight
+        so it never enters the rating pool.  The default ``False`` is the
+        manual ``;queens import`` paste path — a human ran the command, their
+        Discord-side player_link supplies the "You" row's identity.
+        """
         entries = parse_queens_leaderboard(leaderboard)
         if not entries:
             raise MinigameCogError('No LinkedIn Queens leaderboard rows found.')
 
-        importer_link = cf_common.user_db.get_minigame_player_link(
-            ctx.guild.id, QUEENS_GAME.name, ctx.author.id)
-        if importer_link is None:
-            raise MinigameCogError(
-                'Register the importer with `;queens register` before importing '
-                'LinkedIn Queens leaderboard results.')
-        # If ``ctx.author`` is the configured bot-account importer (the
-        # Discord user whose ``;queens login`` set them as the avatar for
-        # the LinkedIn account the scraper is logged in as), their ``You``
-        # row is an artifact of the scraper having had to play the puzzle
-        # to see the leaderboard — drop it so the bot's controlled solve
-        # time never enters the rating pool.  Real ``;queens import``
-        # paste flows (where ctx.author is a normal human) are unaffected.
-        bot_importer_id = cf_common.user_db.get_guild_config(
-            ctx.guild.id, _QUEENS_IMPORTER_KEY)
-        importer_is_bot = (
-            bot_importer_id is not None
-            and str(ctx.author.id) == str(bot_importer_id))
+        importer_link = None
+        if not skip_importer:
+            importer_link = cf_common.user_db.get_minigame_player_link(
+                ctx.guild.id, QUEENS_GAME.name, ctx.author.id)
+            if importer_link is None:
+                raise MinigameCogError(
+                    'Register the importer with `;queens register` before '
+                    'importing LinkedIn Queens leaderboard results.')
 
         resolved = []
         unresolved = []
@@ -1376,8 +1376,9 @@ class Minigames(commands.Cog):
         for entry in entries:
             normalized = normalize_queens_name(entry.linkedin_name)
             if entry.is_you:
-                if importer_is_bot:
-                    continue  # bot's artificial solve — never rated
+                if skip_importer:
+                    # Bot's own row — never imported.
+                    continue
                 link = importer_link
             else:
                 link = cf_common.user_db.get_minigame_player_link_by_name(
@@ -1408,10 +1409,12 @@ class Minigames(commands.Cog):
 
         return resolved, unresolved
 
-    def _make_queens_import_preview(self, ctx, date_text, leaderboard):
+    def _make_queens_import_preview(self, ctx, date_text, leaderboard, *,
+                                    skip_importer=False):
         puzzle_date = _parse_queens_date(date_text)
         puzzle_number = _queens_puzzle_number_for_date(puzzle_date)
-        resolved, unresolved = self._resolve_queens_leaderboard(ctx, leaderboard)
+        resolved, unresolved = self._resolve_queens_leaderboard(
+            ctx, leaderboard, skip_importer=skip_importer)
         if not resolved and not unresolved:
             raise MinigameCogError(
                 'No leaderboard rows matched Queens players.')
@@ -1453,12 +1456,46 @@ class Minigames(commands.Cog):
         ]
         return '\n'.join(lines)
 
-    def _save_queens_import(self, ctx, preview):
-        for puzzle_number in _queens_puzzle_numbers_for_date(preview.puzzle_date):
-            cf_common.user_db.delete_minigame_results_for_puzzle(
-                ctx.guild.id, QUEENS_GAME.name, puzzle_number)
-            cf_common.user_db.delete_minigame_unresolved_results_for_puzzle(
-                ctx.guild.id, QUEENS_GAME.name, puzzle_number)
+    def _filter_new_queens_entries(self, guild_id, preview):
+        """Strip entries from ``preview`` that already have rows in the DB.
+
+        Used by ``;queens update`` to keep the import additive — never
+        overwrites a previously-saved row, only adds new ones.  Returns
+        ``(new_resolved, new_unresolved)`` lists.
+        """
+        new_resolved = []
+        for entry in preview.resolved:
+            already_saved = False
+            for puzzle_number in _queens_puzzle_numbers_for_date(
+                    preview.puzzle_date):
+                existing = cf_common.user_db.get_minigame_result_for_user_puzzle(
+                    guild_id, QUEENS_GAME.name, entry.user_id, puzzle_number)
+                if existing is not None:
+                    already_saved = True
+                    break
+            if not already_saved:
+                new_resolved.append(entry)
+
+        existing_unresolved_names = set()
+        for puzzle_number in _queens_puzzle_numbers_for_date(
+                preview.puzzle_date):
+            for row in cf_common.user_db.get_minigame_unresolved_results_for_puzzle(
+                    guild_id, QUEENS_GAME.name, puzzle_number):
+                existing_unresolved_names.add(row.normalized_name)
+        new_unresolved = [
+            entry for entry in preview.unresolved
+            if normalize_queens_name(entry.linkedin_name)
+            not in existing_unresolved_names]
+
+        return new_resolved, new_unresolved
+
+    def _save_queens_import(self, ctx, preview, *, skip_wipe=False):
+        if not skip_wipe:
+            for puzzle_number in _queens_puzzle_numbers_for_date(preview.puzzle_date):
+                cf_common.user_db.delete_minigame_results_for_puzzle(
+                    ctx.guild.id, QUEENS_GAME.name, puzzle_number)
+                cf_common.user_db.delete_minigame_unresolved_results_for_puzzle(
+                    ctx.guild.id, QUEENS_GAME.name, puzzle_number)
         for entry in preview.resolved:
             cf_common.user_db.save_minigame_result(
                 _queens_result_message_id(
@@ -2137,64 +2174,68 @@ class Minigames(commands.Cog):
                 'Ask a mod to run `;queens play`.'),
         }.get(status, f'Unexpected scraper status: `{status}`')
 
-    def _queens_resolve_importer(self, guild, payload):
-        """Determine which Discord user owns the bot's LinkedIn account.
-
-        Strategy: look up by the scraper-reported LinkedIn name (or
-        configured fallback).  The matching ``minigame_player_link``'s
-        owner is the importer.  Returns (member, error_message).
-        """
-        # Preferred path: name reported by scraper → matching link.
-        # Fallback: stored Discord ID from a previous successful login.
-        stored_id = cf_common.user_db.get_guild_config(
-            guild.id, _QUEENS_IMPORTER_KEY)
-        if stored_id:
-            member = guild.get_member(int(stored_id))
-            if member is not None:
-                link = cf_common.user_db.get_minigame_player_link(
-                    guild.id, QUEENS_GAME.name, member.id)
-                if link is not None:
-                    return member, None
-        return None, (
-            'No Queens importer is linked for this guild yet. A mod needs '
-            'to run `;queens login` (with the LinkedIn session file '
-            'attached) to set the bot account.')
-
     async def _do_queens_import(self, ctx, payload, *, source_label):
-        """Apply a scraper payload's ``raw_text`` through the existing import
-        pipeline.  Posts a success embed to ``ctx.channel``.
+        """Apply a scraper payload's ``raw_text`` to the DB additively.
 
-        ``source_label`` is a short string that prefixes the success message
-        (e.g. ``'Update'`` or ``'Play'``).
+        Used by both ``;queens play`` and ``;queens update``.  Neither
+        wipes previously-saved rows; only entries that don't already
+        have a row get inserted.  The bot's own ``You`` row is dropped
+        on sight via ``skip_importer``.
+
+        Posts a success embed listing every entry that was added (both
+        resolved and unresolved).
         """
-        importer, err = self._queens_resolve_importer(ctx.guild, payload)
-        if importer is None:
-            raise MinigameCogError(err)
-
         raw_text = payload.get('raw_text') or ''
         today_iso = dt.datetime.now(dt.timezone.utc).date().isoformat()
-        fake_ctx = SimpleNamespace(
-            guild=ctx.guild,
-            author=importer,
-            channel=ctx.channel,
-            bot=self.bot,
-        )
         preview = self._make_queens_import_preview(
-            fake_ctx, today_iso, raw_text)
-        saved = self._save_queens_import(fake_ctx, preview)
+            ctx, today_iso, raw_text, skip_importer=True)
+
+        new_resolved, new_unresolved = self._filter_new_queens_entries(
+            ctx.guild.id, preview)
+        if not new_resolved and not new_unresolved:
+            await ctx.send(embed=discord_common.embed_neutral(
+                f'{source_label} of {QUEENS_GAME.display_name} '
+                f'#{preview.puzzle_number} {today_iso}:\n'
+                'No new results since the last refresh.'))
+            return
+
+        preview = preview._replace(
+            resolved=new_resolved, unresolved=new_unresolved)
+        self._save_queens_import(ctx, preview, skip_wipe=True)
+
+        await ctx.send(embed=self._format_queens_save_embed(
+            ctx, preview, source_label, today_iso))
+
+    def _format_queens_save_embed(self, ctx, preview, source_label, today_iso):
+        """Build the success embed listing every entry that was added."""
+        links_by_user = self._queens_links_by_user(ctx.guild.id)
         lines = [
             f'{source_label} of {QUEENS_GAME.display_name} '
-            f'#{preview.puzzle_number} {today_iso}:',
-            f'- Saved **{saved.resolved}** registered result(s).',
+            f'#{preview.puzzle_number} {today_iso}',
         ]
-        if saved.unresolved:
+        if preview.resolved:
+            lines.append('')
+            lines.append(f'Added **{len(preview.resolved)}** result(s):')
+            for index, entry in enumerate(
+                    sorted(preview.resolved, key=lambda e: e.time_seconds),
+                    start=1):
+                name = self._queens_public_user_name(
+                    ctx.guild, entry.user_id, links_by_user)
+                lines.append(
+                    f'{index}. {name} — {_format_queens_result(entry)}')
+        if preview.unresolved:
+            lines.append('')
             lines.append(
-                f'- Stored **{saved.unresolved}** unresolved name(s) for '
-                'later registration.')
-        if not saved.resolved and not saved.unresolved:
-            lines.append(
-                '- Leaderboard was empty — nothing to save.')
-        await ctx.send(embed=discord_common.embed_success('\n'.join(lines)))
+                f'Added **{len(preview.unresolved)}** unresolved '
+                'LinkedIn name(s):')
+            for entry in sorted(
+                    preview.unresolved, key=lambda e: e.time_seconds)[:20]:
+                lines.append(
+                    f'- {entry.linkedin_name} — {_format_queens_result(entry)}')
+            if len(preview.unresolved) > 20:
+                lines.append(
+                    f'- ... and {len(preview.unresolved) - 20} more')
+        return discord_common.embed_success('\n'.join(lines))
 
     # ── Listeners ───────────────────────────────────────────────────────
 
@@ -4244,47 +4285,31 @@ class Minigames(commands.Cog):
             raise MinigameCogError(
                 f'Could not write session file to `{state_path}`: {exc}.')
 
+        # Clear any stale state from the old design where the uploading
+        # mod was registered as the bot's Discord-side avatar.  Going
+        # forward, the bot account has no Discord-user mapping; "You"
+        # rows in scraped leaderboards are dropped categorically.
+        cf_common.user_db.delete_guild_config(
+            ctx.guild.id, _QUEENS_IMPORTER_KEY)
+
         lines = [f'Session saved to `{state_path}`.']
 
-        # Resolve the LinkedIn account name: prefer a manually-passed
-        # ``linkedin_name`` (skips the whoami probe entirely), otherwise
-        # ask the scraper who we are.  The manual path is the escape
-        # hatch when whoami fails — e.g. Chromium can't launch due to
-        # missing system libraries.
+        # Optionally detect + display the LinkedIn account name for
+        # transparency.  It's purely informational — no Discord user
+        # gets linked to it, no rating consequences.
         if linkedin_name and linkedin_name.strip():
-            name, err = linkedin_name.strip(), None
+            detected = linkedin_name.strip()
         else:
-            name, err = await self._run_queens_whoami(ctx.guild.id)
-        if name is None:
-            lines.append(
-                f'Could not detect LinkedIn name automatically: {err}\n\n'
-                f'Re-run with the name spelled out, e.g.:\n'
-                f'`;queens login TLE Queens` (with the same file attached). '
-                f'Use the exact display name shown on the bot account\'s '
-                'LinkedIn profile.')
-            await ctx.send(embed=discord_common.embed_alert('\n'.join(lines)))
-            return
-
-        normalized = normalize_queens_name(name)
-        existing = cf_common.user_db.get_minigame_player_link_by_name(
-            ctx.guild.id, QUEENS_GAME.name, normalized)
-        if existing is not None and str(existing.user_id) != str(ctx.author.id):
-            owner = self._queens_public_user_name(
-                ctx.guild, existing.user_id,
-                {str(existing.user_id): existing})
-            raise MinigameCogError(
-                f'LinkedIn account `{name}` is already linked to '
-                f'`{owner}`. They need to `;queens unregister` first, or '
-                'log in as a different LinkedIn account.')
-
-        # Either no existing link, or it already belongs to ctx.author —
-        # in either case, (re)assert ownership for ctx.author.
-        self._cmd_queens_register_link(ctx, ctx.author, name)
-        cf_common.user_db.set_guild_config(
-            ctx.guild.id, _QUEENS_IMPORTER_KEY, str(ctx.author.id))
-        lines.append(
-            f'Linked LinkedIn account `{name}` → '
-            f'`{_safe_member_name(ctx.author)}` (importer).')
+            detected, err = await self._run_queens_whoami(ctx.guild.id)
+            if detected is None:
+                lines.append(
+                    f'(Could not detect LinkedIn name: {err})')
+                detected = None
+        if detected:
+            cf_common.user_db.set_guild_config(
+                ctx.guild.id, _QUEENS_LINKEDIN_NAME_KEY, detected)
+            lines.append(f'LinkedIn account: `{detected}`')
+        lines.append('Ready — try `;queens play` to verify.')
         await ctx.send(embed=discord_common.embed_success('\n'.join(lines)))
 
     @queens.command(
@@ -4293,11 +4318,11 @@ class Minigames(commands.Cog):
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def queens_play(self, ctx):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
-        # Pre-flight: importer must be resolvable before we burn 30+ seconds
-        # in the scraper.
-        importer, err = self._queens_resolve_importer(ctx.guild, {})
-        if importer is None:
-            raise MinigameCogError(err)
+        state_path = self._queens_state_path(ctx.guild.id)
+        if not state_path.exists():
+            raise MinigameCogError(
+                f'No LinkedIn session at `{state_path}`. A mod needs to '
+                'run `;queens login` (with the state file attached) first.')
 
         await ctx.send(embed=discord_common.embed_neutral(
             'Running the scraper now — this can take up to '
@@ -4329,9 +4354,11 @@ class Minigames(commands.Cog):
                 raise MinigameCogError(
                     f'`;queens update` is rate-limited. Try again in {wait}s.')
 
-        importer, err = self._queens_resolve_importer(ctx.guild, {})
-        if importer is None:
-            raise MinigameCogError(err)
+        state_path = self._queens_state_path(ctx.guild.id)
+        if not state_path.exists():
+            raise MinigameCogError(
+                f'No LinkedIn session at `{state_path}`. A mod needs to '
+                'run `;queens login` first.')
         # Set the throttle BEFORE the slow subprocess so concurrent users
         # don't both pass the gate.
         cf_common.user_db.kvs_set(kvs_key, str(time.time()))
@@ -4345,7 +4372,8 @@ class Minigames(commands.Cog):
             raise MinigameCogError(self._queens_status_message(status))
         if status != 'ok':
             raise MinigameCogError(self._queens_status_message(status))
-        await self._do_queens_import(ctx, payload, source_label='Update')
+        await self._do_queens_import(
+            ctx, payload, source_label='Update')
 
     @queens.command(
         name='settings',
@@ -4355,19 +4383,8 @@ class Minigames(commands.Cog):
         state_path = self._queens_state_path(ctx.guild.id)
         path_default = state_path == _QUEENS_DEFAULT_STATE_PATH
         state_exists = state_path.exists()
-        importer_id = cf_common.user_db.get_guild_config(
-            ctx.guild.id, _QUEENS_IMPORTER_KEY)
-        importer_label = '`not linked` — `;queens login` to set'
-        if importer_id:
-            member = ctx.guild.get_member(int(importer_id))
-            if member is not None:
-                link = cf_common.user_db.get_minigame_player_link(
-                    ctx.guild.id, QUEENS_GAME.name, member.id)
-                ln = (_queens_public_link_name(link) if link
-                      else '`no link`')
-                importer_label = f'{_safe_member_name(member)} (LinkedIn: `{ln}`)'
-            else:
-                importer_label = f'`{importer_id}` (not in guild)'
+        li_name = cf_common.user_db.get_guild_config(
+            ctx.guild.id, _QUEENS_LINKEDIN_NAME_KEY)
         last_update = cf_common.user_db.kvs_get(
             f'{_QUEENS_UPDATE_THROTTLE_PREFIX}{ctx.guild.id}')
         last_text = 'never'
@@ -4379,7 +4396,8 @@ class Minigames(commands.Cog):
             except (TypeError, ValueError):
                 pass
         lines = [
-            f'importer: {importer_label}',
+            (f'LinkedIn account: `{li_name}`' if li_name
+             else 'LinkedIn account: `unknown` (run `;queens login`)'),
             f'state file: `{state_path}`'
             + ('' if not path_default else ' (default)')
             + ('' if state_exists else ' — **missing!**'),
