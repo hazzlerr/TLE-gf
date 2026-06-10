@@ -2369,7 +2369,8 @@ class TestQueensCommands:
         alice = _FakeDiscordMember(300, 'alice', 'Alice')
         bob = _FakeDiscordMember(301, 'bob', 'Bob')
         cara = _FakeDiscordMember(302, 'cara', 'Cara')
-        guild = _FakeGuild(100, members=[mod, alice, bob, cara])
+        unknown = _FakeDiscordMember(303, 'unknown', 'Unknown')
+        guild = _FakeGuild(100, members=[mod, alice, bob, cara, unknown])
         ctx = self._make_ctx(guild, mod)
         ctx.message = SimpleNamespace(attachments=[
             _FakeAttachment('queens_history.json', json.dumps([
@@ -2437,12 +2438,25 @@ class TestQueensCommands:
         assert bob_saved.accuracy == 0
         assert db.get_minigame_result_for_user_puzzle(
             100, 'queens', cara.id, _queens_number('2026-06-09')) is None
+        unknown_source = db.get_minigame_unresolved_results_for_name(
+            100, 'queens', normalize_queens_name('Unknown LinkedIn'))
+        assert [(row.external_name, row.time_seconds) for row in unknown_source] == [
+            ('Unknown LinkedIn', 3),
+        ]
         description = ctx.sent['embed'].description
-        assert 'Backfilled **2** result(s)' in description
-        assert '**3** registered LinkedIn Queens player(s)' in description
-        assert 'Matched **4** JSON result(s)' in description
+        assert 'Backfilled **3** LinkedIn-name result(s)' in description
+        assert 'Parsed **4** valid JSON result(s)' in description
+        assert '**2** registered LinkedIn name(s)' in description
+        assert '**1** unregistered LinkedIn name(s)' in description
         assert 'Skipped **1** already-saved result(s)' in description
         assert 'Ignored **1** malformed entry/entries' in description
+
+        claimed = cog._cmd_queens_register_link(ctx, unknown, 'Unknown LinkedIn')
+        assert claimed == 1
+        unknown_saved = db.get_minigame_result_for_user_puzzle(
+            100, 'queens', unknown.id, _queens_number('2026-06-09'))
+        assert unknown_saved is not None
+        assert unknown_saved.time_seconds == 3
 
     def test_register_rejects_url_input(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)

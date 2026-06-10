@@ -5173,6 +5173,84 @@ class Minigames(commands.Cog):
                 'JSON must be a list of result entries.')
         return data
 
+    @staticmethod
+    def _parse_queens_backfill_entry(entry):
+        if not isinstance(entry, dict):
+            raise ValueError('entry is not an object')
+        linkedin_name = entry.get('linkedin_name', '')
+        if not isinstance(linkedin_name, str) or not linkedin_name.strip():
+            raise ValueError('entry has no LinkedIn name')
+        linkedin_name = linkedin_name.strip()
+        puzzle_number = int(entry['puzzle_number'])
+        time_seconds = int(entry['time_seconds'])
+        no_hints = bool(entry.get('no_hints', False))
+        no_mistakes = bool(entry.get('no_mistakes', False))
+        puzzle_date_iso = entry.get('puzzle_date')
+        if puzzle_date_iso:
+            puzzle_date = dt.date.fromisoformat(puzzle_date_iso)
+        else:
+            puzzle_date = _queens_date_for_puzzle_number(puzzle_number)
+        return (
+            normalize_queens_name(linkedin_name),
+            _QueensResolvedEntry(
+                user_id=None,
+                linkedin_name=linkedin_name,
+                time_seconds=time_seconds,
+                no_hints=no_hints,
+                no_mistakes=no_mistakes,
+            ),
+            puzzle_date,
+        )
+
+    @staticmethod
+    def _queens_backfill_raw_content(entry):
+        return (
+            'backfill from LinkedIn export '
+            f'({entry.get("sent_at_utc", "")})'
+        )
+
+    def _existing_queens_source_puzzles(self, guild_id, normalized_name,
+                                        source_puzzles_by_name):
+        source_puzzles = source_puzzles_by_name.get(normalized_name)
+        if source_puzzles is None:
+            source_puzzles = {
+                int(row.puzzle_number)
+                for row in cf_common.user_db.get_minigame_unresolved_results_for_name(
+                    guild_id, QUEENS_GAME.name, normalized_name)
+            }
+            source_puzzles_by_name[normalized_name] = source_puzzles
+        return source_puzzles
+
+    def _save_queens_backfill_source_entry(self, ctx, entry, normalized_name,
+                                           parsed, puzzle_date, *,
+                                           link=None,
+                                           source_puzzles_by_name=None):
+        if source_puzzles_by_name is None:
+            source_puzzles_by_name = {}
+        source_puzzles = self._existing_queens_source_puzzles(
+            ctx.guild.id, normalized_name, source_puzzles_by_name)
+        puzzle_numbers = _queens_puzzle_numbers_for_date(puzzle_date)
+        existing = any(pn in source_puzzles for pn in puzzle_numbers)
+        if not existing and link is not None:
+            for pn in puzzle_numbers:
+                if cf_common.user_db.get_minigame_result_for_user_puzzle(
+                        ctx.guild.id, QUEENS_GAME.name, link.user_id, pn):
+                    existing = True
+                    break
+        if existing:
+            return False
+
+        if link is not None:
+            parsed = parsed._replace(
+                user_id=link.user_id,
+                linkedin_name=link.external_name,
+            )
+        self._save_queens_external_result(
+            ctx.guild.id, ctx.channel.id, parsed, puzzle_date,
+            self._queens_backfill_raw_content(entry))
+        source_puzzles.update(puzzle_numbers)
+        return True
+
     def _save_queens_backfill_for_link(self, ctx, link, data):
         target_normalized = link.normalized_name
         matching = []
@@ -5188,57 +5266,21 @@ class Minigames(commands.Cog):
         saved = 0
         skipped = 0
         malformed = 0
-        source_puzzles = {
-            int(row.puzzle_number)
-            for row in cf_common.user_db.get_minigame_unresolved_results_for_name(
-                ctx.guild.id, QUEENS_GAME.name, target_normalized)
-        }
+        source_puzzles_by_name = {}
         for entry in matching:
             try:
-                puzzle_number = int(entry['puzzle_number'])
-                time_seconds = int(entry['time_seconds'])
-                no_hints = bool(entry.get('no_hints', False))
-                no_mistakes = bool(entry.get('no_mistakes', False))
-                puzzle_date_iso = entry.get('puzzle_date')
-                if puzzle_date_iso:
-                    puzzle_date = dt.date.fromisoformat(puzzle_date_iso)
-                else:
-                    puzzle_date = _queens_date_for_puzzle_number(puzzle_number)
+                normalized_name, parsed, puzzle_date = (
+                    self._parse_queens_backfill_entry(entry))
             except (KeyError, TypeError, ValueError):
                 malformed += 1
                 continue
 
-            # Additive: skip if any matching row (anchor or legacy
-            # ordinal number) already exists for this user/puzzle.
-            existing = None
-            for pn in _queens_puzzle_numbers_for_date(puzzle_date):
-                if pn in source_puzzles:
-                    existing = True
-                if existing is None:
-                    existing = cf_common.user_db.get_minigame_result_for_user_puzzle(
-                        ctx.guild.id, QUEENS_GAME.name, link.user_id, pn)
-                if existing is not None:
-                    break
-            if existing is not None:
+            if self._save_queens_backfill_source_entry(
+                    ctx, entry, normalized_name, parsed, puzzle_date,
+                    link=link, source_puzzles_by_name=source_puzzles_by_name):
+                saved += 1
+            else:
                 skipped += 1
-                continue
-
-            self._save_queens_external_result(
-                ctx.guild.id,
-                ctx.channel.id,
-                _QueensResolvedEntry(
-                    user_id=link.user_id,
-                    linkedin_name=link.external_name,
-                    time_seconds=time_seconds,
-                    no_hints=no_hints,
-                    no_mistakes=no_mistakes,
-                ),
-                puzzle_date,
-                f'backfill from LinkedIn export '
-                f'({entry.get("sent_at_utc", "")})'
-            )
-            source_puzzles.update(_queens_puzzle_numbers_for_date(puzzle_date))
-            saved += 1
 
         return _QueensBackfillResult(
             link=link,
@@ -5247,6 +5289,49 @@ class Minigames(commands.Cog):
             skipped=skipped,
             malformed=malformed,
         )
+
+    def _save_queens_backfill_all(self, ctx, data):
+        links_by_name = {
+            link.normalized_name: link
+            for link in cf_common.user_db.get_minigame_player_links(
+                ctx.guild.id, QUEENS_GAME.name)
+            if not cf_common.user_db.is_minigame_banned(
+                ctx.guild.id, QUEENS_GAME.name, link.user_id)
+        }
+        source_puzzles_by_name = {}
+        saved = 0
+        skipped = 0
+        malformed = 0
+        valid = 0
+        registered_names = set()
+        unresolved_names = set()
+        for entry in data:
+            try:
+                normalized_name, parsed, puzzle_date = (
+                    self._parse_queens_backfill_entry(entry))
+            except (KeyError, TypeError, ValueError):
+                malformed += 1
+                continue
+            valid += 1
+            link = links_by_name.get(normalized_name)
+            if link is None:
+                unresolved_names.add(normalized_name)
+            else:
+                registered_names.add(normalized_name)
+            if self._save_queens_backfill_source_entry(
+                    ctx, entry, normalized_name, parsed, puzzle_date,
+                    link=link, source_puzzles_by_name=source_puzzles_by_name):
+                saved += 1
+            else:
+                skipped += 1
+        return {
+            'saved': saved,
+            'skipped': skipped,
+            'malformed': malformed,
+            'valid': valid,
+            'registered_names': registered_names,
+            'unresolved_names': unresolved_names,
+        }
 
     @queens.command(
         name='backfill', aliases=['backill'],
@@ -5260,38 +5345,26 @@ class Minigames(commands.Cog):
                 'Usage: `;queens backfill @user|+all` '
                 '(attach `queens_history.json`).')
         data = await self._read_queens_backfill_entries(ctx)
+        self._migrate_legacy_queens_results_to_external(
+            ctx.guild.id, delete_migrated=False)
 
         if target.strip().casefold() == '+all':
-            links = [
-                link for link in cf_common.user_db.get_minigame_player_links(
-                    ctx.guild.id, QUEENS_GAME.name)
-                if not cf_common.user_db.is_minigame_banned(
-                    ctx.guild.id, QUEENS_GAME.name, link.user_id)
-            ]
-            if not links:
+            result = self._save_queens_backfill_all(ctx, data)
+            if not result['valid']:
                 raise MinigameCogError(
-                    f'No registered {QUEENS_GAME.display_name} players found.')
-            results = [
-                self._save_queens_backfill_for_link(ctx, link, data)
-                for link in links
-            ]
-            matched_results = [result for result in results if result.matched]
-            if not matched_results:
-                raise MinigameCogError(
-                    'No entries in the JSON match any registered '
-                    f'{QUEENS_GAME.display_name} LinkedIn account.')
-            saved = sum(result.saved for result in matched_results)
-            skipped = sum(result.skipped for result in matched_results)
-            malformed = sum(result.malformed for result in matched_results)
-            matched = sum(result.matched for result in matched_results)
+                    'No valid LinkedIn Queens result entries found in the JSON.')
+            saved = result['saved']
+            skipped = result['skipped']
+            malformed = result['malformed']
             if saved:
                 self._sync_queens_materialized_results(ctx.guild.id)
                 self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
             lines = [
-                f'Backfilled **{saved}** result(s) across '
-                f'**{len(matched_results)}** registered '
-                f'{QUEENS_GAME.display_name} player(s).',
-                f'- Matched **{matched}** JSON result(s).',
+                f'Backfilled **{saved}** LinkedIn-name result(s).',
+                f'- Parsed **{result["valid"]}** valid JSON result(s).',
+                f'- Saw **{len(result["registered_names"])}** registered '
+                f'LinkedIn name(s) and **{len(result["unresolved_names"])}** '
+                'unregistered LinkedIn name(s).',
             ]
             if skipped:
                 lines.append(
