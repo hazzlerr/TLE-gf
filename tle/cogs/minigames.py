@@ -1676,22 +1676,45 @@ class Minigames(commands.Cog):
             raw_content,
         )
 
+    @staticmethod
+    def _legacy_queens_entry_matches_row(entry, row):
+        return (
+            int(entry.time_seconds) == int(row.time_seconds)
+            and (100 if entry.no_mistakes else 0) == int(row.accuracy)
+            and int(entry.no_hints and entry.no_mistakes) == int(row.is_perfect)
+        )
+
+    def _legacy_queens_source_identity(self, row, link):
+        if link is not None:
+            return link.normalized_name, link.external_name
+
+        candidates = {}
+        for entry in parse_queens_leaderboard(row.raw_content or ''):
+            normalized = normalize_queens_name(entry.linkedin_name)
+            if normalized == 'you':
+                continue
+            if self._legacy_queens_entry_matches_row(entry, row):
+                candidates[normalized] = entry.linkedin_name
+        if len(candidates) != 1:
+            return None
+        return next(iter(candidates.items()))
+
     def _migrate_legacy_queens_results_to_external(self, guild_id):
         links_by_user = self._queens_links_by_user(guild_id)
-        if not links_by_user:
-            return 0
         migrated = 0
         for row in cf_common.user_db.get_minigame_results_for_guild(
                 guild_id, QUEENS_GAME.name):
             link = links_by_user.get(str(row.user_id))
-            if link is None:
+            identity = self._legacy_queens_source_identity(row, link)
+            if identity is None:
                 continue
+            normalized_name, external_name = identity
             puzzle_date = normalize_puzzle_date(row.puzzle_date)
             cf_common.user_db.save_minigame_unresolved_result(
                 guild_id,
                 QUEENS_GAME.name,
-                link.normalized_name,
-                link.external_name,
+                normalized_name,
+                external_name,
                 row.channel_id,
                 _queens_puzzle_number_for_date(puzzle_date),
                 _queens_puzzle_date_text(puzzle_date),

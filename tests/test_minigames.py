@@ -1407,6 +1407,40 @@ class TestQueensImport:
             100, 'queens', normalize_queens_name('Unknown Person'))
         assert [row.time_seconds for row in unknown_source] == [5]
 
+    def test_unlinked_legacy_row_migrates_from_unique_raw_leaderboard_name(
+            self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        raw = (
+            'Charlie LinkedIn\n'
+            '\U0001f913\U0001f48e No hints & no mistakes!\n'
+            '0:09\n'
+        )
+        db.save_minigame_result(
+            11, 100, 'queens', 201, 400, _queens_number('2026-06-08'),
+            '2026-06-08', 100, 9, True, raw)
+        cog = Minigames(bot=None)
+
+        saved = cog._sync_queens_materialized_results(100)
+
+        assert saved == 0
+        assert db.get_minigame_results_for_guild(100, 'queens') == []
+        source = db.get_minigame_unresolved_results_for_name(
+            100, 'queens', normalize_queens_name('Charlie LinkedIn'))
+        assert len(source) == 1
+        assert source[0].external_name == 'Charlie LinkedIn'
+        assert source[0].time_seconds == 9
+
+        db.set_minigame_player_link(
+            100, 'queens', 300, 'Charlie LinkedIn',
+            normalize_queens_name('Charlie LinkedIn'), None, 1.0, 999)
+        saved = cog._sync_queens_materialized_results(100)
+
+        materialized = db.get_minigame_result_for_user_puzzle(
+            100, 'queens', 300, _queens_number('2026-06-08'))
+        assert saved == 1
+        assert materialized is not None
+        assert materialized.time_seconds == 9
+
     def test_generic_recompute_writes_queens_snapshot_only(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         db.replace_minigame_ratings(
