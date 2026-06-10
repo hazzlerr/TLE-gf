@@ -1340,7 +1340,8 @@ class Minigames(commands.Cog):
 
     def _ensure_queens_link_available(self, guild, member, name,
                                       normalized_name, *,
-                                      ignore_pending_key=None):
+                                      ignore_pending_key=None,
+                                      ignore_pending=False):
         existing = cf_common.user_db.get_minigame_player_link_by_name(
             guild.id, QUEENS_GAME.name, normalized_name)
         if existing is not None and str(existing.user_id) != str(member.id):
@@ -1349,6 +1350,8 @@ class Minigames(commands.Cog):
             raise MinigameCogError(
                 f'LinkedIn name `{name}` is already linked to '
                 f'{existing_label}.')
+        if ignore_pending:
+            return
 
         for key, pending in self._queens_pending_registrations.items():
             if key == ignore_pending_key:
@@ -1367,14 +1370,16 @@ class Minigames(commands.Cog):
 
     def _prepare_queens_registration_link(self, guild, member, linkedin_text,
                                           *, anonymous=False,
-                                          ignore_pending_key=None):
+                                          ignore_pending_key=None,
+                                          ignore_pending=False):
         self._ensure_not_minigame_banned(
             guild.id, QUEENS_GAME, member.id, _safe_member_name(member))
         name = _clean_queens_linkedin_name(linkedin_text)
         normalized = normalize_queens_name(name)
         self._ensure_queens_link_available(
             guild, member, name, normalized,
-            ignore_pending_key=ignore_pending_key)
+            ignore_pending_key=ignore_pending_key,
+            ignore_pending=ignore_pending)
         return name, normalized, _QUEENS_ANONYMOUS_LINK_MARKER if anonymous else None
 
     def _save_queens_registration_link(self, guild_id, member_id, name,
@@ -1389,12 +1394,35 @@ class Minigames(commands.Cog):
         return claimed
 
     def _cmd_queens_register_link(self, ctx, member, linkedin_text,
-                                  anonymous=False):
+                                  anonymous=False, ignore_pending=False):
         name, normalized, external_url = self._prepare_queens_registration_link(
-            ctx.guild, member, linkedin_text, anonymous=anonymous)
-        return self._save_queens_registration_link(
+            ctx.guild, member, linkedin_text, anonymous=anonymous,
+            ignore_pending=ignore_pending)
+        claimed = self._save_queens_registration_link(
             ctx.guild.id, member.id, name, normalized, external_url,
             ctx.author.id)
+        self._clear_queens_pending_matching(ctx.guild.id, user_id=member.id)
+        if ignore_pending:
+            self._clear_queens_pending_matching(
+                ctx.guild.id, normalized_name=normalized)
+        return claimed
+
+    async def _cmd_queens_set(self, ctx, member, linkedin_text):
+        self._require_enabled(ctx.guild.id, QUEENS_GAME)
+        claimed = self._cmd_queens_register_link(
+            ctx, member, linkedin_text, ignore_pending=True)
+        link = cf_common.user_db.get_minigame_player_link(
+            ctx.guild.id, QUEENS_GAME.name, member.id)
+        display_name = self._queens_public_user_name(
+            ctx.guild, member.id, {str(member.id): link})
+        lines = [
+            f'`{display_name}` is registered for {QUEENS_GAME.display_name} as '
+            f'`{_queens_public_link_name(link)}`.',
+        ]
+        if claimed:
+            lines.append(
+                f'Claimed {claimed} stored Queens result(s) and recomputed ratings.')
+        await ctx.send(embed=discord_common.embed_success('\n'.join(lines)))
 
     async def _cmd_queens_register(self, ctx, member, linkedin_text,
                                    anonymous=False):
@@ -1538,6 +1566,18 @@ class Minigames(commands.Cog):
                 item.guild.id, item.member.id)
             if self._queens_pending_registrations.get(key) == item:
                 self._queens_pending_registrations.pop(key, None)
+
+    def _clear_queens_pending_matching(self, guild_id, *, user_id=None,
+                                       normalized_name=None):
+        guild_key = str(guild_id)
+        for key, item in list(self._queens_pending_registrations.items()):
+            if str(item.guild.id) != guild_key:
+                continue
+            if user_id is not None and str(item.member.id) != str(user_id):
+                continue
+            if normalized_name is not None and item.normalized_name != normalized_name:
+                continue
+            self._queens_pending_registrations.pop(key, None)
 
     async def _complete_queens_pending_registration(self, pending):
         key = self._queens_pending_registration_key(
@@ -4486,7 +4526,6 @@ class Minigames(commands.Cog):
     @queens.command(name='register',
                     brief='Link a Discord user to a LinkedIn Queens name',
                     usage='[+username DiscordUser] LinkedIn Name [+anon]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def queens_register(self, ctx, first: str = None, *,
                               linkedin: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
@@ -4502,6 +4541,19 @@ class Minigames(commands.Cog):
             ctx, first, linkedin)
         await self._cmd_queens_register(
             ctx, member, linkedin_text, anonymous=anonymous)
+
+    @queens.command(name='set',
+                    brief='(Mod) Link a Discord user without LinkedIn verification',
+                    usage='DiscordUser LinkedIn Name')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_set(self, ctx, member: str = None, *,
+                         linkedin: str = None):
+        self._require_enabled(ctx.guild.id, QUEENS_GAME)
+        if member is None or not (linkedin or '').strip():
+            raise MinigameCogError(
+                'Usage: `;queens set DiscordUser LinkedIn Name`.')
+        target = await self._resolve_member(ctx, member)
+        await self._cmd_queens_set(ctx, target, linkedin)
 
     @queens.command(name='unregister',
                     brief='Remove a user LinkedIn Queens link',
@@ -5689,14 +5741,33 @@ class Minigames(commands.Cog):
         anonymous: bool = False,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction, self._mod_role_error_message())
         ctx = _SlashCtx(interaction)
         try:
             target = self._resolve_registrar_target(ctx, member)
             await self._cmd_queens_register(
                 ctx, target, linkedin_name, anonymous=anonymous)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+        except Exception:
+            logger.exception('Unhandled error in slash command')
+            await self._slash_send_error(interaction, 'An unexpected error occurred.')
+
+    @queens_slash.command(name='set', description='Set a Queens LinkedIn name without verification')
+    @app_commands.describe(
+        member='Discord member to set',
+        linkedin_name='LinkedIn display name')
+    async def slash_queens_set(
+        self, interaction: discord.Interaction,
+        member: discord.Member,
+        linkedin_name: str,
+    ):
+        await interaction.response.defer()
+        if not self._has_mod_role(interaction):
+            return await self._slash_send_error(
+                interaction, self._mod_role_error_message())
+        try:
+            await self._cmd_queens_set(
+                _SlashCtx(interaction), member, linkedin_name)
         except MinigameCogError as e:
             await self._slash_send_error(interaction, e)
         except Exception:

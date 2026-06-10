@@ -1416,6 +1416,41 @@ class TestQueensCommands:
         assert row.normalized_name == normalize_queens_name('Bob LinkedIn')
         assert cog._queens_pending_registrations == {}
 
+    def test_set_registers_other_without_linkedin_match_and_clears_pending(
+            self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_neutral',
+            lambda desc: SimpleNamespace(description=desc))
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_success',
+            lambda desc: SimpleNamespace(description=desc))
+        db.set_guild_config(100, 'queens', '1')
+        mod = _FakeDiscordMember(
+            999, 'mod', 'Mod',
+            roles=[SimpleNamespace(name=constants.TLE_MODERATOR)])
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        bob = _FakeDiscordMember(301, 'bob', 'Bob')
+        guild = _FakeGuild(100, members=[mod, alice, bob])
+        cog = Minigames(bot=None)
+
+        alice_ctx = self._make_ctx(guild, alice)
+        asyncio.run(Minigames.queens_register.__wrapped__(
+            cog, alice_ctx, 'Bob', linkedin='LinkedIn'))
+        assert cog._queens_pending_registrations[('100', '300')].name == (
+            'Bob LinkedIn')
+
+        mod_ctx = self._make_ctx(guild, mod)
+        asyncio.run(Minigames.queens_set.__wrapped__(
+            cog, mod_ctx, 'bob', linkedin='Bob LinkedIn'))
+
+        row = db.get_minigame_player_link(100, 'queens', bob.id)
+        assert row.external_name == 'Bob LinkedIn'
+        assert row.normalized_name == normalize_queens_name('Bob LinkedIn')
+        assert cog._queens_pending_registrations == {}
+        assert '`Bob` is registered for LinkedIn Queens as `Bob LinkedIn`' in (
+            mod_ctx.sent['embed'].description)
+
     def test_pending_register_expires_after_linkedin_scan_without_match(
             self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
@@ -1494,15 +1529,13 @@ class TestQueensCommands:
         assert db.get_minigame_player_link(100, 'queens', alice.id) is None
         assert db.get_minigame_player_link(100, 'queens', bob.id) is None
 
-    def test_slash_register_self(self, db, monkeypatch):
+    def test_slash_register_self_does_not_require_mod_role(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         monkeypatch.setattr(
             minigames_module.discord_common, 'embed_neutral',
             lambda desc: SimpleNamespace(description=desc))
         db.set_guild_config(100, 'queens', '1')
-        alice = _FakeDiscordMember(
-            300, 'alice', 'Alice',
-            roles=[SimpleNamespace(name=constants.TLE_MODERATOR)])
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
         guild = _FakeGuild(100, members=[alice])
         interaction = SimpleNamespace(
             id=999,
