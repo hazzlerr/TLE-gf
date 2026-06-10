@@ -124,6 +124,15 @@ _QUEENS_UPDATE_THROTTLE_PREFIX = 'queens_update_throttle:'
 _QUEENS_UPDATE_THROTTLE_SECONDS = 60
 _QUEENS_SCRAPER_TIMEOUT = 240  # seconds — playwright start + slow auto-play
 _QUEENS_WHOAMI_TIMEOUT = 60    # seconds — quick /in/me/ visit only
+# Bleeding-edge Ubuntu (26.04+) isn't in Playwright's platform support
+# matrix yet, so ``playwright install chromium`` refuses with
+# ``Playwright does not support chromium on ubuntuXX.04-x64``.  Overriding
+# to ubuntu24.04-x64 forces the install AND the runtime browser lookup to
+# use the LTS binary, whose glibc dependency is compatible with anything
+# newer.  Harmless on Ubuntu 24.04 itself (the natural platform).  May not
+# work on Ubuntu <22 — those hosts have an older glibc than the 24.04
+# binary expects; admin would need to install older Playwright manually.
+_QUEENS_PLAYWRIGHT_PLATFORM = 'ubuntu24.04-x64'
 # Tolerate a state file up to ~256KiB.  Real Playwright state.json files for
 # LinkedIn are ~10-30KiB; this gives generous headroom without inviting
 # someone to upload a giant attachment.
@@ -2043,7 +2052,9 @@ class Minigames(commands.Cog):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+                env={**os.environ, 'PYTHONIOENCODING': 'utf-8',
+                     'PLAYWRIGHT_HOST_PLATFORM_OVERRIDE':
+                        _QUEENS_PLAYWRIGHT_PLATFORM},
             )
         except FileNotFoundError as exc:
             return None, f'Could not launch scraper: {exc}'
@@ -2090,7 +2101,9 @@ class Minigames(commands.Cog):
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+                env={**os.environ, 'PYTHONIOENCODING': 'utf-8',
+                     'PLAYWRIGHT_HOST_PLATFORM_OVERRIDE':
+                        _QUEENS_PLAYWRIGHT_PLATFORM},
             )
             stdout, stderr = await asyncio.wait_for(
                 proc.communicate(), timeout=_QUEENS_WHOAMI_TIMEOUT)
@@ -4128,6 +4141,19 @@ class Minigames(commands.Cog):
         rc, out = await self._run_install_step(
             [sys.executable, '-m', 'playwright', 'install', 'chromium'],
             timeout=900)
+        if rc != 0 and 'does not support' in (out or ''):
+            # Host OS isn't in Playwright's hard-coded platform matrix
+            # (e.g. Ubuntu 26.04).  Retry forcing the LTS binary.
+            await msg.edit(embed=discord_common.embed_neutral(
+                f'✓ Step 1/2 complete.\n\n'
+                f'Step 2/2: host OS not in Playwright\'s matrix — '
+                f'retrying with `PLAYWRIGHT_HOST_PLATFORM_OVERRIDE='
+                f'{_QUEENS_PLAYWRIGHT_PLATFORM}` …'))
+            rc, out = await self._run_install_step(
+                [sys.executable, '-m', 'playwright', 'install', 'chromium'],
+                timeout=900,
+                extra_env={'PLAYWRIGHT_HOST_PLATFORM_OVERRIDE':
+                           _QUEENS_PLAYWRIGHT_PLATFORM})
         if rc != 0:
             raise MinigameCogError(
                 f'`playwright install chromium` failed (rc={rc}). Tail:\n'
@@ -4139,18 +4165,23 @@ class Minigames(commands.Cog):
             '(attach `extra/.queens_state.json` generated on your laptop).'))
 
     @staticmethod
-    async def _run_install_step(cmd, *, timeout):
+    async def _run_install_step(cmd, *, timeout, extra_env=None):
         """Spawn an install subprocess and capture combined stdout+stderr.
 
         Returns ``(returncode, captured_text)``.  Never raises; timeouts come
-        back as ``returncode == -1``.
+        back as ``returncode == -1``.  ``extra_env`` is merged on top of
+        ``os.environ`` for the subprocess — used to inject
+        ``PLAYWRIGHT_HOST_PLATFORM_OVERRIDE`` on bleeding-edge Ubuntu.
         """
+        env = {**os.environ, 'PYTHONIOENCODING': 'utf-8'}
+        if extra_env:
+            env.update(extra_env)
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                env={**os.environ, 'PYTHONIOENCODING': 'utf-8'},
+                env=env,
             )
         except (FileNotFoundError, PermissionError) as exc:
             return -2, f'Could not launch `{cmd[0]}`: {exc}'
