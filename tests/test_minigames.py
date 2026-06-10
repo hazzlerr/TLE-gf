@@ -1303,6 +1303,110 @@ class TestQueensImport:
 
         assert [entry.user_id for entry in preview.resolved] == ['301']
 
+    def test_legacy_live_and_imported_rows_migrate_to_linkedin_source_exactly(
+            self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        for user_id, name in (
+                (300, 'Alice LinkedIn'),
+                (301, 'Bob LinkedIn')):
+            db.set_minigame_player_link(
+                100, 'queens', user_id, name, normalize_queens_name(name),
+                None, 1.0, user_id)
+        db.save_minigame_result(
+            11, 100, 'queens', 201, 300, _queens_number('2026-06-08'),
+            '2026-06-08', 0, 8, False, 'alice raw')
+        db.save_imported_minigame_result(
+            12, 100, 'queens', 202, 301, _queens_number('2026-06-09'),
+            '2026-06-09', 100, 5, True, 'bob raw')
+        db.save_imported_minigame_result(
+            13, 100, 'akari', 203, 302, 1, '2026-06-10',
+            100, 9, True, 'akari raw')
+
+        cog = Minigames(bot=None)
+        saved = cog._sync_queens_materialized_results(100)
+
+        source = {
+            row.external_name: row
+            for row in db.get_minigame_unresolved_results_for_guild(
+                100, 'queens')
+        }
+        assert set(source) == {'Alice LinkedIn', 'Bob LinkedIn'}
+        assert source['Alice LinkedIn'].normalized_name == 'alice linkedin'
+        assert source['Alice LinkedIn'].channel_id == '201'
+        assert source['Alice LinkedIn'].puzzle_number == _queens_number('2026-06-08')
+        assert source['Alice LinkedIn'].puzzle_date == '2026-06-08'
+        assert source['Alice LinkedIn'].accuracy == 0
+        assert source['Alice LinkedIn'].time_seconds == 8
+        assert source['Alice LinkedIn'].is_perfect == 0
+        assert source['Alice LinkedIn'].raw_content == 'alice raw'
+        assert source['Bob LinkedIn'].channel_id == '202'
+        assert source['Bob LinkedIn'].puzzle_number == _queens_number('2026-06-09')
+        assert source['Bob LinkedIn'].accuracy == 100
+        assert source['Bob LinkedIn'].time_seconds == 5
+        assert source['Bob LinkedIn'].is_perfect == 1
+        assert source['Bob LinkedIn'].raw_content == 'bob raw'
+
+        materialized = {
+            row.user_id: row
+            for row in db.get_minigame_results_for_guild(100, 'queens')
+        }
+        assert set(materialized) == {'300', '301'}
+        assert materialized['300'].time_seconds == 8
+        assert materialized['301'].time_seconds == 5
+        assert saved == 2
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM minigame_import_result "
+            "WHERE guild_id = '100' AND game = 'queens'"
+        ).fetchone()[0] == 0
+        assert db.conn.execute(
+            "SELECT COUNT(*) FROM minigame_import_result "
+            "WHERE guild_id = '100' AND game = 'akari'"
+        ).fetchone()[0] == 1
+
+    def test_additive_filter_migrates_legacy_rows_before_checking_new_entries(
+            self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_minigame_player_link(
+            100, 'queens', 300, 'Alice LinkedIn',
+            normalize_queens_name('Alice LinkedIn'), None, 1.0, 999)
+        db.save_minigame_result(
+            11, 100, 'queens', 201, 300, _queens_number('2026-06-08'),
+            '2026-06-08', 100, 8, True, 'alice legacy raw')
+        guild = _FakeGuild(100, members=[
+            _FakeDiscordMember(300, 'alice', 'Alice'),
+        ])
+        ctx = SimpleNamespace(
+            guild=guild,
+            author=_FakeDiscordMember(999, 'bot', 'Bot'),
+            channel=_FakeChannel(200),
+            message=SimpleNamespace(id=555),
+        )
+        cog = Minigames(bot=None)
+        preview = cog._make_queens_import_preview(
+            ctx, '2026-06-08', (
+                'Alice LinkedIn\n'
+                '\U0001f913\U0001f48e No hints & no mistakes!\n'
+                '0:07\n'
+                'Unknown Person\n'
+                '\U0001f913\U0001f48e No hints & no mistakes!\n'
+                '0:05\n'
+            ), skip_importer=True)
+
+        new_resolved, new_unresolved = cog._filter_new_queens_entries(
+            100, preview)
+        preview = preview._replace(
+            resolved=new_resolved, unresolved=new_unresolved)
+        saved = cog._save_queens_import(ctx, preview, skip_wipe=True)
+
+        assert saved.resolved == 0
+        assert saved.unresolved == 1
+        alice_source = db.get_minigame_unresolved_results_for_name(
+            100, 'queens', normalize_queens_name('Alice LinkedIn'))
+        assert [row.time_seconds for row in alice_source] == [8]
+        unknown_source = db.get_minigame_unresolved_results_for_name(
+            100, 'queens', normalize_queens_name('Unknown Person'))
+        assert [row.time_seconds for row in unknown_source] == [5]
+
     def test_generic_recompute_writes_queens_snapshot_only(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         db.replace_minigame_ratings(

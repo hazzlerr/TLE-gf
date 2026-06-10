@@ -1686,16 +1686,20 @@ class Minigames(commands.Cog):
             link = links_by_user.get(str(row.user_id))
             if link is None:
                 continue
-            entry = _QueensResolvedEntry(
-                user_id=row.user_id,
-                linkedin_name=link.external_name,
-                time_seconds=int(row.time_seconds),
-                no_hints=bool(row.is_perfect),
-                no_mistakes=int(row.accuracy) == 100,
+            puzzle_date = normalize_puzzle_date(row.puzzle_date)
+            cf_common.user_db.save_minigame_unresolved_result(
+                guild_id,
+                QUEENS_GAME.name,
+                link.normalized_name,
+                link.external_name,
+                row.channel_id,
+                _queens_puzzle_number_for_date(puzzle_date),
+                _queens_puzzle_date_text(puzzle_date),
+                row.accuracy,
+                row.time_seconds,
+                row.is_perfect,
+                row.raw_content,
             )
-            self._save_queens_external_result(
-                guild_id, row.channel_id, entry,
-                normalize_puzzle_date(row.puzzle_date), row.raw_content)
             migrated += 1
         return migrated
 
@@ -1865,6 +1869,7 @@ class Minigames(commands.Cog):
         overwrites a previously-saved row, only adds new ones.  Returns
         ``(new_resolved, new_unresolved)`` lists.
         """
+        self._migrate_legacy_queens_results_to_external(guild_id)
         existing_names = set()
         for puzzle_number in _queens_puzzle_numbers_for_date(
                 preview.puzzle_date):
