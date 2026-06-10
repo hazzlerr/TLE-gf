@@ -2135,24 +2135,31 @@ class TestQueensCommands:
         self._save_queens_result(db, 1, bob.id, '2026-06-08', 8)
         self._save_queens_result(db, 2, alice.id, '2026-06-08', 5)
 
-        captured = {}
+        captured = []
 
         def _capture(guild, rows, title, **kwargs):
-            captured['user_ids'] = [row.user_id for row in rows]
-            captured['title'] = title
-            captured['identity_label'] = kwargs['identity_label']
-            captured['registrants'] = set(kwargs['registrants'])
+            captured.append({
+                'user_ids': [row.user_id for row in rows],
+                'title': title,
+                'identity_label': kwargs['identity_label'],
+                'registrants': set(kwargs['registrants']),
+            })
             return object()
         monkeypatch.setattr(
             minigames_module, '_get_queens_results_table_image_file', _capture)
 
         asyncio.run(Minigames.queens_results.__wrapped__(cog, ctx, '769'))
 
-        assert captured['title'] == 'LinkedIn Queens #769 2026-06-08 Results'
-        assert captured['identity_label'] == 'LinkedIn'
-        assert set(captured['user_ids']) == {'300', '301'}
-        assert set(captured['registrants']) == {'300'}
+        assert captured[-1]['title'] == 'LinkedIn Queens #769 2026-06-08 Results'
+        assert captured[-1]['identity_label'] == 'LinkedIn'
+        assert captured[-1]['user_ids'] == ['300']
+        assert set(captured[-1]['registrants']) == {'300'}
         assert 'file' in ctx.sent['kwargs']
+
+        asyncio.run(cog._cmd_queens_stats_date(ctx, '769', show_all=True))
+
+        assert set(captured[-1]['user_ids']) == {'300', '301'}
+        assert set(captured[-1]['registrants']) == {'300', '301'}
 
     def test_queens_results_table_omits_accuracy_result_column(
             self, monkeypatch):
@@ -2298,10 +2305,10 @@ class TestQueensCommands:
             100, 'queens', alice.id, 'Alice LinkedIn',
             normalize_queens_name('Alice LinkedIn'),
             minigames_module._QUEENS_ANONYMOUS_LINK_MARKER, 1.0, alice.id)
-        self._save_queens_result(db, 1, alice.id, '2026-06-08', 5, False, 0)
-        self._save_queens_result(db, 2, bob.id, '2026-06-08', 7, True, 100)
-        self._save_queens_result(db, 3, alice.id, '2026-06-09', 8, True, 100)
-        self._save_queens_result(db, 4, bob.id, '2026-06-09', 9, False, 0)
+        self._save_queens_result(db, 1, alice.id, '2026-06-08', 10, False, 0)
+        self._save_queens_result(db, 2, bob.id, '2026-06-08', 5, True, 100)
+        self._save_queens_result(db, 3, alice.id, '2026-06-09', 12, True, 100)
+        self._save_queens_result(db, 4, bob.id, '2026-06-09', 4, False, 0)
 
         pages = []
         monkeypatch.setattr(

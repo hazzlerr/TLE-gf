@@ -1867,6 +1867,13 @@ class Minigames(commands.Cog):
                 guild_id, QUEENS_GAME.name)
         }
 
+    def _filter_queens_registered_result_rows(self, guild_id, rows,
+                                              *, links_by_user=None):
+        if links_by_user is None:
+            links_by_user = self._queens_links_by_user(guild_id)
+        linked_ids = set(links_by_user)
+        return [row for row in rows if row.user_id in linked_ids]
+
     def _queens_public_user_name(self, guild, user_id, links_by_user=None):
         del links_by_user
         return _safe_user_name(guild, user_id)
@@ -2422,12 +2429,19 @@ class Minigames(commands.Cog):
         rows = self._filter_minigame_banned_rows(ctx.guild.id, QUEENS_GAME, rows)
         rows = self._filter_akari_rows(
             rows, excluded_ids=excluded_ids, included_ids=included_ids)
+        links_by_user = self._queens_links_by_user(ctx.guild.id)
+        if not show_all:
+            rows = self._filter_queens_registered_result_rows(
+                ctx.guild.id, rows, links_by_user=links_by_user)
         if not rows:
+            if show_all:
+                raise MinigameCogError(
+                    f'No {QUEENS_GAME.display_name} results found for '
+                    f'`{puzzle_date.isoformat()}`.')
             raise MinigameCogError(
-                f'No {QUEENS_GAME.display_name} results found for '
+                f'No registered {QUEENS_GAME.display_name} results found for '
                 f'`{puzzle_date.isoformat()}`.')
 
-        links_by_user = self._queens_links_by_user(ctx.guild.id)
         puzzle_numbers = {int(row.puzzle_number) for row in rows}
         puzzle_info = None
         registrants = None
@@ -3309,6 +3323,8 @@ class Minigames(commands.Cog):
         rows = cf_common.user_db.get_minigame_results_for_guild(
             ctx.guild.id, game.name, dlo, dhi, plo, phi)
         rows = self._filter_minigame_banned_rows(ctx.guild.id, game, rows)
+        if game.name == QUEENS_GAME.name:
+            rows = self._filter_queens_registered_result_rows(ctx.guild.id, rows)
         winners = compute_top(
             rows,
             is_eligible=scoring.is_eligible_winner,
