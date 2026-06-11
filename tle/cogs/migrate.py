@@ -44,6 +44,7 @@ _RATE_DELAY = 0.5
 _MAX_RETRIES = 5
 _RETRY_BASE_DELAY = 2.0
 _EXPORT_DIR = pathlib.Path('extra') / 'pillboard_exports'
+_EXPORT_PROGRESS_INTERVAL = 250
 
 
 
@@ -233,7 +234,8 @@ class Migrate(commands.Cog):
                 emojis.append(arg)
         return set(emojis), limit
 
-    async def _build_pillboard_export(self, old_channel, emoji_filter, limit):
+    async def _build_pillboard_export(self, old_channel, emoji_filter, limit,
+                                      progress_cb=None):
         rows = []
         scanned = 0
         parsed_count = 0
@@ -288,7 +290,16 @@ class Migrate(commands.Cog):
                 row['original'] = self._message_json_payload(original_msg)
                 fetched += 1
             rows.append(row)
-            await asyncio.sleep(_RATE_DELAY)
+            if (
+                    progress_cb is not None
+                    and parsed_count % _EXPORT_PROGRESS_INTERVAL == 0):
+                await progress_cb({
+                    'scanned': scanned,
+                    'parsed': parsed_count,
+                    'fetched': fetched,
+                    'failed': failed,
+                })
+            await asyncio.sleep(0)
 
         return {
             'scanned': scanned,
@@ -663,12 +674,30 @@ class Migrate(commands.Cog):
             await ctx.send(str(exc))
             return
 
-        await ctx.send(
+        progress_message = await ctx.send(
             f'Exporting pillboard messages from {old_channel.mention}. '
-            'This might take a while.')
+            'This might take a while. Progress updates every '
+            f'{_EXPORT_PROGRESS_INTERVAL} parsed post(s).')
         started_at = time.time()
+
+        async def progress_cb(progress):
+            if progress_message is None or not hasattr(progress_message, 'edit'):
+                return
+            elapsed = int(time.time() - started_at)
+            try:
+                await progress_message.edit(content=(
+                    f'Exporting pillboard messages from {old_channel.mention}: '
+                    f'scanned **{progress["scanned"]}**, '
+                    f'parsed **{progress["parsed"]}**, '
+                    f'fetched **{progress["fetched"]}**, '
+                    f'failed **{progress["failed"]}** '
+                    f'({elapsed}s).'
+                ))
+            except discord.HTTPException:
+                pass
+
         result = await self._build_pillboard_export(
-            old_channel, emoji_filter, limit)
+            old_channel, emoji_filter, limit, progress_cb=progress_cb)
         payload = {
             'exported_at': time.time(),
             'guild_id': str(ctx.guild.id),
