@@ -1268,3 +1268,63 @@ class TestCrawlIgnoresDisplayEmoji:
             ('333',)
         ).fetchone()
         assert rows.cnt == 1
+
+
+class TestPillboardExportCommand:
+    """Test the ;pillboard-export command."""
+
+    def test_export_fetches_original_messages(self, monkeypatch, tmp_path):
+        from tle.cogs import migrate as migrate_mod
+        from tle.cogs.migrate import Migrate
+
+        monkeypatch.setattr(migrate_mod, '_EXPORT_DIR', tmp_path)
+
+        guild = _FakeGuild(GUILD)
+        original = _FakeMessage(
+            msg_id=333,
+            content='original message text',
+            reactions=[_FakeReaction(PILL, count=3, user_ids=[10, 11, 12])],
+            author=_FakeUser(777, 'Author'),
+        )
+        old_bot_msg = _FakeMessage(
+            msg_id=1001,
+            content=(
+                f'{PILL} **3** | '
+                f'https://discord.com/channels/{GUILD}/222/333'
+            ),
+            author=_FakeUser(123, 'OldBot'),
+        )
+        source_channel = _FakeChannel(channel_id=222, messages=[original])
+        old_channel = _FakeChannel(channel_id=100, messages=[old_bot_msg])
+        original.channel = source_channel
+        original.guild = guild
+        old_bot_msg.channel = old_channel
+        old_bot_msg.guild = guild
+
+        bot = _FakeBot(channels=[old_channel, source_channel])
+        cog = Migrate(bot)
+
+        class _ExportCtx:
+            def __init__(self):
+                self.guild = _FakeGuild(GUILD)
+                self.guild.filesize_limit = 50 * 1024 * 1024
+                self.sent = []
+
+            async def send(self, content=None, **kwargs):
+                self.sent.append((content, kwargs))
+
+        ctx = _ExportCtx()
+        _run(cog.pillboard_export.__wrapped__(cog, ctx, old_channel, PILL))
+
+        exported = list(tmp_path.glob('pillboard_export_*.json'))
+        assert len(exported) == 1
+        payload = json.loads(exported[0].read_text())
+        assert payload['summary']['scanned'] == 1
+        assert payload['summary']['parsed'] == 1
+        assert payload['summary']['fetched'] == 1
+        assert payload['summary']['failed'] == 0
+        assert payload['messages'][0]['pillboard']['displayed_count'] == 3
+        assert payload['messages'][0]['original']['content'] == (
+            'original message text')
+        assert payload['messages'][0]['original']['author']['id'] == '777'
+        assert 'file' in ctx.sent[-1][1]

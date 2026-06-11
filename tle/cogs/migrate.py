@@ -12,8 +12,11 @@ The first emoji is the main emoji; subsequent emojis are aliases that get
 merged into the main emoji during posting and registered as aliases on complete.
 """
 import asyncio
+import gzip
+import io
 import json
 import logging
+import pathlib
 import time
 
 import discord
@@ -40,6 +43,7 @@ _RATE_DELAY = 0.5
 # Retry parameters for Discord API calls
 _MAX_RETRIES = 5
 _RETRY_BASE_DELAY = 2.0
+_EXPORT_DIR = pathlib.Path('extra') / 'pillboard_exports'
 
 
 
@@ -114,6 +118,185 @@ class Migrate(commands.Cog):
             lambda: self.bot.fetch_channel(source_channel_id),
             max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
         )
+
+    @staticmethod
+    def _message_iso(value):
+        return value.isoformat() if value is not None else None
+
+    @staticmethod
+    def _message_user_payload(user):
+        if user is None:
+            return None
+        return {
+            'id': str(user.id),
+            'name': getattr(user, 'name', None),
+            'display_name': getattr(user, 'display_name', None),
+            'bot': bool(getattr(user, 'bot', False)),
+        }
+
+    @staticmethod
+    def _message_attachment_payload(attachment):
+        return {
+            'id': str(getattr(attachment, 'id', '')),
+            'filename': getattr(attachment, 'filename', None),
+            'url': getattr(attachment, 'url', None),
+            'proxy_url': getattr(attachment, 'proxy_url', None),
+            'content_type': getattr(attachment, 'content_type', None),
+            'size': getattr(attachment, 'size', None),
+            'width': getattr(attachment, 'width', None),
+            'height': getattr(attachment, 'height', None),
+            'spoiler': (
+                attachment.is_spoiler()
+                if hasattr(attachment, 'is_spoiler') else False
+            ),
+            'description': getattr(attachment, 'description', None),
+        }
+
+    @staticmethod
+    def _message_embed_payload(embed):
+        if hasattr(embed, 'to_dict'):
+            return embed.to_dict()
+        return dict(embed) if isinstance(embed, dict) else {'repr': repr(embed)}
+
+    @staticmethod
+    def _message_reaction_payload(reaction):
+        return {
+            'emoji': _emoji_str(reaction.emoji),
+            'count': int(reaction.count),
+        }
+
+    def _message_json_payload(self, message):
+        reference = None
+        if getattr(message, 'reference', None) is not None:
+            reference = {
+                'message_id': (
+                    str(message.reference.message_id)
+                    if getattr(message.reference, 'message_id', None) else None
+                ),
+                'channel_id': (
+                    str(message.reference.channel_id)
+                    if getattr(message.reference, 'channel_id', None) else None
+                ),
+                'guild_id': (
+                    str(message.reference.guild_id)
+                    if getattr(message.reference, 'guild_id', None) else None
+                ),
+            }
+
+        guild = getattr(message, 'guild', None)
+        channel = getattr(message, 'channel', None)
+        return {
+            'id': str(message.id),
+            'channel_id': str(channel.id) if channel is not None else None,
+            'guild_id': str(guild.id) if guild is not None else None,
+            'author': self._message_user_payload(
+                getattr(message, 'author', None)),
+            'created_at': self._message_iso(
+                getattr(message, 'created_at', None)),
+            'edited_at': self._message_iso(
+                getattr(message, 'edited_at', None)),
+            'jump_url': getattr(message, 'jump_url', None),
+            'type': str(getattr(message, 'type', '')),
+            'content': getattr(message, 'content', ''),
+            'attachments': [
+                self._message_attachment_payload(attachment)
+                for attachment in getattr(message, 'attachments', [])
+            ],
+            'embeds': [
+                self._message_embed_payload(embed)
+                for embed in getattr(message, 'embeds', [])
+            ],
+            'reactions': [
+                self._message_reaction_payload(reaction)
+                for reaction in getattr(message, 'reactions', [])
+            ],
+            'reference': reference,
+            'pinned': bool(getattr(message, 'pinned', False)),
+            'tts': bool(getattr(message, 'tts', False)),
+        }
+
+    @staticmethod
+    def _parse_export_args(args):
+        emojis = []
+        limit = None
+        for arg in args:
+            if arg.startswith('+limit='):
+                try:
+                    limit = int(arg.split('=', 1)[1])
+                except ValueError as exc:
+                    raise commands.BadArgument(
+                        '+limit must be an integer.') from exc
+                if limit <= 0:
+                    raise commands.BadArgument(
+                        '+limit must be a positive integer.')
+            else:
+                emojis.append(arg)
+        return set(emojis), limit
+
+    async def _build_pillboard_export(self, old_channel, emoji_filter, limit):
+        rows = []
+        scanned = 0
+        parsed_count = 0
+        fetched = 0
+        failed = 0
+
+        async for old_bot_msg in old_channel.history(
+                oldest_first=True, limit=limit):
+            scanned += 1
+            parsed = parse_old_bot_message(old_bot_msg.content or '')
+            if parsed is None:
+                continue
+            (emoji, displayed_count, guild_id, source_channel_id,
+             original_msg_id) = parsed
+            if emoji_filter and emoji not in emoji_filter:
+                continue
+            parsed_count += 1
+
+            row = {
+                'pillboard': {
+                    'message': self._message_json_payload(old_bot_msg),
+                    'emoji': emoji,
+                    'displayed_count': displayed_count,
+                },
+                'original_ref': {
+                    'guild_id': str(guild_id),
+                    'channel_id': str(source_channel_id),
+                    'message_id': str(original_msg_id),
+                    'jump_url': (
+                        f'https://discord.com/channels/{guild_id}/'
+                        f'{source_channel_id}/{original_msg_id}'
+                    ),
+                },
+                'original': None,
+                'fetch_status': 'ok',
+                'fetch_error': None,
+            }
+            try:
+                source_channel = await self._fetch_source_channel(
+                    source_channel_id)
+                original_msg = await discord_retry(
+                    lambda: source_channel.fetch_message(original_msg_id),
+                    max_retries=_MAX_RETRIES,
+                    base_delay=_RETRY_BASE_DELAY,
+                )
+            except (discord.NotFound, discord.Forbidden,
+                    discord.HTTPException, RetryExhaustedError) as exc:
+                row['fetch_status'] = type(exc).__name__
+                row['fetch_error'] = str(exc)
+                failed += 1
+            else:
+                row['original'] = self._message_json_payload(original_msg)
+                fetched += 1
+            rows.append(row)
+            await asyncio.sleep(_RATE_DELAY)
+
+        return {
+            'scanned': scanned,
+            'parsed': parsed_count,
+            'fetched': fetched,
+            'failed': failed,
+            'rows': rows,
+        }
 
     async def _crawl_phase(self, guild_id, old_channel_id, emoji_set, db):
         """Crawl the old bot's channel, collecting entries and reactors."""
@@ -447,6 +630,96 @@ class Migrate(commands.Cog):
             lines.append(f'**Entries by status:** {", ".join(parts)}')
 
         await ctx.send('\n'.join(lines))
+
+    @migrate.command(name='export')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def export_pillboard(self, ctx, old_channel: discord.TextChannel,
+                               *args: str):
+        """Export old pillboard posts and linked original messages to JSON.
+
+        Usage:
+          ;migrate export #old-pillboard :pill:
+          ;migrate export #old-pillboard :pill: :chocolate_bar:
+          ;migrate export #old-pillboard +limit=100 :pill:
+        """
+        await self._cmd_pillboard_export(ctx, old_channel, *args)
+
+    @commands.command(name='pillboard-export')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def pillboard_export(self, ctx, pillboard_channel: discord.TextChannel,
+                               *args: str):
+        """Export pillboard posts and linked original messages to JSON.
+
+        Usage:
+          ;pillboard-export #pillboard
+          ;pillboard-export #pillboard +limit=100
+        """
+        await self._cmd_pillboard_export(ctx, pillboard_channel, *args)
+
+    async def _cmd_pillboard_export(self, ctx, old_channel, *args):
+        try:
+            emoji_filter, limit = self._parse_export_args(args)
+        except commands.BadArgument as exc:
+            await ctx.send(str(exc))
+            return
+
+        await ctx.send(
+            f'Exporting pillboard messages from {old_channel.mention}. '
+            'This might take a while.')
+        started_at = time.time()
+        result = await self._build_pillboard_export(
+            old_channel, emoji_filter, limit)
+        payload = {
+            'exported_at': time.time(),
+            'guild_id': str(ctx.guild.id),
+            'pillboard_channel_id': str(old_channel.id),
+            'emoji_filter': sorted(emoji_filter),
+            'limit': limit,
+            'summary': {
+                'scanned': result['scanned'],
+                'parsed': result['parsed'],
+                'fetched': result['fetched'],
+                'failed': result['failed'],
+                'seconds': round(time.time() - started_at, 3),
+            },
+            'messages': result['rows'],
+        }
+        data = json.dumps(payload, indent=2, ensure_ascii=False).encode('utf-8')
+
+        _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        filename = (
+            f'pillboard_export_{ctx.guild.id}_{old_channel.id}_'
+            f'{int(started_at)}.json'
+        )
+        path = _EXPORT_DIR / filename
+        path.write_bytes(data)
+
+        summary = (
+            f'Pillboard export complete: scanned **{result["scanned"]}**, '
+            f'parsed **{result["parsed"]}**, fetched **{result["fetched"]}**, '
+            f'failed **{result["failed"]}**.'
+        )
+        upload_limit = getattr(ctx.guild, 'filesize_limit', 8 * 1024 * 1024)
+        if len(data) <= upload_limit:
+            await ctx.send(
+                summary,
+                file=discord.File(io.BytesIO(data), filename=filename))
+            return
+
+        gz_data = gzip.compress(data)
+        gz_filename = f'{filename}.gz'
+        gz_path = _EXPORT_DIR / gz_filename
+        gz_path.write_bytes(gz_data)
+        if len(gz_data) <= upload_limit:
+            await ctx.send(
+                f'{summary}\nRaw JSON was too large for Discord, so I attached '
+                'a compressed `.json.gz` file.',
+                file=discord.File(io.BytesIO(gz_data), filename=gz_filename))
+        else:
+            await ctx.send(
+                f'{summary}\nJSON is too large to upload, even compressed '
+                f'({len(gz_data)} compressed bytes; limit {upload_limit}). '
+                f'Saved on the server at `{path}` and `{gz_path}`.')
 
     @migrate.command(name='complete')
     @commands.has_role(constants.TLE_ADMIN)
