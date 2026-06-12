@@ -195,7 +195,6 @@ def plot_queens_stats(results, display_name, *, title_suffix=''):
     clean = [row for row in results if row.is_perfect]
     no_mistakes = [row for row in results if int(row.accuracy) == 100]
     times = [int(row.time_seconds) for row in results]
-    clean_rate = len(clean) / total * 100 if total else 0
     current, longest, latest = _queens_streak_info(results)
 
     weekday_rows = [[] for _ in range(7)]
@@ -206,19 +205,12 @@ def plot_queens_stats(results, display_name, *, title_suffix=''):
         float(np.median([row.time_seconds for row in rows])) if rows else 0
         for rows in weekday_rows
     ]
-    weekday_clean_rates = [
-        (sum(1 for row in rows if row.is_perfect) / len(rows) * 100)
-        if rows else 0
-        for rows in weekday_rows
-    ]
     active_weekdays = [
-        (index, weekday_counts[index], weekday_medians[index],
-         weekday_clean_rates[index])
+        (index, weekday_counts[index], weekday_medians[index])
         for index in range(7) if weekday_counts[index]
     ]
     most_active = max(active_weekdays, key=lambda item: item[1], default=None)
     fastest = min(active_weekdays, key=lambda item: item[2], default=None)
-    cleanest = max(active_weekdays, key=lambda item: item[3], default=None)
 
     fig, axes = plt.subplots(2, 2, figsize=(12, 9))
     fig.suptitle(
@@ -230,7 +222,7 @@ def plot_queens_stats(results, display_name, *, title_suffix=''):
     if times:
         lines = [
             f'Queens days:  {total}',
-            f'Clean:  {len(clean)}  ({clean_rate:.0f}%)',
+            f'Clean:  {len(clean)}',
             f'No mistakes:  {len(no_mistakes)}',
             '',
             f'Best time:  {format_duration(min(times))}',
@@ -246,7 +238,6 @@ def plot_queens_stats(results, display_name, *, title_suffix=''):
                 '',
                 f'Most active day:  {_WEEKDAY_LABELS[most_active[0]]} ({most_active[1]})',
                 f'Fastest weekday:  {_WEEKDAY_LABELS[fastest[0]]} ({format_duration(fastest[2])})',
-                f'Cleanest weekday:  {_WEEKDAY_LABELS[cleanest[0]]} ({cleanest[3]:.0f}%)',
             ])
         ax.text(0.08, 0.92, '\n'.join(lines), transform=ax.transAxes,
                 fontsize=12, verticalalignment='top', fontfamily='monospace',
@@ -275,18 +266,11 @@ def plot_queens_stats(results, display_name, *, title_suffix=''):
     bars = ax.bar(_WEEKDAY_LABELS, weekday_medians, color=bar_colors,
                   edgecolor='white', linewidth=0.5)
     ax.set_ylabel('Median seconds')
-    ax.set_title('Weekday Speed + Clean Rate', fontsize=13, fontweight='bold')
+    ax.set_title('Weekday Speed', fontsize=13, fontweight='bold')
     for bar, count, median in zip(bars, weekday_counts, weekday_medians):
         if count:
             ax.text(bar.get_x() + bar.get_width() / 2, median + 0.3,
                     f'n={count}', ha='center', va='bottom', fontsize=8)
-    ax_rate = ax.twinx()
-    ax_rate.plot(
-        _WEEKDAY_LABELS, weekday_clean_rates, color='#EF5350',
-        marker='o', linewidth=2, label='Clean rate')
-    ax_rate.set_ylim(0, 105)
-    ax_rate.set_ylabel('Clean %')
-    ax_rate.tick_params(axis='y', labelcolor='#EF5350')
 
     ax = axes[1, 1]
     if len(results) >= 3:
