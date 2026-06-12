@@ -164,7 +164,7 @@ _QUEENS_UPDATE_THROTTLE_SECONDS = 60
 _QUEENS_DAILY_UPDATE_LAST_PREFIX = 'queens_daily_update_last:'
 _QUEENS_DAILY_UPDATE_CHECK_INTERVAL = 60
 _QUEENS_DAILY_UPDATE_PRECISE_WINDOW = 300
-_QUEENS_DAILY_UPDATE_TIME = '12:05'
+_QUEENS_DAILY_UPDATE_TIME = '00:00:10'
 _QUEENS_DAILY_UPDATE_TZ = 'US/Pacific'
 _QUEENS_AUTO_PLAY_MIN_SECONDS = 180
 _QUEENS_SCRAPER_TIMEOUT = 480  # seconds — playwright start + delayed auto-play
@@ -543,8 +543,10 @@ def _queens_update_target_date(results_day):
 
 
 def _queens_daily_update_target_datetime(now):
-    hour, minute = map(int, _QUEENS_DAILY_UPDATE_TIME.split(':'))
-    return now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    parts = [int(part) for part in _QUEENS_DAILY_UPDATE_TIME.split(':')]
+    hour, minute = parts[:2]
+    second = parts[2] if len(parts) > 2 else 0
+    return now.replace(hour=hour, minute=minute, second=second, microsecond=0)
 
 
 def _parse_queens_update_args(args):
@@ -1337,10 +1339,15 @@ class Minigames(commands.Cog):
         if channel_id is None:
             return
         kvs_key = f'{_QUEENS_DAILY_UPDATE_LAST_PREFIX}{guild.id}'
+        target = _queens_daily_update_target_datetime(now)
         if cf_common.user_db.kvs_get(kvs_key) == today:
+            next_target = target + dt.timedelta(days=1)
+            seconds_until_next = (next_target - now).total_seconds()
+            if 0 < seconds_until_next <= _QUEENS_DAILY_UPDATE_PRECISE_WINDOW:
+                self._schedule_queens_daily_update_timer(
+                    guild, seconds_until_next)
             return
 
-        target = _queens_daily_update_target_datetime(now)
         seconds_until = (target - now).total_seconds()
         pending = self._queens_update_timers.get(guild.id)
         if seconds_until <= 0:
@@ -1349,12 +1356,16 @@ class Minigames(commands.Cog):
             if await self._send_queens_daily_update(guild):
                 cf_common.user_db.kvs_set(kvs_key, today)
         elif seconds_until <= _QUEENS_DAILY_UPDATE_PRECISE_WINDOW:
-            if pending is None or pending.done():
-                logger.info(
-                    'Scheduling precise Queens daily update for guild=%s in %.0fs',
-                    guild.id, seconds_until)
-                self._queens_update_timers[guild.id] = asyncio.create_task(
-                    self._precise_queens_daily_update(guild, seconds_until))
+            self._schedule_queens_daily_update_timer(guild, seconds_until)
+
+    def _schedule_queens_daily_update_timer(self, guild, delay):
+        pending = self._queens_update_timers.get(guild.id)
+        if pending is None or pending.done():
+            logger.info(
+                'Scheduling precise Queens daily update for guild=%s in %.0fs',
+                guild.id, delay)
+            self._queens_update_timers[guild.id] = asyncio.create_task(
+                self._precise_queens_daily_update(guild, delay))
 
     async def _precise_queens_daily_update(self, guild, delay):
         try:

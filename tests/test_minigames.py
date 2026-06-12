@@ -2296,7 +2296,7 @@ class TestQueensCommands:
 
         monkeypatch.setattr(cog, '_send_queens_daily_update', fake_send)
         now = dt.datetime(
-            2026, 6, 13, 12, 6,
+            2026, 6, 13, 0, 0, 11,
             tzinfo=minigames_module.ZoneInfo('US/Pacific'))
 
         asyncio.run(cog._check_queens_daily_update_guild(
@@ -2306,6 +2306,33 @@ class TestQueensCommands:
 
         assert calls == [100]
         assert db.kvs_get('queens_daily_update_last:100') == '2026-06-13'
+
+    def test_daily_queens_update_schedules_next_midnight_timer(
+            self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(100, 'queens', '1')
+        db.set_minigame_channel(100, 'queens', 777)
+        db.kvs_set('queens_daily_update_last:100', '2026-06-13')
+        guild = _FakeGuild(100, channels=[_FakeChannel(777)])
+        cog = Minigames(bot=SimpleNamespace(guilds=[guild]))
+        calls = []
+
+        async def fake_precise(send_guild, delay):
+            calls.append((send_guild.id, delay))
+
+        monkeypatch.setattr(cog, '_precise_queens_daily_update', fake_precise)
+        now = dt.datetime(
+            2026, 6, 13, 23, 59, 50,
+            tzinfo=minigames_module.ZoneInfo('US/Pacific'))
+
+        async def run_check():
+            await cog._check_queens_daily_update_guild(
+                guild, now, '2026-06-13')
+            await asyncio.sleep(0)
+
+        asyncio.run(run_check())
+
+        assert calls == [(100, 20.0)]
 
     def test_daily_queens_update_plays_before_yesterday_update(
             self, db, monkeypatch):
