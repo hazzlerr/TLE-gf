@@ -2986,6 +2986,18 @@ class TestQueensCommands:
             [full_alice_rating_values[date_start_index]]
         ]
 
+        _expected_row, expected_recalculated_history = cog._minigame_user_data(
+            100, QUEENS_GAME, alice.id, date_bounds=date_bounds)
+        asyncio.run(cog._cmd_queens_rating(
+            ctx, [alice], date_bounds=date_bounds, recalculate=True))
+        assert rating_series['dates'] == [['2026-06-09']]
+        assert rating_series['ratings'] == [[
+            point.rating for point in expected_recalculated_history
+        ]]
+        assert rating_series['ratings'] != [
+            [full_alice_rating_values[date_start_index]]
+        ]
+
         asyncio.run(cog._cmd_queens_performance(ctx, [alice]))
         assert perf_series['names'] == ['Alice LinkedIn']
         assert ctx.sent['embed'].title == 'LinkedIn Queens performance — Alice'
@@ -3093,6 +3105,19 @@ class TestQueensCommands:
 
         with pytest.raises(MinigameCogError, match='do not use decay'):
             asyncio.run(cog._extract_queens_rating_filters(ctx, ['+decay']))
+
+        (members, excluded_ids, included_ids, weekdays, date_bounds,
+         recalculate) = asyncio.run(cog._parse_queens_rating_args(
+            ctx, ['+recalculate'], allow_recalculate=True))
+        assert members == [alice]
+        assert excluded_ids == set()
+        assert included_ids == set()
+        assert weekdays is None
+        assert date_bounds is None
+        assert recalculate is True
+
+        with pytest.raises(MinigameCogError, match='only supported'):
+            asyncio.run(cog._parse_queens_rating_args(ctx, ['+recalculate']))
 
         (remaining, excluded_ids, included_ids, weekdays, date_bounds) = asyncio.run(
             cog._extract_queens_rating_filters(
