@@ -2629,6 +2629,61 @@ class TestQueensCommands:
         assert 'https://www.linkedin.com/in/linked/' in instruction
         assert 'Linked User' not in instruction
 
+    def test_queens_admin_allowlist_management(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_success',
+            lambda desc: SimpleNamespace(description=desc))
+        monkeypatch.setattr(
+            minigames_module.discord_common, 'embed_neutral',
+            lambda desc: SimpleNamespace(description=desc))
+        mod = _FakeDiscordMember(
+            999, 'mod', 'Mod',
+            roles=[SimpleNamespace(name=constants.TLE_MODERATOR)])
+        helper = _FakeDiscordMember(300, 'helper', 'Helper')
+        guild = _FakeGuild(100, members=[mod, helper])
+        ctx = self._make_ctx(guild, mod)
+        cog = Minigames(bot=None)
+
+        asyncio.run(Minigames.queens_admins_add.__wrapped__(
+            cog, ctx, helper))
+
+        assert json.loads(db.get_guild_config(
+            100, minigames_module._QUEENS_ADMINS_KEY)) == ['300']
+        assert cog._has_queens_mod_access(100, helper) is True
+        assert cog._has_server_mod_role(helper) is False
+        assert 'can now run LinkedIn Queens mod commands' in (
+            ctx.sent['embed'].description)
+
+        helper_ctx = self._make_ctx(guild, helper)
+        asyncio.run(Minigames.queens_admins.__wrapped__(cog, helper_ctx))
+        assert 'Helper (`300`)' in helper_ctx.sent['embed'].description
+
+        with pytest.raises(MinigameCogError, match='can change'):
+            asyncio.run(Minigames.queens_admins_add.__wrapped__(
+                cog, helper_ctx, mod))
+
+        asyncio.run(Minigames.queens_admins_remove.__wrapped__(
+            cog, ctx, helper))
+        assert db.get_guild_config(
+            100, minigames_module._QUEENS_ADMINS_KEY) is None
+        assert cog._has_queens_mod_access(100, helper) is False
+
+    def test_queens_admin_can_register_other_users(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        helper = _FakeDiscordMember(300, 'helper', 'Helper')
+        alice = _FakeDiscordMember(301, 'alice', 'Alice')
+        guild = _FakeGuild(100, members=[helper, alice])
+        ctx = self._make_ctx(guild, helper)
+        cog = Minigames(bot=None)
+        db.set_guild_config(
+            100, minigames_module._QUEENS_ADMINS_KEY,
+            json.dumps(['300']))
+
+        assert cog._resolve_queens_registrar_target(ctx, alice) is alice
+        with pytest.raises(MinigameCogError, match='Only'):
+            cog._resolve_registrar_target(ctx, alice)
+
     def test_backfill_single_user_from_attachment(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         monkeypatch.setattr(

@@ -158,6 +158,7 @@ _QUEENS_WEEKDAY_ALIASES = {
 # `queens_update_throttle:{guild_id}`.
 _QUEENS_IMPORTER_KEY = 'queens_importer_user'  # legacy — cleared on login
 _QUEENS_LINKEDIN_NAME_KEY = 'queens_linkedin_name'  # display only
+_QUEENS_ADMINS_KEY = 'queens_admin_user_ids'
 _QUEENS_STATE_PATH_KEY = 'queens_state_path'
 _QUEENS_UPDATE_THROTTLE_PREFIX = 'queens_update_throttle:'
 _QUEENS_UPDATE_THROTTLE_SECONDS = 60
@@ -197,6 +198,20 @@ _QUEENS_DEFAULT_STATE_PATH = (
 
 class MinigameCogError(commands.CommandError):
     pass
+
+
+def queens_mod_only():
+    async def predicate(ctx):
+        cog = getattr(ctx, 'cog', None)
+        if cog is not None and cog._has_queens_mod_access(
+                ctx.guild.id, ctx.author):
+            return True
+        raise MinigameCogError(Minigames._mod_role_error_message())
+
+    check = getattr(commands, 'check', None)
+    if check is None:
+        return lambda func: func
+    return check(predicate)
 
 
 class ChannelOrThread(commands.Converter):
@@ -1455,7 +1470,65 @@ class Minigames(commands.Cog):
     def _mod_role_error_message():
         return (
             f'You need the `{constants.TLE_ADMIN}` or '
-            f'`{constants.TLE_MODERATOR}` role.')
+            f'`{constants.TLE_MODERATOR}` role or Queens admin access.')
+
+    @staticmethod
+    def _has_server_mod_role(member):
+        allowed = {constants.TLE_ADMIN, constants.TLE_MODERATOR}
+        return any(r.name in allowed for r in getattr(member, 'roles', []))
+
+    @staticmethod
+    def _queens_admin_ids(guild_id):
+        if cf_common.user_db is None:
+            return set()
+        raw = cf_common.user_db.get_guild_config(
+            guild_id, _QUEENS_ADMINS_KEY)
+        if not raw:
+            return set()
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return set()
+        if not isinstance(data, list):
+            return set()
+        return {
+            str(user_id)
+            for user_id in data
+            if str(user_id).strip()
+        }
+
+    @staticmethod
+    def _set_queens_admin_ids(guild_id, user_ids):
+        user_ids = sorted(
+            {str(user_id) for user_id in user_ids},
+            key=Minigames._user_id_sort_key)
+        if user_ids:
+            cf_common.user_db.set_guild_config(
+                guild_id, _QUEENS_ADMINS_KEY, json.dumps(user_ids))
+        else:
+            cf_common.user_db.delete_guild_config(guild_id, _QUEENS_ADMINS_KEY)
+
+    @staticmethod
+    def _user_id_sort_key(user_id):
+        try:
+            return 0, int(user_id)
+        except (TypeError, ValueError):
+            return 1, str(user_id)
+
+    def _has_queens_mod_access(self, guild_id, member):
+        return (
+            self._has_server_mod_role(member)
+            or str(getattr(member, 'id', None)) in self._queens_admin_ids(guild_id)
+        )
+
+    def _resolve_queens_registrar_target(self, ctx, member):
+        if member is None or member.id == ctx.author.id:
+            return ctx.author
+        if not self._has_queens_mod_access(ctx.guild.id, ctx.author):
+            raise MinigameCogError(
+                f'Only `{constants.TLE_ADMIN}` / `{constants.TLE_MODERATOR}` '
+                'or Queens admins can register or unregister other users.')
+        return member
 
     @staticmethod
     def _minigame_banned_user_ids(guild_id, game):
@@ -1547,7 +1620,7 @@ class Minigames(commands.Cog):
                     'Usage: `;queens register +username DiscordUser '
                     'LinkedIn Name [+anon]`.')
             target = await self._resolve_member(ctx, tokens[0])
-            target = self._resolve_registrar_target(ctx, target)
+            target = self._resolve_queens_registrar_target(ctx, target)
             linkedin = tokens[1]
         linkedin, anonymous = _split_queens_anonymous_flag(linkedin)
         if not linkedin:
@@ -2076,7 +2149,7 @@ class Minigames(commands.Cog):
 
     async def _cmd_queens_unregister(self, ctx, member):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
-        target = self._resolve_registrar_target(ctx, member)
+        target = self._resolve_queens_registrar_target(ctx, member)
         link = cf_common.user_db.get_minigame_player_link(
             ctx.guild.id, QUEENS_GAME.name, target.id)
         self._migrate_legacy_queens_results_to_external(ctx.guild.id)
@@ -5434,8 +5507,71 @@ class Minigames(commands.Cog):
     async def queens_show(self, ctx):
         await self._cmd_queens_show(ctx)
 
+    @queens.group(name='admins', aliases=['admin'],
+                  brief='Manage extra LinkedIn Queens command admins',
+                  invoke_without_command=True)
+    @queens_mod_only()
+    async def queens_admins(self, ctx):
+        admin_ids = self._queens_admin_ids(ctx.guild.id)
+        if not admin_ids:
+            await ctx.send(embed=discord_common.embed_neutral(
+                'No extra LinkedIn Queens admins configured.'))
+            return
+        lines = [
+            f'- {_safe_user_name(ctx.guild, user_id)} (`{user_id}`)'
+            for user_id in sorted(admin_ids, key=self._user_id_sort_key)
+        ]
+        await ctx.send(embed=discord_common.embed_neutral(
+            'Extra LinkedIn Queens admins:\n' + '\n'.join(lines)))
+
+    @queens_admins.command(name='add',
+                           brief='(Mod) Add a Queens command admin',
+                           usage='@user')
+    @queens_mod_only()
+    async def queens_admins_add(self, ctx, member: CaseInsensitiveMember):
+        if not self._has_server_mod_role(ctx.author):
+            raise MinigameCogError(
+                f'Only `{constants.TLE_ADMIN}` / `{constants.TLE_MODERATOR}` '
+                'can change the LinkedIn Queens admin list.')
+        admin_ids = self._queens_admin_ids(ctx.guild.id)
+        before = len(admin_ids)
+        admin_ids.add(str(member.id))
+        self._set_queens_admin_ids(ctx.guild.id, admin_ids)
+        if len(admin_ids) == before:
+            message = (
+                f'`{_safe_member_name(member)}` already has '
+                'LinkedIn Queens admin access.')
+        else:
+            message = (
+                f'`{_safe_member_name(member)}` can now run '
+                'LinkedIn Queens mod commands.')
+        await ctx.send(embed=discord_common.embed_success(message))
+
+    @queens_admins.command(name='remove',
+                           brief='(Mod) Remove a Queens command admin',
+                           usage='@user')
+    @queens_mod_only()
+    async def queens_admins_remove(self, ctx, member: CaseInsensitiveMember):
+        if not self._has_server_mod_role(ctx.author):
+            raise MinigameCogError(
+                f'Only `{constants.TLE_ADMIN}` / `{constants.TLE_MODERATOR}` '
+                'can change the LinkedIn Queens admin list.')
+        admin_ids = self._queens_admin_ids(ctx.guild.id)
+        removed = str(member.id) in admin_ids
+        admin_ids.discard(str(member.id))
+        self._set_queens_admin_ids(ctx.guild.id, admin_ids)
+        if removed:
+            message = (
+                f'`{_safe_member_name(member)}` no longer has '
+                'LinkedIn Queens admin access.')
+        else:
+            message = (
+                f'`{_safe_member_name(member)}` was not an extra '
+                'LinkedIn Queens admin.')
+        await ctx.send(embed=discord_common.embed_success(message))
+
     @queens.command(name='here', brief='Set the LinkedIn Queens channel to the current channel')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_here(self, ctx):
         await self._cmd_here(ctx, QUEENS_GAME)
 
@@ -5461,7 +5597,7 @@ class Minigames(commands.Cog):
     @queens.command(name='set',
                     brief='(Mod) Link a Discord user without LinkedIn verification',
                     usage='[+anon] DiscordUser LinkedIn Name [+anon]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_set(self, ctx, member: str = None, *,
                          linkedin: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
@@ -5539,7 +5675,7 @@ class Minigames(commands.Cog):
     @queens_connection.command(name='set',
                                brief='(Mod) Set the LinkedIn connection account',
                                usage='LinkedIn Name profile_url')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_connection_set(self, ctx, *, linkedin: str):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         name, external_url = _split_queens_connection_account_text(linkedin)
@@ -5549,7 +5685,7 @@ class Minigames(commands.Cog):
 
     @queens_connection.command(name='clear',
                                brief='(Mod) Clear the LinkedIn connection account')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_connection_clear(self, ctx):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         self._clear_queens_connection_account(ctx.guild.id)
@@ -5561,7 +5697,7 @@ class Minigames(commands.Cog):
     @queens.command(
         name='install',
         brief='(Mod) Install Playwright + Chromium for the scraper')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_install(self, ctx):
         """Install Playwright and the Chromium browser into the bot's Python
         environment, without needing shell access to the host.
@@ -5656,7 +5792,7 @@ class Minigames(commands.Cog):
         name='login',
         brief='(Mod) Upload a fresh LinkedIn session file',
         usage='[LinkedIn Name] (attach extra/.queens_state.json to the message)')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_login(self, ctx, *, linkedin_name: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         attachments = list(getattr(ctx.message, 'attachments', None) or [])
@@ -5730,7 +5866,7 @@ class Minigames(commands.Cog):
     @queens.command(
         name='play',
         brief='(Mod) Solve today\'s puzzle + refresh the leaderboard')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_play(self, ctx):
         await self._cmd_queens_play(ctx)
 
@@ -5986,7 +6122,7 @@ class Minigames(commands.Cog):
         name='backfill', aliases=['backill'],
         brief='(Mod) Backfill historical Queens results',
         usage='@user|+all (attach queens_history.json)')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_backfill(self, ctx, target: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         if target is None:
@@ -6065,7 +6201,7 @@ class Minigames(commands.Cog):
         name='state-path', aliases=['statepath'],
         brief='(Mod) Override where the scraper looks for state.json',
         usage='/abs/path/to/state.json | clear')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_state_path(self, ctx, *, path: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         if path is None:
@@ -6086,7 +6222,7 @@ class Minigames(commands.Cog):
     @queens.command(name='ban',
                     brief='(Mod) Block a user from Queens imports/ratings',
                     usage='@user [reason...]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_ban(self, ctx, member: CaseInsensitiveMember, *,
                          reason: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
@@ -6123,7 +6259,7 @@ class Minigames(commands.Cog):
     @queens.command(name='unban',
                     brief='(Mod) Lift a Queens ban',
                     usage='@user')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_unban(self, ctx, member: CaseInsensitiveMember):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         removed = cf_common.user_db.unban_minigame_user(
@@ -6139,7 +6275,7 @@ class Minigames(commands.Cog):
 
     @queens.command(name='bans',
                     brief='(Mod) List Queens bans')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_bans(self, ctx):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         rows = cf_common.user_db.get_minigame_bans(
@@ -6202,7 +6338,7 @@ class Minigames(commands.Cog):
     @queens_results.command(name='debug',
                             brief='(Mod) Date results with ratings for ALL players',
                             usage='[date|number] [+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_results_debug(self, ctx, *args):
         remaining, excluded_ids, included_ids, weekdays, date_bounds = (
             await self._extract_queens_rating_filters(ctx, args))
@@ -6221,7 +6357,7 @@ class Minigames(commands.Cog):
                   brief='Preview pasted Queens results or manage imported history',
                   usage='date <pasted leaderboard>',
                   invoke_without_command=True)
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_import(self, ctx, puzzle_date: str = None, *,
                             leaderboard: str = None):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
@@ -6235,28 +6371,28 @@ class Minigames(commands.Cog):
 
     @queens_import.command(name='start',
                            brief='Rebuild imported Queens history from channel messages')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_import_start(self, ctx, channel: ChannelOrThread = None):
         await self._cmd_import_start(ctx, QUEENS_GAME, channel)
 
     @queens_import.command(name='status', brief='Show Queens import status')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_import_status(self, ctx):
         await self._cmd_import_status(ctx, QUEENS_GAME)
 
     @queens_import.command(name='cancel', brief='Cancel a running Queens import')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_import_cancel(self, ctx):
         await self._cmd_import_cancel(ctx, QUEENS_GAME)
 
     @queens_import.command(name='clear', brief='Delete imported Queens history')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_import_clear(self, ctx):
         await self._cmd_import_clear(ctx, QUEENS_GAME)
 
     @queens_import.command(name='confirm',
                            brief='Save the latest Queens import preview')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_import_confirm(self, ctx):
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         key = (ctx.guild.id, ctx.author.id)
@@ -6282,33 +6418,33 @@ class Minigames(commands.Cog):
     @queens.command(name='add',
                     brief='Manually add a Queens result',
                     usage='<@user|LinkedIn Name> date|number time [status...]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_add(self, ctx, *, args: str = None):
         await self._cmd_queens_add(ctx, args)
 
     @queens.command(name='remove', brief='Remove a Queens result',
                     usage='<@user|LinkedIn Name> date|number')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_remove(self, ctx, *, args: str = None):
         await self._cmd_queens_remove(ctx, args)
 
     @queens.command(name='clear', aliases=['delete'],
                     brief='(Mod) Remove all Queens results for a date',
                     usage='date|number')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_clear(self, ctx, puzzle_date: str = None):
         await self._cmd_queens_clear(ctx, puzzle_date)
 
     @queens.command(name='clean', aliases=['cleanup'],
                     brief='(Mod) Remove Queens results for an inclusive date range',
                     usage='start-date|number [end-date|number]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_clean(self, ctx, start_date: str = None,
                            end_date: str = None):
         await self._cmd_queens_clean(ctx, start_date, end_date)
 
     @queens.command(name='reparse', brief='(Mod) Reparse all stored raw Queens messages')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_reparse(self, ctx):
         await self._cmd_reparse(ctx, QUEENS_GAME)
 
@@ -6344,7 +6480,7 @@ class Minigames(commands.Cog):
     @queens_rating.command(name='debug',
                            brief='(Mod) Rating graph for any rated user',
                            usage='@user1 [@user2 ...] [+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date] [+recalculate]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_rating_debug(self, ctx, *args):
         (members, excluded_ids, included_ids, weekdays, date_bounds,
          recalculate) = (
@@ -6371,7 +6507,7 @@ class Minigames(commands.Cog):
     @queens_performance.command(name='debug',
                                 brief='(Mod) Performance graph for any rated user',
                                 usage='@user1 [@user2 ...] [+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_performance_debug(self, ctx, *args):
         members, excluded_ids, included_ids, weekdays, date_bounds, _recalculate = (
             await self._parse_queens_rating_args(
@@ -6399,7 +6535,7 @@ class Minigames(commands.Cog):
     @queens_history.command(name='debug',
                             brief='(Mod) Rating delta log for any rated user',
                             usage='@user [+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_history_debug(self, ctx, *args):
         members, excluded_ids, included_ids, weekdays, date_bounds, _recalculate = (
             await self._parse_queens_rating_args(
@@ -6414,14 +6550,14 @@ class Minigames(commands.Cog):
 
     @queens_ratings.command(name='recompute',
                             brief='(Mod) Rebuild the Queens rating snapshot')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_ratings_recompute(self, ctx):
         await self._cmd_queens_ratings_recompute(ctx)
 
     @queens_ratings.command(name='debug', aliases=['all'],
                             brief='(Mod) Leaderboard including unregistered rated users',
                             usage='[+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date]')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @queens_mod_only()
     async def queens_ratings_debug(self, ctx, *args):
         remaining, excluded_ids, included_ids, weekdays, date_bounds = (
             await self._extract_queens_rating_filters(ctx, args))
@@ -6528,6 +6664,12 @@ class Minigames(commands.Cog):
     def _has_mod_role(self, interaction):
         allowed = {constants.TLE_ADMIN, constants.TLE_MODERATOR}
         return any(r.name in allowed for r in interaction.user.roles)
+
+    async def _slash_require_queens_mod(self, interaction):
+        if self._has_queens_mod_access(interaction.guild.id, interaction.user):
+            return True
+        await self._slash_send_error(interaction, self._mod_role_error_message())
+        return False
 
     @staticmethod
     def _slash_choice_args(*choices):
@@ -6913,9 +7055,8 @@ class Minigames(commands.Cog):
     @queens_slash.command(name='here', description='Set the LinkedIn Queens channel')
     async def slash_queens_here(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction, self._mod_role_error_message())
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_here(_SlashCtx(interaction), QUEENS_GAME)
         except MinigameCogError as e:
@@ -6938,7 +7079,7 @@ class Minigames(commands.Cog):
         await interaction.response.defer()
         ctx = _SlashCtx(interaction)
         try:
-            target = self._resolve_registrar_target(ctx, member)
+            target = self._resolve_queens_registrar_target(ctx, member)
             await self._cmd_queens_register(
                 ctx, target, linkedin_name, anonymous=anonymous)
         except MinigameCogError as e:
@@ -6959,9 +7100,8 @@ class Minigames(commands.Cog):
         anonymous: bool = False,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction, self._mod_role_error_message())
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_queens_set(
                 _SlashCtx(interaction), member, linkedin_name,
@@ -7233,11 +7373,8 @@ class Minigames(commands.Cog):
         status: Optional[str] = None,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             status = status or 'No hints & no mistakes'
             await self._cmd_queens_add(
@@ -7256,11 +7393,8 @@ class Minigames(commands.Cog):
         member: discord.Member, date: str,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_queens_remove(
                 _SlashCtx(interaction), f'{member.id} {date}')
@@ -7276,11 +7410,8 @@ class Minigames(commands.Cog):
         self, interaction: discord.Interaction, date: str,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_queens_clear(_SlashCtx(interaction), date)
         except MinigameCogError as e:
@@ -7298,11 +7429,8 @@ class Minigames(commands.Cog):
         end_date: Optional[str] = None,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_queens_clean(
                 _SlashCtx(interaction), start_date, end_date)
@@ -7315,11 +7443,8 @@ class Minigames(commands.Cog):
     @queens_slash.command(name='reparse', description='Reparse all stored raw Queens messages')
     async def slash_queens_reparse(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_reparse(_SlashCtx(interaction), QUEENS_GAME)
         except MinigameCogError as e:
@@ -7335,11 +7460,8 @@ class Minigames(commands.Cog):
         channel: Optional[discord.TextChannel] = None,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         ctx = _SlashCtx(interaction)
         try:
             original = await interaction.original_response()
@@ -7354,11 +7476,8 @@ class Minigames(commands.Cog):
     @queens_slash.command(name='import-status', description='Show Queens import status')
     async def slash_queens_import_status(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_import_status(_SlashCtx(interaction), QUEENS_GAME)
         except MinigameCogError as e:
@@ -7370,11 +7489,8 @@ class Minigames(commands.Cog):
     @queens_slash.command(name='import-cancel', description='Cancel a running Queens import')
     async def slash_queens_import_cancel(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_import_cancel(_SlashCtx(interaction), QUEENS_GAME)
         except MinigameCogError as e:
@@ -7386,11 +7502,8 @@ class Minigames(commands.Cog):
     @queens_slash.command(name='import-clear', description='Delete imported Queens history')
     async def slash_queens_import_clear(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_import_clear(_SlashCtx(interaction), QUEENS_GAME)
         except MinigameCogError as e:
@@ -7404,11 +7517,8 @@ class Minigames(commands.Cog):
         self, interaction: discord.Interaction,
     ):
         await interaction.response.defer()
-        if not self._has_mod_role(interaction):
-            return await self._slash_send_error(
-                interaction,
-                f'You need the `{constants.TLE_ADMIN}` or '
-                f'`{constants.TLE_MODERATOR}` role.')
+        if not await self._slash_require_queens_mod(interaction):
+            return
         try:
             await self._cmd_queens_ratings_recompute(_SlashCtx(interaction))
         except MinigameCogError as e:
