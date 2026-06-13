@@ -3105,6 +3105,10 @@ class TestQueensCommands:
                 [point.rating for point in history]
                 for history, _name in series
             ]
+            rating_series['hidden_markers'] = [
+                [getattr(point, 'is_decay', False) for point in history]
+                for history, _name in series
+            ]
             return fake_file
 
         def _performance(series):
@@ -3125,6 +3129,8 @@ class TestQueensCommands:
         assert rating_series['names'] == ['Alice LinkedIn', 'Bob LinkedIn']
         full_alice_rating_dates = rating_series['dates'][0]
         full_alice_rating_values = rating_series['ratings'][0]
+        assert rating_series['hidden_markers'][0] == [False, False, True]
+        assert rating_series['hidden_markers'][1] == [False, False]
         assert ctx.sent['embed'].title == 'LinkedIn Queens ratings — 2 players'
         assert ctx.sent['kwargs']['file'] is fake_file
 

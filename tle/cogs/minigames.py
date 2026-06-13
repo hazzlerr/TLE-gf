@@ -708,6 +708,15 @@ def _queens_streak_info(rows):
     return current, longest, best[latest_day]
 
 
+def _hide_queens_solo_rating_markers(history):
+    """Return graph history with solo contest days drawn without markers."""
+    return [
+        point._replace(is_decay=True)
+        if point.performance is None else point
+        for point in history
+    ]
+
+
 def _legend_name_for(guild, member):
     """Pick a matplotlib-safe display name for the rating/perf graph legend.
 
@@ -2823,7 +2832,8 @@ class Minigames(commands.Cog):
             per_member.append((member, row, history))
 
         series = [
-            (history, self._queens_legend_name(ctx.guild.id, member))
+            (_hide_queens_solo_rating_markers(history),
+             self._queens_legend_name(ctx.guild.id, member))
             for member, _row, history in per_member
         ]
         discord_file = plot_akari_rating(series)
