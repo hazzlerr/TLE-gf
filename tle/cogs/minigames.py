@@ -1564,6 +1564,11 @@ class Minigames(commands.Cog):
             logger.error('Failed to recompute Akari ratings for guild %s',
                          guild_id, exc_info=True)
 
+    def _recompute_live_ingest_ratings(self, guild_id, game):
+        if game.rating is None:
+            return
+        self._recompute_minigame_ratings(guild_id, game)
+
     @staticmethod
     def _queens_played_day_counts(rows):
         days_by_user = {}
@@ -3616,8 +3621,8 @@ class Minigames(commands.Cog):
                     await self._notify_non_pro_mode(message)
                     return
                 saved = await self._ingest_message(message, game)
-                if saved and game.name == AKARI_GAME.name:
-                    self._recompute_akari_ratings(message.guild.id)
+                if saved:
+                    self._recompute_live_ingest_ratings(message.guild.id, game)
             except Exception:
                 logger.error('Error ingesting message %s', message.id, exc_info=True)
 
@@ -3649,7 +3654,7 @@ class Minigames(commands.Cog):
                 changed += cf_common.user_db.delete_imported_minigame_result(after.id)
                 await self._notify_non_pro_mode(after)
                 if changed:
-                    self._recompute_akari_ratings(after.guild.id)
+                    self._recompute_live_ingest_ratings(after.guild.id, game)
                 return
             # Delete all existing live results for this message, then re-ingest.
             # Handles the case where an edit removes some results from a multi-result message.
@@ -3659,8 +3664,8 @@ class Minigames(commands.Cog):
                 changed += await self._ingest_message(after, game)
             else:
                 changed += cf_common.user_db.delete_imported_minigame_result(after.id)
-            if changed and game.name == AKARI_GAME.name:
-                self._recompute_akari_ratings(after.guild.id)
+            if changed:
+                self._recompute_live_ingest_ratings(after.guild.id, game)
         except Exception:
             logger.error('Error handling message edit %s', after.id, exc_info=True)
 
@@ -3669,13 +3674,13 @@ class Minigames(commands.Cog):
         if payload.guild_id is None or cf_common.user_db is None:
             return
         try:
+            old = cf_common.user_db.get_minigame_result(payload.message_id)
             deleted = cf_common.user_db.delete_minigame_result(payload.message_id)
             deleted += cf_common.user_db.delete_imported_minigame_result(payload.message_id)
             cf_common.user_db.delete_raw_message(payload.message_id)
-            # Game isn't known from a raw delete payload; a removed result row may
-            # have been an Akari one, so refresh ratings whenever any row went.
-            if deleted:
-                self._recompute_akari_ratings(payload.guild_id)
+            if deleted and old is not None and old.game in self.GAMES:
+                self._recompute_live_ingest_ratings(
+                    payload.guild_id, self.GAMES[old.game])
         except Exception:
             logger.error('Error handling message delete %s', payload.message_id, exc_info=True)
 

@@ -34,6 +34,7 @@ from tle.cogs._minigame_queens import (
     QUEENS_GAME,
     normalize_queens_name,
     parse_queens_leaderboard,
+    parse_queens_message,
     rank_queens_participants,
 )
 from tle.cogs.minigames import Minigames
@@ -453,6 +454,21 @@ class TestQueensParsing:
         )
         assert len(results) == 1
         assert results[0].linkedin_name == 'You'
+
+    def test_parse_shared_queens_result(self):
+        results = parse_queens_message(
+            'Queens #774 | 1:26\n'
+            'No mistakes & no hints\n'
+            'First \U0001f451s: \U0001f7eb \U0001f7e7 \U0001f7e6\n'
+            'lnkd.in/queens.'
+        )
+
+        assert len(results) == 1
+        assert results[0].puzzle_number == 774
+        assert results[0].puzzle_date == dt.date(2026, 6, 13)
+        assert results[0].time_seconds == 86
+        assert results[0].accuracy == 100
+        assert results[0].is_perfect is True
 
     def test_queens_rating_ranks_by_time_only(self):
         rows = [
@@ -3506,6 +3522,37 @@ class TestCogIngest:
         assert row.guild_id == '1'
         assert row.channel_id == '10'
         assert row.game == _GAME
+
+    def test_ingests_queens_share_from_configured_channel(self, db, monkeypatch):
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(1, 'queens', '1')
+        db.set_minigame_channel(1, 'queens', 10)
+        db.set_minigame_player_link(
+            1, 'queens', 999, 'Alice LinkedIn',
+            normalize_queens_name('Alice LinkedIn'), None, 1.0, 999)
+
+        cog = Minigames(bot=None)
+        message = _FakeMessage(
+            123, 1, 10, 999,
+            'Queens #774 | 1:26\n'
+            'No mistakes & no hints\n'
+            'First \U0001f451s: \U0001f7eb \U0001f7e7 \U0001f7e6\n'
+            'lnkd.in/queens.'
+        )
+        asyncio.run(cog.on_message(message))
+
+        row = db.get_minigame_result(123)
+        assert row is not None
+        assert row.game == 'queens'
+        assert row.user_id == '999'
+        assert row.puzzle_number == 774
+        assert row.puzzle_date == '2026-06-13'
+        assert row.accuracy == 100
+        assert row.time_seconds == 86
+        assert row.is_perfect == 1
+        rating = db.get_minigame_rating(1, 'queens', 999)
+        assert rating is not None
+        assert rating.games == 1
 
     def test_ignores_disabled_feature(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)

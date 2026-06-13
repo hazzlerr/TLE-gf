@@ -1,17 +1,22 @@
-"""LinkedIn Queens leaderboard parsing for the minigames system."""
+"""LinkedIn Queens parsing for the minigames system."""
 
+import datetime as dt
 import re
 from collections import namedtuple
 
 from tle.cogs._minigame_common import (
-    GameDef, RatingDef, normalize_puzzle_date,
+    GameDef, ParsedResult, RatingDef, normalize_puzzle_date,
 )
 
 
 _TIME_RE = re.compile(r'^\d{1,2}:\d{2}(?::\d{2})?$')
+_SHARE_HEADER_RE = re.compile(r'\bQueens\s*#\s*(\d+)\b(.*)', re.IGNORECASE)
+_SHARE_TIME_RE = re.compile(r'(?<!\d)(\d{1,2}:\d{2}(?::\d{2})?)(?!\d)')
 _RANK_RE = re.compile(r'^\d+$')
 _URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
 _DETECT_RE = re.compile(r'Queens|No hints|No mistakes|\b\d{1,2}:\d{2}\b', re.IGNORECASE)
+_QUEENS_ANCHOR_DATE = dt.date(2026, 6, 8)
+_QUEENS_ANCHOR_NUMBER = 769
 
 QueensLeaderboardEntry = namedtuple(
     'QueensLeaderboardEntry',
@@ -32,6 +37,49 @@ def parse_queens_time(time_text):
         hours, minutes, seconds = parts
         return hours * 3600 + minutes * 60 + seconds
     raise ValueError(f'Unrecognized time format: {time_text}')
+
+
+def _queens_date_for_puzzle_number(puzzle_number):
+    return _QUEENS_ANCHOR_DATE + dt.timedelta(
+        days=int(puzzle_number) - _QUEENS_ANCHOR_NUMBER)
+
+
+def parse_queens_message(content):
+    """Parse a single LinkedIn Queens share message from a Discord user.
+
+    Example accepted shape:
+
+        Queens #774 | 1:26
+        No mistakes & no hints
+        First 👑s: 🟫 🟧 🟦
+        lnkd.in/queens.
+
+    Status text is intentionally ignored; channel shares count as clean.
+    """
+    lines = [line.strip() for line in content.splitlines() if line.strip()]
+    for index, line in enumerate(lines):
+        header = _SHARE_HEADER_RE.search(line)
+        if header is None:
+            continue
+        puzzle_number = int(header.group(1))
+        time_text = header.group(2) or ''
+        if not _SHARE_TIME_RE.search(time_text):
+            time_text = '\n'.join(lines[index + 1:])
+        time_match = _SHARE_TIME_RE.search(time_text)
+        if time_match is None:
+            return []
+        try:
+            time_seconds = parse_queens_time(time_match.group(1))
+        except ValueError:
+            return []
+        return [ParsedResult(
+            puzzle_number=puzzle_number,
+            puzzle_date=_queens_date_for_puzzle_number(puzzle_number),
+            accuracy=100,
+            time_seconds=time_seconds,
+            is_perfect=True,
+        )]
+    return []
 
 
 def _is_status_line(line):
@@ -154,14 +202,13 @@ QUEENS_GAME = GameDef(
     name='queens',
     display_name='LinkedIn Queens',
     feature_flag='queens',
-    parse=lambda _content: [],
+    parse=parse_queens_message,
     detect=_DETECT_RE,
     score_matchup=queens_time_score_matchup,
     is_eligible_winner=lambda _row: True,
     best_result_sort_key=queens_best_result_sort_key,
     winner_result_sort_key=queens_winner_result_sort_key,
     result_group_key=queens_result_group_key,
-    manual_ingest_only=True,
     rating=RatingDef(
         rank_fn=rank_queens_participants,
         decay_base=0.0,
