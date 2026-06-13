@@ -1165,18 +1165,18 @@ class TestQueensImport:
             '0:05\n'
         ))
         saved = cog._save_queens_import(ctx, reimport)
-        assert saved.resolved == 0
+        assert saved.resolved == 1
         assert saved.unresolved == 0
         rows = db.get_minigame_results_for_guild(100, 'queens')
         assert sorted((row.user_id, row.time_seconds) for row in rows) == [
             ('300', 4),
-            ('301', 6),
+            ('301', 5),
         ]
         source_rows = db.get_minigame_unresolved_results_for_puzzle(
             100, 'queens', _queens_number('2026-06-08'))
         assert [(row.external_name, row.time_seconds) for row in source_rows] == [
             ('Ali Farhat', 4),
-            ('Robert Kocharyan', 6),
+            ('Robert Kocharyan', 5),
             ('Unknown Person', 7),
         ]
         ratings = db.get_minigame_ratings(100, 'queens')
@@ -1479,11 +1479,14 @@ class TestQueensImport:
             resolved=new_resolved, unresolved=new_unresolved)
         saved = cog._save_queens_import(ctx, preview, skip_wipe=True)
 
-        assert saved.resolved == 0
+        assert saved.resolved == 1
         assert saved.unresolved == 1
         alice_source = db.get_minigame_unresolved_results_for_name(
             100, 'queens', normalize_queens_name('Alice LinkedIn'))
-        assert [row.time_seconds for row in alice_source] == [8]
+        assert [row.time_seconds for row in alice_source] == [7]
+        alice_result = db.get_minigame_result_for_user_puzzle(
+            100, 'queens', 300, _queens_number('2026-06-08'))
+        assert alice_result.time_seconds == 7
         unknown_source = db.get_minigame_unresolved_results_for_name(
             100, 'queens', normalize_queens_name('Unknown Person'))
         assert [row.time_seconds for row in unknown_source] == [5]

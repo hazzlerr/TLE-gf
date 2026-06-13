@@ -2154,9 +2154,24 @@ class Minigames(commands.Cog):
             int(row.is_perfect),
         )
 
+    @staticmethod
+    def _queens_source_identity_key(normalized_name, puzzle_date):
+        puzzle_date = normalize_puzzle_date(puzzle_date)
+        return (
+            normalized_name,
+            _queens_puzzle_number_for_date(puzzle_date),
+        )
+
     def _queens_source_row_keys(self, guild_id):
         return {
             self._queens_source_row_key(row.normalized_name, row)
+            for row in cf_common.user_db.get_minigame_unresolved_results_for_guild(
+                guild_id, QUEENS_GAME.name)
+        }
+
+    def _queens_source_identity_keys(self, guild_id):
+        return {
+            self._queens_source_identity_key(row.normalized_name, row.puzzle_date)
             for row in cf_common.user_db.get_minigame_unresolved_results_for_guild(
                 guild_id, QUEENS_GAME.name)
         }
@@ -2202,6 +2217,7 @@ class Minigames(commands.Cog):
             self, guild_id, *, delete_migrated=True):
         links_by_user = self._queens_links_by_user(guild_id)
         source_keys = self._queens_source_row_keys(guild_id)
+        source_identity_keys = self._queens_source_identity_keys(guild_id)
         migrated = 0
         rows = cf_common.user_db.get_stored_minigame_results_for_guild(
             guild_id, QUEENS_GAME.name)
@@ -2224,6 +2240,14 @@ class Minigames(commands.Cog):
                 continue
             normalized_name, external_name = identity
             puzzle_date = normalize_puzzle_date(row.puzzle_date)
+            identity_key = self._queens_source_identity_key(
+                normalized_name, puzzle_date)
+            if identity_key in source_identity_keys:
+                if delete_migrated:
+                    cf_common.user_db.delete_stored_minigame_result_row(
+                        guild_id, QUEENS_GAME.name, row.storage,
+                        row.message_id, row.puzzle_number)
+                continue
             cf_common.user_db.save_minigame_unresolved_result(
                 guild_id,
                 QUEENS_GAME.name,
@@ -2242,6 +2266,7 @@ class Minigames(commands.Cog):
                     guild_id, QUEENS_GAME.name, row.storage, row.message_id,
                     row.puzzle_number)
             source_keys.add(self._queens_source_row_key(normalized_name, row))
+            source_identity_keys.add(identity_key)
             migrated += 1
         return migrated
 
@@ -2416,42 +2441,47 @@ class Minigames(commands.Cog):
         return '\n'.join(lines)
 
     def _filter_new_queens_entries(self, guild_id, preview):
-        """Strip entries from ``preview`` that already have rows in the DB.
+        """Strip entries from ``preview`` that already have identical rows.
 
-        Used by imports to keep saving additive — never overwrites a
-        previously-saved row, only adds new ones.  Returns
-        ``(new_resolved, new_unresolved)`` lists.
+        Used by imports to keep saving per-player: exact duplicates are
+        skipped, but a changed result for the same LinkedIn name/date is kept
+        so the source upsert replaces only that individual result.
         """
         self._migrate_legacy_queens_results_to_external(
             guild_id, delete_migrated=False)
-        existing_names = set()
+        existing_rows = {}
         for puzzle_number in _queens_puzzle_numbers_for_date(
                 preview.puzzle_date):
             for row in cf_common.user_db.get_minigame_unresolved_results_for_puzzle(
                     guild_id, QUEENS_GAME.name, puzzle_number):
-                existing_names.add(row.normalized_name)
+                key = self._queens_source_identity_key(
+                    row.normalized_name, row.puzzle_date)
+                existing_rows.setdefault(key, []).append(row)
+
+        def should_save(entry):
+            normalized_name = normalize_queens_name(entry.linkedin_name)
+            key = self._queens_source_identity_key(
+                normalized_name, preview.puzzle_date)
+            rows = existing_rows.get(key, [])
+            return not any(
+                self._legacy_queens_entry_matches_row(entry, row)
+                for row in rows)
+
         new_resolved = [
             entry for entry in preview.resolved
-            if normalize_queens_name(entry.linkedin_name) not in existing_names]
+            if should_save(entry)]
         new_unresolved = [
             entry for entry in preview.unresolved
-            if normalize_queens_name(entry.linkedin_name)
-            not in existing_names]
+            if should_save(entry)]
 
         return new_resolved, new_unresolved
 
     def _save_queens_import(self, ctx, preview, *, skip_wipe=True):
-        if skip_wipe:
-            new_resolved, new_unresolved = self._filter_new_queens_entries(
-                ctx.guild.id, preview)
-            preview = preview._replace(
-                resolved=new_resolved, unresolved=new_unresolved)
-        else:
-            for puzzle_number in _queens_puzzle_numbers_for_date(preview.puzzle_date):
-                cf_common.user_db.delete_minigame_results_for_puzzle(
-                    ctx.guild.id, QUEENS_GAME.name, puzzle_number)
-                cf_common.user_db.delete_minigame_unresolved_results_for_puzzle(
-                    ctx.guild.id, QUEENS_GAME.name, puzzle_number)
+        del skip_wipe
+        new_resolved, new_unresolved = self._filter_new_queens_entries(
+            ctx.guild.id, preview)
+        preview = preview._replace(
+            resolved=new_resolved, unresolved=new_unresolved)
         for entry in preview.resolved:
             self._save_queens_external_result(
                 ctx.guild.id, ctx.channel.id, entry, preview.puzzle_date,
@@ -5808,35 +5838,51 @@ class Minigames(commands.Cog):
             f'({entry.get("sent_at_utc", "")})'
         )
 
-    def _existing_queens_source_puzzles(self, guild_id, normalized_name,
-                                        source_puzzles_by_name):
-        source_puzzles = source_puzzles_by_name.get(normalized_name)
-        if source_puzzles is None:
-            source_puzzles = {
-                int(row.puzzle_number)
-                for row in cf_common.user_db.get_minigame_unresolved_results_for_name(
-                    guild_id, QUEENS_GAME.name, normalized_name)
-            }
-            source_puzzles_by_name[normalized_name] = source_puzzles
-        return source_puzzles
+    def _existing_queens_source_rows(self, guild_id, normalized_name,
+                                     source_rows_by_name):
+        source_rows = source_rows_by_name.get(normalized_name)
+        if source_rows is None:
+            source_rows = list(
+                cf_common.user_db.get_minigame_unresolved_results_for_name(
+                    guild_id, QUEENS_GAME.name, normalized_name))
+            source_rows_by_name[normalized_name] = source_rows
+        return source_rows
+
+    def _remember_queens_source_row(self, source_rows, normalized_name,
+                                    parsed, puzzle_date):
+        identity_key = self._queens_source_identity_key(
+            normalized_name, puzzle_date)
+        source_rows[:] = [
+            row for row in source_rows
+            if self._queens_source_identity_key(
+                row.normalized_name, row.puzzle_date) != identity_key
+        ]
+        source_rows.append(SimpleNamespace(
+            normalized_name=normalized_name,
+            puzzle_number=_queens_puzzle_number_for_date(puzzle_date),
+            puzzle_date=_queens_puzzle_date_text(puzzle_date),
+            accuracy=100 if parsed.no_mistakes else 0,
+            time_seconds=parsed.time_seconds,
+            is_perfect=int(parsed.no_hints and parsed.no_mistakes),
+        ))
 
     def _save_queens_backfill_source_entry(self, ctx, entry, normalized_name,
                                            parsed, puzzle_date, *,
                                            link=None,
-                                           source_puzzles_by_name=None):
-        if source_puzzles_by_name is None:
-            source_puzzles_by_name = {}
-        source_puzzles = self._existing_queens_source_puzzles(
-            ctx.guild.id, normalized_name, source_puzzles_by_name)
-        puzzle_numbers = _queens_puzzle_numbers_for_date(puzzle_date)
-        existing = any(pn in source_puzzles for pn in puzzle_numbers)
-        if not existing and link is not None:
-            for pn in puzzle_numbers:
-                if cf_common.user_db.get_minigame_result_for_user_puzzle(
-                        ctx.guild.id, QUEENS_GAME.name, link.user_id, pn):
-                    existing = True
-                    break
-        if existing:
+                                           source_rows_by_name=None):
+        if source_rows_by_name is None:
+            source_rows_by_name = {}
+        source_rows = self._existing_queens_source_rows(
+            ctx.guild.id, normalized_name, source_rows_by_name)
+        identity_key = self._queens_source_identity_key(
+            normalized_name, puzzle_date)
+        existing_rows = [
+            row for row in source_rows
+            if self._queens_source_identity_key(
+                row.normalized_name, row.puzzle_date) == identity_key
+        ]
+        if any(self._legacy_queens_entry_matches_row(parsed, row)
+               for row in existing_rows):
             return False
 
         if link is not None:
@@ -5847,7 +5893,8 @@ class Minigames(commands.Cog):
         self._save_queens_external_result(
             ctx.guild.id, ctx.channel.id, parsed, puzzle_date,
             self._queens_backfill_raw_content(entry))
-        source_puzzles.update(puzzle_numbers)
+        self._remember_queens_source_row(
+            source_rows, normalized_name, parsed, puzzle_date)
         return True
 
     def _save_queens_backfill_for_link(self, ctx, link, data):
@@ -5865,7 +5912,7 @@ class Minigames(commands.Cog):
         saved = 0
         skipped = 0
         malformed = 0
-        source_puzzles_by_name = {}
+        source_rows_by_name = {}
         for entry in matching:
             try:
                 normalized_name, parsed, puzzle_date = (
@@ -5876,7 +5923,7 @@ class Minigames(commands.Cog):
 
             if self._save_queens_backfill_source_entry(
                     ctx, entry, normalized_name, parsed, puzzle_date,
-                    link=link, source_puzzles_by_name=source_puzzles_by_name):
+                    link=link, source_rows_by_name=source_rows_by_name):
                 saved += 1
             else:
                 skipped += 1
@@ -5897,7 +5944,7 @@ class Minigames(commands.Cog):
             if not cf_common.user_db.is_minigame_banned(
                 ctx.guild.id, QUEENS_GAME.name, link.user_id)
         }
-        source_puzzles_by_name = {}
+        source_rows_by_name = {}
         saved = 0
         skipped = 0
         malformed = 0
@@ -5919,7 +5966,7 @@ class Minigames(commands.Cog):
                 registered_names.add(normalized_name)
             if self._save_queens_backfill_source_entry(
                     ctx, entry, normalized_name, parsed, puzzle_date,
-                    link=link, source_puzzles_by_name=source_puzzles_by_name):
+                    link=link, source_rows_by_name=source_rows_by_name):
                 saved += 1
             else:
                 skipped += 1
