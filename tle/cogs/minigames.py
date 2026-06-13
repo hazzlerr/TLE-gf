@@ -6167,7 +6167,8 @@ class Minigames(commands.Cog):
             excluded_ids=excluded_ids, included_ids=included_ids,
             weekdays=weekdays, date_bounds=date_bounds)
 
-    @queens.group(name='import', brief='Preview a pasted Queens leaderboard',
+    @queens.group(name='import',
+                  brief='Preview pasted Queens results or manage imported history',
                   usage='date <pasted leaderboard>',
                   invoke_without_command=True)
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
@@ -6181,6 +6182,27 @@ class Minigames(commands.Cog):
         self._queens_pending_imports[(ctx.guild.id, ctx.author.id)] = preview
         await ctx.send(embed=discord_common.embed_neutral(
             self._format_queens_import_preview(ctx, preview)))
+
+    @queens_import.command(name='start',
+                           brief='Rebuild imported Queens history from channel messages')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_import_start(self, ctx, channel: ChannelOrThread = None):
+        await self._cmd_import_start(ctx, QUEENS_GAME, channel)
+
+    @queens_import.command(name='status', brief='Show Queens import status')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_import_status(self, ctx):
+        await self._cmd_import_status(ctx, QUEENS_GAME)
+
+    @queens_import.command(name='cancel', brief='Cancel a running Queens import')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_import_cancel(self, ctx):
+        await self._cmd_import_cancel(ctx, QUEENS_GAME)
+
+    @queens_import.command(name='clear', brief='Delete imported Queens history')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def queens_import_clear(self, ctx):
+        await self._cmd_import_clear(ctx, QUEENS_GAME)
 
     @queens_import.command(name='confirm',
                            brief='Save the latest Queens import preview')
@@ -7250,6 +7272,77 @@ class Minigames(commands.Cog):
                 f'`{constants.TLE_MODERATOR}` role.')
         try:
             await self._cmd_reparse(_SlashCtx(interaction), QUEENS_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+        except Exception:
+            logger.exception('Unhandled error in slash command')
+            await self._slash_send_error(interaction, 'An unexpected error occurred.')
+
+    @queens_slash.command(name='import-start', description='Rebuild imported Queens history')
+    @app_commands.describe(channel='Channel to import from')
+    async def slash_queens_import_start(
+        self, interaction: discord.Interaction,
+        channel: Optional[discord.TextChannel] = None,
+    ):
+        await interaction.response.defer()
+        if not self._has_mod_role(interaction):
+            return await self._slash_send_error(
+                interaction,
+                f'You need the `{constants.TLE_ADMIN}` or '
+                f'`{constants.TLE_MODERATOR}` role.')
+        ctx = _SlashCtx(interaction)
+        try:
+            original = await interaction.original_response()
+            ctx.message = original
+            await self._cmd_import_start(ctx, QUEENS_GAME, channel)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+        except Exception:
+            logger.exception('Unhandled error in slash command')
+            await self._slash_send_error(interaction, 'An unexpected error occurred.')
+
+    @queens_slash.command(name='import-status', description='Show Queens import status')
+    async def slash_queens_import_status(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_mod_role(interaction):
+            return await self._slash_send_error(
+                interaction,
+                f'You need the `{constants.TLE_ADMIN}` or '
+                f'`{constants.TLE_MODERATOR}` role.')
+        try:
+            await self._cmd_import_status(_SlashCtx(interaction), QUEENS_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+        except Exception:
+            logger.exception('Unhandled error in slash command')
+            await self._slash_send_error(interaction, 'An unexpected error occurred.')
+
+    @queens_slash.command(name='import-cancel', description='Cancel a running Queens import')
+    async def slash_queens_import_cancel(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_mod_role(interaction):
+            return await self._slash_send_error(
+                interaction,
+                f'You need the `{constants.TLE_ADMIN}` or '
+                f'`{constants.TLE_MODERATOR}` role.')
+        try:
+            await self._cmd_import_cancel(_SlashCtx(interaction), QUEENS_GAME)
+        except MinigameCogError as e:
+            await self._slash_send_error(interaction, e)
+        except Exception:
+            logger.exception('Unhandled error in slash command')
+            await self._slash_send_error(interaction, 'An unexpected error occurred.')
+
+    @queens_slash.command(name='import-clear', description='Delete imported Queens history')
+    async def slash_queens_import_clear(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        if not self._has_mod_role(interaction):
+            return await self._slash_send_error(
+                interaction,
+                f'You need the `{constants.TLE_ADMIN}` or '
+                f'`{constants.TLE_MODERATOR}` role.')
+        try:
+            await self._cmd_import_clear(_SlashCtx(interaction), QUEENS_GAME)
         except MinigameCogError as e:
             await self._slash_send_error(interaction, e)
         except Exception:
