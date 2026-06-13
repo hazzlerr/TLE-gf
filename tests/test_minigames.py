@@ -3132,13 +3132,14 @@ class TestQueensCommands:
         assert rating_series['names'] == ['Alice LinkedIn', 'Bob LinkedIn']
         full_alice_rating_dates = rating_series['dates'][0]
         full_alice_rating_values = rating_series['ratings'][0]
-        assert rating_series['hidden_markers'][0] == [False, False, True]
+        assert full_alice_rating_dates == ['2026-06-08', '2026-06-09']
+        assert rating_series['hidden_markers'][0] == [False, False]
         assert rating_series['hidden_markers'][1] == [False, False]
         assert ctx.sent['embed'].title == 'LinkedIn Queens ratings — 2 players'
         assert ctx.sent['kwargs']['file'] is fake_file
 
         asyncio.run(cog._cmd_queens_rating(ctx, [alice], weekdays={0, 2}))
-        assert rating_series['dates'] == [['2026-06-08', '2026-06-10']]
+        assert rating_series['dates'] == [['2026-06-08']]
 
         date_bounds = parse_date_args(('d>=09062026', 'd<10062026'))
         date_start_index = full_alice_rating_dates.index('2026-06-09')

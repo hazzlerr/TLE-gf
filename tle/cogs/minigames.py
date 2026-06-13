@@ -708,12 +708,11 @@ def _queens_streak_info(rows):
     return current, longest, best[latest_day]
 
 
-def _hide_queens_solo_rating_markers(history):
-    """Return graph history with solo contest days drawn without markers."""
+def _filter_queens_contested_rating_history(history):
+    """Return graph history with solo contest days omitted entirely."""
     return [
-        point._replace(is_decay=True)
-        if point.performance is None else point
-        for point in history
+        point for point in history
+        if point.performance is not None
     ]
 
 
@@ -2859,12 +2858,16 @@ class Minigames(commands.Cog):
                 raise MinigameCogError(
                     f'`{self._queens_public_user_name(ctx.guild, member.id)}` has no rated '
                     f'{QUEENS_GAME.display_name} days to plot yet.')
-            per_member.append((member, row, history))
+            graph_history = _filter_queens_contested_rating_history(history)
+            if not graph_history:
+                raise MinigameCogError(
+                    f'`{self._queens_public_user_name(ctx.guild, member.id)}` has no contested '
+                    f'{QUEENS_GAME.display_name} days to plot yet.')
+            per_member.append((member, row, history, graph_history))
 
         series = [
-            (_hide_queens_solo_rating_markers(history),
-             self._queens_legend_name(ctx.guild.id, member))
-            for member, _row, history in per_member
+            (graph_history, self._queens_legend_name(ctx.guild.id, member))
+            for member, _row, _history, graph_history in per_member
         ]
         discord_file = plot_akari_rating(series)
 
@@ -2883,7 +2886,7 @@ class Minigames(commands.Cog):
                        if not getattr(point, 'is_decay', False))
 
         if len(per_member) == 1:
-            member, row, history = per_member[0]
+            member, row, history, _graph_history = per_member[0]
             display_name = self._queens_public_user_name(ctx.guild, member.id)
             rating = round(_display_rating(row, history))
             rank = rank_for_rating(rating)
@@ -2908,7 +2911,7 @@ class Minigames(commands.Cog):
             embed.add_field(name='Last change', value=last_change_str)
             embed.add_field(name='Last performance', value=last_perf_str)
         else:
-            _top_member, top_row, top_history = max(
+            _top_member, top_row, top_history, _top_graph_history = max(
                 per_member, key=lambda t: _display_rating(t[1], t[2]))
             top_rank = rank_for_rating(
                 round(_display_rating(top_row, top_history)))
@@ -2922,7 +2925,7 @@ class Minigames(commands.Cog):
 
             lines = [
                 _rating_line(member, row, history)
-                for member, row, history in per_member
+                for member, row, history, _graph_history in per_member
             ]
             embed = discord.Embed(
                 title=(f'{QUEENS_GAME.display_name} ratings — '
