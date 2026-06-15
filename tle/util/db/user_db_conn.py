@@ -523,6 +523,66 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
             CREATE INDEX IF NOT EXISTS idx_greatday_pick_user
                 ON greatday_pick (guild_id, user_id)
         ''')
+        # Soccer betting minigame (see tle/cogs/betting.py). Kept in sync with
+        # upgrade_1_33_0 — fresh DBs get the tables here, existing DBs via the
+        # migration.
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS bet_wallet (
+                guild_id    TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                balance     INTEGER NOT NULL,
+                last_daily  TEXT,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS bet_market (
+                market_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id       TEXT NOT NULL,
+                channel_id     TEXT NOT NULL,
+                message_id     TEXT,
+                thread_id      TEXT,
+                event_id       TEXT NOT NULL,
+                sport_key      TEXT NOT NULL,
+                home_team      TEXT NOT NULL,
+                away_team      TEXT NOT NULL,
+                commence_time  REAL NOT NULL,
+                odds_home      REAL NOT NULL,
+                odds_draw      REAL NOT NULL,
+                odds_away      REAL NOT NULL,
+                status         TEXT NOT NULL DEFAULT 'open',
+                result         TEXT,
+                result_home    INTEGER,
+                result_away    INTEGER,
+                created_by     TEXT NOT NULL,
+                created_at     REAL NOT NULL,
+                settled_at     REAL
+            )
+        ''')
+        self.conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_bet_market_active
+                ON bet_market (guild_id, channel_id, status)
+        ''')
+        self.conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_bet_market_pending
+                ON bet_market (status, commence_time)
+        ''')
+        self.conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_bet_market_thread
+                ON bet_market (guild_id, thread_id, status)
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS bet_wager (
+                market_id   INTEGER NOT NULL,
+                user_id     TEXT NOT NULL,
+                pick        TEXT NOT NULL,
+                stake       INTEGER NOT NULL,
+                odds        REAL NOT NULL,
+                placed_at   REAL NOT NULL,
+                payout      INTEGER,
+                PRIMARY KEY (market_id, user_id)
+            )
+        ''')
         self.conn.execute(
             'CREATE TABLE IF NOT EXISTS rankup ('
             'guild_id     TEXT PRIMARY KEY,'
@@ -2067,6 +2127,288 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
         query = 'SELECT contest_id FROM cfvc_cache WHERE handle = ?'
         rows = self.conn.execute(query, (handle.lower(),)).fetchall()
         return {row[0] for row in rows}
+
+    # ── Soccer betting minigame ─────────────────────────────────────────
+
+    # -- Wallet --
+
+    def bet_ensure_wallet(self, guild_id, user_id, start_balance):
+        """Create a wallet seeded at start_balance if absent; return the
+        current balance either way."""
+        guild_id, user_id = str(guild_id), str(user_id)
+        self.conn.execute(
+            'INSERT OR IGNORE INTO bet_wallet (guild_id, user_id, balance) '
+            'VALUES (?, ?, ?)',
+            (guild_id, user_id, start_balance)
+        )
+        self.conn.commit()
+        row = self.conn.execute(
+            'SELECT balance FROM bet_wallet WHERE guild_id = ? AND user_id = ?',
+            (guild_id, user_id)
+        ).fetchone()
+        return row.balance
+
+    def bet_get_balance(self, guild_id, user_id):
+        """Return a user's balance, or None if they have no wallet yet."""
+        row = self.conn.execute(
+            'SELECT balance FROM bet_wallet WHERE guild_id = ? AND user_id = ?',
+            (str(guild_id), str(user_id))
+        ).fetchone()
+        return row.balance if row else None
+
+    def bet_claim_daily(self, guild_id, user_id, today, amount, start_balance):
+        """Grant a flat `amount` once per UTC day.
+
+        Returns (granted, new_balance, reason) where reason is 'ok' or
+        'already' (already claimed today).
+        """
+        guild_id, user_id = str(guild_id), str(user_id)
+        self.bet_ensure_wallet(guild_id, user_id, start_balance)
+        row = self.conn.execute(
+            'SELECT balance, last_daily FROM bet_wallet '
+            'WHERE guild_id = ? AND user_id = ?',
+            (guild_id, user_id)
+        ).fetchone()
+        if row.last_daily == today:
+            return (False, row.balance, 'already')
+        new_balance = row.balance + amount
+        self.conn.execute(
+            'UPDATE bet_wallet SET balance = ?, last_daily = ? '
+            'WHERE guild_id = ? AND user_id = ?',
+            (new_balance, today, guild_id, user_id)
+        )
+        self.conn.commit()
+        return (True, new_balance, 'ok')
+
+    def bet_balance_leaderboard(self, guild_id):
+        """Return [(user_id, balance)] for the guild, richest first."""
+        return self.conn.execute(
+            'SELECT user_id, balance FROM bet_wallet WHERE guild_id = ? '
+            'ORDER BY balance DESC, user_id ASC',
+            (str(guild_id),)
+        ).fetchall()
+
+    def bet_profit_leaderboard(self, guild_id):
+        """Return realized profit per user over settled markets.
+
+        Each row: user_id, profit (sum payout - sum stake), bets, wins.
+        Voided/open markets are excluded.
+        """
+        return self.conn.execute(
+            'SELECT w.user_id AS user_id, '
+            '       SUM(w.payout) - SUM(w.stake) AS profit, '
+            '       COUNT(*) AS bets, '
+            '       SUM(CASE WHEN w.payout > 0 THEN 1 ELSE 0 END) AS wins '
+            'FROM bet_wager w JOIN bet_market m ON m.market_id = w.market_id '
+            "WHERE m.guild_id = ? AND m.status = 'settled' "
+            'GROUP BY w.user_id '
+            'ORDER BY profit DESC, wins DESC, w.user_id ASC',
+            (str(guild_id),)
+        ).fetchall()
+
+    # -- Markets --
+
+    def bet_market_create(self, guild_id, channel_id, event_id, sport_key,
+                          home_team, away_team, commence_time,
+                          odds_home, odds_draw, odds_away, created_by, created_at):
+        """Open a betting market and return its id."""
+        cur = self.conn.execute(
+            'INSERT INTO bet_market '
+            '(guild_id, channel_id, event_id, sport_key, home_team, away_team, '
+            'commence_time, odds_home, odds_draw, odds_away, created_by, '
+            "created_at, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')",
+            (str(guild_id), str(channel_id), str(event_id), sport_key,
+             home_team, away_team, commence_time, odds_home, odds_draw,
+             odds_away, str(created_by), created_at)
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def bet_market_set_message(self, market_id, message_id):
+        """Record the market announcement message id."""
+        self.conn.execute(
+            'UPDATE bet_market SET message_id = ? WHERE market_id = ?',
+            (str(message_id), market_id)
+        )
+        self.conn.commit()
+
+    def bet_market_set_thread(self, market_id, thread_id):
+        """Record the betting thread id (where wagers are posted)."""
+        self.conn.execute(
+            'UPDATE bet_market SET thread_id = ? WHERE market_id = ?',
+            (str(thread_id), market_id)
+        )
+        self.conn.commit()
+
+    def bet_market_get_active_by_thread(self, guild_id, thread_id):
+        """Return the open market whose betting thread is thread_id, or None."""
+        return self.conn.execute(
+            "SELECT * FROM bet_market "
+            "WHERE guild_id = ? AND thread_id = ? AND status = 'open' LIMIT 1",
+            (str(guild_id), str(thread_id))
+        ).fetchone()
+
+    def bet_market_get(self, market_id):
+        """Return a market by id, or None."""
+        return self.conn.execute(
+            'SELECT * FROM bet_market WHERE market_id = ?', (market_id,)
+        ).fetchone()
+
+    def bet_market_get_active(self, guild_id, channel_id):
+        """Return the open market in a channel, or None (newest wins)."""
+        return self.conn.execute(
+            "SELECT * FROM bet_market "
+            "WHERE guild_id = ? AND channel_id = ? AND status = 'open' "
+            'ORDER BY created_at DESC, market_id DESC LIMIT 1',
+            (str(guild_id), str(channel_id))
+        ).fetchone()
+
+    def bet_market_exists_open_for_event(self, guild_id, event_id):
+        """True if the guild already has an open market on this event."""
+        row = self.conn.execute(
+            "SELECT 1 FROM bet_market WHERE guild_id = ? AND event_id = ? "
+            "AND status = 'open' LIMIT 1",
+            (str(guild_id), str(event_id))
+        ).fetchone()
+        return row is not None
+
+    def bet_markets_pending_settlement(self, before_time):
+        """Return all open markets whose kickoff is at/before before_time —
+        the auto-settle poller's work-list, across all guilds."""
+        return self.conn.execute(
+            "SELECT * FROM bet_market WHERE status = 'open' "
+            'AND commence_time <= ? ORDER BY commence_time ASC',
+            (before_time,)
+        ).fetchall()
+
+    # -- Wagers --
+
+    def bet_place(self, guild_id, market_id, user_id, pick, stake, odds,
+                  placed_at, start_balance):
+        """Place or replace a user's wager, escrowing the stake from their
+        wallet. Re-betting refunds the previous stake first.
+
+        Returns (ok, reason, new_balance) where reason is 'ok' or
+        'insufficient'. Atomic: wallet debit and wager write commit together.
+        """
+        guild_id, user_id = str(guild_id), str(user_id)
+        with self.conn:
+            self.conn.execute(
+                'INSERT OR IGNORE INTO bet_wallet (guild_id, user_id, balance) '
+                'VALUES (?, ?, ?)',
+                (guild_id, user_id, start_balance)
+            )
+            balance = self.conn.execute(
+                'SELECT balance FROM bet_wallet WHERE guild_id = ? AND user_id = ?',
+                (guild_id, user_id)
+            ).fetchone().balance
+            prev = self.conn.execute(
+                'SELECT stake FROM bet_wager WHERE market_id = ? AND user_id = ?',
+                (market_id, user_id)
+            ).fetchone()
+            available = balance + (prev.stake if prev else 0)
+            if stake > available:
+                return (False, 'insufficient', balance)
+            new_balance = available - stake
+            self.conn.execute(
+                'INSERT OR REPLACE INTO bet_wager '
+                '(market_id, user_id, pick, stake, odds, placed_at, payout) '
+                'VALUES (?, ?, ?, ?, ?, ?, NULL)',
+                (market_id, user_id, pick, stake, odds, placed_at)
+            )
+            self.conn.execute(
+                'UPDATE bet_wallet SET balance = ? WHERE guild_id = ? AND user_id = ?',
+                (new_balance, guild_id, user_id)
+            )
+            return (True, 'ok', new_balance)
+
+    def bet_get_wager(self, market_id, user_id):
+        """Return a user's wager on a market, or None."""
+        return self.conn.execute(
+            'SELECT market_id, user_id, pick, stake, odds, placed_at, payout '
+            'FROM bet_wager WHERE market_id = ? AND user_id = ?',
+            (market_id, str(user_id))
+        ).fetchone()
+
+    def bet_get_wagers(self, market_id):
+        """Return all wagers on a market, earliest first."""
+        return self.conn.execute(
+            'SELECT market_id, user_id, pick, stake, odds, placed_at, payout '
+            'FROM bet_wager WHERE market_id = ? ORDER BY placed_at ASC',
+            (market_id,)
+        ).fetchall()
+
+    def bet_pool(self, market_id):
+        """Return (pick, count, total_stake) grouped by pick for a market."""
+        return self.conn.execute(
+            'SELECT pick, COUNT(*) AS cnt, SUM(stake) AS total '
+            'FROM bet_wager WHERE market_id = ? GROUP BY pick',
+            (market_id,)
+        ).fetchall()
+
+    def bet_settle(self, guild_id, market_id, result, result_home, result_away,
+                   settled_at):
+        """Settle a market: credit each winning wager stake*odds to its
+        wallet, stamp every wager's payout (0 for losers), and mark the market
+        settled. Returns [(user_id, pick, stake, odds, payout)] for the
+        announcement. Atomic.
+        """
+        guild_id = str(guild_id)
+        outcome = []
+        with self.conn:
+            wagers = self.conn.execute(
+                'SELECT user_id, pick, stake, odds FROM bet_wager WHERE market_id = ?',
+                (market_id,)
+            ).fetchall()
+            for w in wagers:
+                payout = int(round(w.stake * w.odds)) if w.pick == result else 0
+                self.conn.execute(
+                    'UPDATE bet_wager SET payout = ? WHERE market_id = ? AND user_id = ?',
+                    (payout, market_id, w.user_id)
+                )
+                if payout:
+                    self.conn.execute(
+                        'UPDATE bet_wallet SET balance = balance + ? '
+                        'WHERE guild_id = ? AND user_id = ?',
+                        (payout, guild_id, w.user_id)
+                    )
+                outcome.append((w.user_id, w.pick, w.stake, w.odds, payout))
+            self.conn.execute(
+                "UPDATE bet_market SET status = 'settled', result = ?, "
+                'result_home = ?, result_away = ?, settled_at = ? WHERE market_id = ?',
+                (result, result_home, result_away, settled_at, market_id)
+            )
+        return outcome
+
+    def bet_void(self, guild_id, market_id, voided_at):
+        """Cancel an open market: refund every stake to its wallet, stamp each
+        wager's payout = stake (returned), and mark the market cancelled.
+        Returns [(user_id, stake)] refunded. Atomic.
+        """
+        guild_id = str(guild_id)
+        refunds = []
+        with self.conn:
+            wagers = self.conn.execute(
+                'SELECT user_id, stake FROM bet_wager WHERE market_id = ?',
+                (market_id,)
+            ).fetchall()
+            for w in wagers:
+                self.conn.execute(
+                    'UPDATE bet_wallet SET balance = balance + ? '
+                    'WHERE guild_id = ? AND user_id = ?',
+                    (w.stake, guild_id, w.user_id)
+                )
+                self.conn.execute(
+                    'UPDATE bet_wager SET payout = ? WHERE market_id = ? AND user_id = ?',
+                    (w.stake, market_id, w.user_id)
+                )
+                refunds.append((w.user_id, w.stake))
+            self.conn.execute(
+                "UPDATE bet_market SET status = 'cancelled', settled_at = ? "
+                'WHERE market_id = ?',
+                (voided_at, market_id)
+            )
+        return refunds
 
     def close(self):
         self.conn.close()
