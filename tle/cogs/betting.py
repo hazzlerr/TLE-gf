@@ -45,8 +45,11 @@ _LB_PER_PAGE = 15
 _MATCH_LIST_LIMIT = 15
 # Manual `;bet matches` reuses a fetch no older than this.
 _MATCH_CACHE_MAX_AGE = 10 * 60
-# Auto-open watcher cadence (paid odds API — kept slow + adaptive).
-_WATCH_INTERVAL = 15 * 60
+# Auto-open watcher cadence. Bounds how late after the 2h mark a market opens
+# (worst case ≈ one interval, i.e. [2:00, 1:55] before kickoff). Cheap to keep
+# tight: the odds fetch is gated to "a due game with no market yet" (~1 fetch
+# per game), so a 5-min tick costs no more credits than a 15-min one.
+_WATCH_INTERVAL = 5 * 60
 # Auto-settle poller cadence. Results come from football-data.org (free), so we
 # can poll often; only hits the network when a market is actually past kickoff.
 _SETTLE_INTERVAL = 5 * 60
@@ -434,6 +437,14 @@ class Betting(commands.Cog):
         await ctx.send(embed=discord_common.embed_success(
             f'World Cup markets will auto-open in {ctx.channel.mention} ~2h '
             f'before each kickoff, with a thread for bets.{note}'))
+        # One-time immediate pass so a game already inside the 2h window opens
+        # right now instead of waiting for the next watcher tick.
+        if _api_key():
+            try:
+                await self._watch_pending()
+            except Exception:
+                logger.warning('immediate watch pass after `;prediction here` '
+                               'failed', exc_info=True)
 
     # ── Matches / manual open ──────────────────────────────────────────
 

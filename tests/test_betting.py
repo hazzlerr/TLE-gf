@@ -861,6 +861,7 @@ class _FakeMsg:
 class _FakeChannel:
     def __init__(self, cid):
         self.id = cid
+        self.mention = f'<#{cid}>'
         self.sent = []
         self._messages = {}
 
@@ -995,6 +996,35 @@ class TestAutoOpen:
         self._run(cog._watch_pending())  # second pass
         assert len(db.bet_markets_open(GUILD)) == 1
         assert len(channel.sent) == 1
+
+    def test_here_opens_due_market_immediately(self, setup, monkeypatch):
+        """`;prediction here` runs a one-time watch pass, so a game already
+        inside the 2h window opens at once (no 5-min wait)."""
+        import time as _t
+        from tle import constants
+        from tle.cogs.betting import Betting
+        cog, db, channel = setup
+        monkeypatch.setattr(constants, 'ODDS_API_KEY', 'k', raising=False)
+        ev = _wc_event(commence=_t.time() + 3600)  # due (within 2h)
+        self._arm_events(cog, [ev], monkeypatch)
+
+        class _Ctx:
+            def __init__(self_):
+                self_.guild = type('G', (), {'id': int(GUILD)})()
+                self_.channel = channel
+                self_.author = type('A', (), {'roles': []})()
+                self_.sent = []
+
+            async def send(self_, embed=None, **kw):
+                self_.sent.append(embed)
+                return None
+        ctx = _Ctx()
+        # Call the command body (conftest wraps commands in a stub holding the fn).
+        self._run(Betting.here.__wrapped__(cog, ctx))
+
+        assert db.get_guild_config(GUILD, 'bet_channel') == str(channel.id)
+        market = db.bet_market_get_active(GUILD, str(channel.id))
+        assert market is not None and market.home_team == 'Spain'
 
     def test_failed_send_does_not_orphan_market(self, setup, monkeypatch):
         """If the announcement send fails, NO market row is persisted, so the
