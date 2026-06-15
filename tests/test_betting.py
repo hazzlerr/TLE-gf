@@ -299,6 +299,15 @@ class TestFetchAsync:
         assert params['oddsFormat'] == 'decimal'
         assert params['apiKey'] == 'KEY'
 
+    def test_fetch_sports_params(self):
+        session = _FakeSession([
+            {'key': odds_api.WORLD_CUP_SPORT_KEY, 'title': 'FIFA World Cup 2026'}])
+        sports = self._run(odds_api.fetch_sports('KEY', session=session))
+        assert sports[0]['key'] == odds_api.WORLD_CUP_SPORT_KEY
+        url, params = session.calls[0]
+        assert url.endswith('/sports')
+        assert params == {'apiKey': 'KEY'}
+
     def test_fetch_scores_params_and_parse(self):
         raw = [{'id': 'evt1', 'completed': True, 'home_team': 'A',
                 'away_team': 'B', 'scores': [{'name': 'A', 'score': '2'},
@@ -860,6 +869,53 @@ class TestExecuteBet:
         assert data['stake'] == 1000 and data['balance'] == 0
         wager = db.bet_get_wager(mid, USER_A)
         assert wager.pick == 'away' and wager.stake == 1000
+
+
+class TestCheckCommand:
+    def _run(self, coro):
+        import asyncio
+        return asyncio.run(coro)
+
+    def test_reports_key_health_without_secrets(self, monkeypatch):
+        from tle import constants
+        from tle.cogs.betting import Betting
+        from tle.util import discord_common
+
+        monkeypatch.setattr(constants, 'ODDS_API_KEY', 'odds-secret', raising=False)
+        monkeypatch.setattr(constants, 'FOOTBALL_DATA_API_KEY', 'fd-secret',
+                            raising=False)
+
+        async def _sports(api_key):
+            assert api_key == 'odds-secret'
+            return [{'key': odds_api.WORLD_CUP_SPORT_KEY,
+                     'title': 'FIFA World Cup 2026'}]
+
+        async def _matches(token):
+            assert token == 'fd-secret'
+            return [{'home': 'Spain'}, {'home': 'Brazil'}]
+
+        monkeypatch.setattr(odds_api, 'fetch_sports', _sports)
+        monkeypatch.setattr(football_data, 'fetch_wc_matches', _matches)
+        monkeypatch.setattr(discord_common, 'embed_neutral', lambda desc: desc)
+
+        class _Ctx:
+            def __init__(self):
+                self.sent = []
+
+            async def send(self, embed=None, **kw):
+                self.sent.append(embed)
+
+        ctx = _Ctx()
+        cog = Betting(bot=None)
+        self._run(Betting.check.__wrapped__(cog, ctx))
+
+        text = ctx.sent[0]
+        assert '`ODDS_API_KEY` works' in text
+        assert '`FOOTBALL_DATA_API_KEY` works' in text
+        assert '2 World Cup match' in text
+        assert 'quota-free' in text
+        assert 'odds-secret' not in text
+        assert 'fd-secret' not in text
 
 
 # ── World Cup auto-open ─────────────────────────────────────────────────────

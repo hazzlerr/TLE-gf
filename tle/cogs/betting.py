@@ -261,6 +261,14 @@ def _football_data_key():
     return getattr(constants, 'FOOTBALL_DATA_API_KEY', None)
 
 
+def _short_error(error, limit=180):
+    text = str(error) or error.__class__.__name__
+    text = text.replace('`', "'")
+    if len(text) > limit:
+        return text[:limit - 3] + '...'
+    return text
+
+
 # ── Cog ────────────────────────────────────────────────────────────────────
 
 class Betting(commands.Cog):
@@ -426,7 +434,8 @@ class Betting(commands.Cog):
 
     # ── Group ──────────────────────────────────────────────────────────
 
-    @commands.group(name='bet', aliases=['betting', 'prediction', 'pred'],
+    @commands.group(name='bet',
+                    aliases=['betting', 'prediction', 'pred', 'wager'],
                     brief='World Cup betting', invoke_without_command=True)
     async def bet(self, ctx):
         """Show the active market here and your balance."""
@@ -469,6 +478,50 @@ class Betting(commands.Cog):
             except Exception:
                 logger.warning('schedule refresh after `;prediction here` '
                                'failed', exc_info=True)
+
+    @bet.command(name='check',
+                 brief='Check betting API keys without exposing secrets (admin)')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def check(self, ctx):
+        """Verify that the betting API keys are configured and usable."""
+        lines = ['Betting API check:']
+
+        api_key = _api_key()
+        if not api_key:
+            lines.append('❌ `ODDS_API_KEY` is not set.')
+        else:
+            try:
+                sports = await odds_api.fetch_sports(api_key)
+            except odds_api.OddsApiError as e:
+                lines.append(f'❌ `ODDS_API_KEY` failed: `{_short_error(e)}`')
+            else:
+                wc = next((s for s in sports or []
+                           if s.get('key') == odds_api.WORLD_CUP_SPORT_KEY), None)
+                if wc is None:
+                    lines.append(
+                        f'⚠️ `ODDS_API_KEY` works, but '
+                        f'`{odds_api.WORLD_CUP_SPORT_KEY}` is not listed as active.')
+                else:
+                    title = wc.get('title') or odds_api.WORLD_CUP_SPORT_KEY
+                    lines.append(f'✅ `ODDS_API_KEY` works; `{title}` is active.')
+
+        fd_key = _football_data_key()
+        if not fd_key:
+            lines.append('❌ `FOOTBALL_DATA_API_KEY` is not set.')
+        else:
+            try:
+                matches = await football_data.fetch_wc_matches(fd_key)
+            except football_data.FootballDataError as e:
+                lines.append(
+                    f'❌ `FOOTBALL_DATA_API_KEY` failed: `{_short_error(e)}`')
+            else:
+                lines.append(
+                    f'✅ `FOOTBALL_DATA_API_KEY` works; '
+                    f'{len(matches)} World Cup match(es) returned.')
+
+        lines.append('\nOdds check uses The Odds API `/sports` endpoint '
+                     '(documented quota-free).')
+        await ctx.send(embed=discord_common.embed_neutral('\n'.join(lines)))
 
     # ── Matches / manual open ──────────────────────────────────────────
 

@@ -123,6 +123,20 @@ async def _get_json(session, url, params):
         raise OddsApiError(f'request failed: {e}') from e
 
 
+async def fetch_sports(api_key, *, session=None, base_url=BASE_URL):
+    """Fetch in-season sports. The Odds API documents this endpoint as
+    quota-free, so it is suitable for key checks."""
+    own = session is None
+    if own:
+        session = aiohttp.ClientSession()
+    try:
+        url = f'{base_url}/sports'
+        return await _get_json(session, url, {'apiKey': api_key})
+    finally:
+        if own:
+            await session.close()
+
+
 async def fetch_h2h(api_key, sport_keys, *, regions=DEFAULT_REGIONS,
                     session=None, base_url=BASE_URL):
     """Fetch upcoming 1X2 odds across the given sport keys.

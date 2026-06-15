@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 import aiohttp
 
 logger = logging.getLogger(__name__)
+_AIOHTTP_CLIENT_ERROR = getattr(aiohttp, 'ClientError', OSError)
 
 BASE_URL = 'https://api.football-data.org/v4'
 WORLD_CUP_COMPETITION = 'WC'
@@ -130,7 +131,7 @@ async def fetch_wc_matches(token, *, session=None, base_url=BASE_URL):
                     body = await resp.text()
                     raise FootballDataError(f'HTTP {resp.status}: {body[:200]}')
                 data = await resp.json()
-        except aiohttp.ClientError as e:
+        except _AIOHTTP_CLIENT_ERROR as e:
             raise FootballDataError(f'request failed: {e}') from e
         return [parse_match(m) for m in (data.get('matches') or [])]
     finally:
