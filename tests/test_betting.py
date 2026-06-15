@@ -389,6 +389,24 @@ class TestSettle:
         assert prof[USER_A] == (100, 1, 1)   # +200 payout - 100 stake
         assert prof[USER_B] == (-100, 1, 0)
 
+    def test_double_settle_is_noop(self, db):
+        """The status='open' guard must make a second settle pay nobody."""
+        mid = _make_market(db)
+        db.bet_place(GUILD, mid, USER_A, 'home', 100, 2.0, 1.0, 1000)  # bal 900
+        first = db.bet_settle(GUILD, mid, 'home', 2, 1, 5.0)
+        assert first is not None
+        assert db.bet_get_balance(GUILD, USER_A) == 1100  # 900 + 200
+        second = db.bet_settle(GUILD, mid, 'home', 2, 1, 6.0)
+        assert second is None  # already settled — no work
+        assert db.bet_get_balance(GUILD, USER_A) == 1100  # not paid twice
+
+    def test_settle_after_void_is_noop(self, db):
+        mid = _make_market(db)
+        db.bet_place(GUILD, mid, USER_A, 'home', 100, 2.0, 1.0, 1000)  # bal 900
+        db.bet_void(GUILD, mid, 4.0)  # refunded → 1000
+        assert db.bet_settle(GUILD, mid, 'home', 2, 1, 5.0) is None
+        assert db.bet_get_balance(GUILD, USER_A) == 1000  # not paid on top
+
 
 class TestVoid:
     def test_refunds_and_cancels(self, db):
@@ -404,6 +422,30 @@ class TestVoid:
         db.bet_place(GUILD, mid, USER_A, 'home', 300, 2.0, 1.0, 1000)
         db.bet_void(GUILD, mid, 9.0)
         assert db.bet_profit_leaderboard(GUILD) == []
+
+    def test_void_after_settle_is_noop(self, db):
+        """A void must not refund on top of a payout already credited."""
+        mid = _make_market(db)
+        db.bet_place(GUILD, mid, USER_A, 'home', 100, 2.0, 1.0, 1000)  # bal 900
+        db.bet_settle(GUILD, mid, 'home', 2, 1, 5.0)  # paid 200 → 1100
+        assert db.bet_void(GUILD, mid, 9.0) is None
+        assert db.bet_get_balance(GUILD, USER_A) == 1100  # unchanged
+        assert db.bet_market_get(mid).status == 'settled'  # not flipped
+
+
+class TestMarketsOpen:
+    def test_lists_only_open(self, db):
+        open_mid = _make_market(db, commence=1000.0)
+        settled = db.bet_market_create(
+            GUILD, CH, 'evt2', 'soccer_epl', 'A', 'B', 2000.0,
+            2.0, 3.0, 4.0, USER_A, 0.0)
+        db.bet_settle(GUILD, settled, 'home', 1, 0, 3.0)
+        rows = db.bet_markets_open(GUILD)
+        assert [m.market_id for m in rows] == [open_mid]
+
+    def test_guild_isolation(self, db):
+        _make_market(db)
+        assert db.bet_markets_open('999') == []
 
 
 class TestBalanceLeaderboard:

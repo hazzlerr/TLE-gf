@@ -211,6 +211,9 @@ class Betting(commands.Cog):
     async def on_ready(self):
         self._settle_task.start()
 
+    async def cog_unload(self):
+        await self._settle_task.stop()
+
     # ── Config ─────────────────────────────────────────────────────────
 
     def _sport_keys(self, guild_id):
@@ -637,7 +640,9 @@ class Betting(commands.Cog):
         if market is None:
             raise BettingCogError('No open market here to cancel.')
         refunds = cf_common.user_db.bet_void(
-            ctx.guild.id, market.market_id, time.time())
+            market.guild_id, market.market_id, time.time())
+        if refunds is None:
+            raise BettingCogError('That market was just settled or cancelled.')
         total = sum(stake for _, stake in refunds)
         await ctx.send(embed=discord_common.embed_success(
             f'Market on **{market.home_team} vs {market.away_team}** cancelled. '
@@ -646,19 +651,57 @@ class Betting(commands.Cog):
         logger.info('Cancelled bet market %s in guild %s (%s refunds)',
                     market.market_id, ctx.guild.id, len(refunds))
 
+    @bet.command(name='pending', aliases=['stuck'],
+                 brief='List open markets past kickoff awaiting a result')
+    async def pending(self, ctx):
+        """Show markets that have kicked off but not yet settled — e.g. a
+        fixture the scores API never reported as completed. Stakes stay
+        escrowed until a mod settles (`;bet settle`) or cancels (`;bet cancel`).
+        """
+        now = time.time()
+        markets = [m for m in cf_common.user_db.bet_markets_open(ctx.guild.id)
+                   if m.commence_time <= now]
+        if not markets:
+            await ctx.send(embed=discord_common.embed_neutral(
+                'No markets are stuck — every open market is still pre-kickoff.'))
+            return
+        lines = []
+        for m in markets:
+            ch = f'<#{m.thread_id}>' if m.thread_id else f'<#{m.channel_id}>'
+            lines.append(
+                f'• **{m.home_team} vs {m.away_team}** — kicked off '
+                f'<t:{int(m.commence_time)}:R> · {ch}')
+        embed = discord.Embed(
+            title='⏳ Markets awaiting a result',
+            description='\n'.join(lines)
+            + '\n\nA mod can `;bet settle <home|draw|away|2-1>` or `;bet cancel` '
+            'in each market\'s channel/thread.',
+            color=0xf1c40f)
+        await ctx.send(embed=embed,
+                       allowed_mentions=discord.AllowedMentions.none())
+
     async def _do_settle(self, market, outcome, home_score, away_score, *, source):
         outcome_rows = cf_common.user_db.bet_settle(
             market.guild_id, market.market_id, outcome, home_score, away_score,
             time.time())
+        if outcome_rows is None:
+            # Already settled/cancelled (e.g. mod settled while the poller was
+            # mid-fetch). The status guard paid nobody twice — just bow out.
+            logger.info('market %s already terminal; skipping settle',
+                        market.market_id)
+            return
         embed = self._settlement_embed(market, outcome, home_score, away_score,
                                        outcome_rows, source)
         # Announce in the parent channel for visibility, and the thread (where
-        # bettors are watching), then archive the thread.
+        # bettors are watching), then archive the thread. Winner mentions in
+        # the embed don't ping, but pin that down explicitly.
         for cid in self._announce_targets(market):
             channel = self.bot.get_channel(int(cid)) if self.bot else None
             if channel is not None:
                 try:
-                    await channel.send(embed=embed)
+                    await channel.send(
+                        embed=embed,
+                        allowed_mentions=discord.AllowedMentions.none())
                 except discord.HTTPException:
                     logger.warning('could not post settlement to %s', cid)
         await self._archive_thread(market)

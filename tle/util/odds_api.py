@@ -163,8 +163,11 @@ async def fetch_scores(api_key, sport_key, *, days_from=1, event_ids=None,
     """Fetch recent/live scores for one sport key. Returns a list of
     normalized score dicts (see parse_score_event).
 
-    days_from=1 keeps the cost low (it is the smallest window that still
-    includes completed games) while covering our ~3h settle buffer.
+    A scores request with ``daysFrom`` set costs 2 credits (vs 1 without, but
+    that omits completed games, which is exactly what we need). days_from=1 is
+    the smallest window that still includes completed games and covers our ~3h
+    settle buffer. The request is batched per sport key, and the poller only
+    calls it when a market is actually past kickoff, so cost stays bounded.
     """
     own = session is None
     if own:

@@ -2351,11 +2351,24 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
         """Settle a market: credit each winning wager stake*odds to its
         wallet, stamp every wager's payout (0 for losers), and mark the market
         settled. Returns [(user_id, pick, stake, odds, payout)] for the
-        announcement. Atomic.
+        announcement, or None if the market was not open (already settled or
+        cancelled).
+
+        The terminal status flip is the guard: it runs first and is scoped to
+        ``status='open'``, so a second settle (or a settle racing the
+        auto-poller) is a no-op and nobody is paid twice. Atomic.
         """
         guild_id = str(guild_id)
-        outcome = []
         with self.conn:
+            changed = self.conn.execute(
+                "UPDATE bet_market SET status = 'settled', result = ?, "
+                'result_home = ?, result_away = ?, settled_at = ? '
+                "WHERE market_id = ? AND status = 'open'",
+                (result, result_home, result_away, settled_at, market_id)
+            ).rowcount
+            if changed == 0:
+                return None
+            outcome = []
             wagers = self.conn.execute(
                 'SELECT user_id, pick, stake, odds FROM bet_wager WHERE market_id = ?',
                 (market_id,)
@@ -2373,21 +2386,27 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
                         (payout, guild_id, w.user_id)
                     )
                 outcome.append((w.user_id, w.pick, w.stake, w.odds, payout))
-            self.conn.execute(
-                "UPDATE bet_market SET status = 'settled', result = ?, "
-                'result_home = ?, result_away = ?, settled_at = ? WHERE market_id = ?',
-                (result, result_home, result_away, settled_at, market_id)
-            )
         return outcome
 
     def bet_void(self, guild_id, market_id, voided_at):
         """Cancel an open market: refund every stake to its wallet, stamp each
         wager's payout = stake (returned), and mark the market cancelled.
-        Returns [(user_id, stake)] refunded. Atomic.
+        Returns [(user_id, stake)] refunded, or None if the market was not open.
+
+        Same guard as bet_settle: the status flip is scoped to ``status='open'``
+        and runs first, so a void can't double-refund or undo a settlement.
+        Atomic.
         """
         guild_id = str(guild_id)
-        refunds = []
         with self.conn:
+            changed = self.conn.execute(
+                "UPDATE bet_market SET status = 'cancelled', settled_at = ? "
+                "WHERE market_id = ? AND status = 'open'",
+                (voided_at, market_id)
+            ).rowcount
+            if changed == 0:
+                return None
+            refunds = []
             wagers = self.conn.execute(
                 'SELECT user_id, stake FROM bet_wager WHERE market_id = ?',
                 (market_id,)
@@ -2403,12 +2422,15 @@ class UserDbConn(MinigameDbMixin, StarboardDbMixin, MigrationDbMixin):
                     (w.stake, market_id, w.user_id)
                 )
                 refunds.append((w.user_id, w.stake))
-            self.conn.execute(
-                "UPDATE bet_market SET status = 'cancelled', settled_at = ? "
-                'WHERE market_id = ?',
-                (voided_at, market_id)
-            )
         return refunds
+
+    def bet_markets_open(self, guild_id):
+        """Return all open markets for a guild, kickoff-soonest first."""
+        return self.conn.execute(
+            "SELECT * FROM bet_market WHERE guild_id = ? AND status = 'open' "
+            'ORDER BY commence_time ASC',
+            (str(guild_id),)
+        ).fetchall()
 
     def close(self):
         self.conn.close()
