@@ -898,5 +898,49 @@ def upgrade_1_33_0(db):
             PRIMARY KEY (market_id, user_id)
         )
     ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS bet_wallet_txn (
+            txn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id      TEXT NOT NULL,
+            user_id       TEXT NOT NULL,
+            actor_id      TEXT,
+            action        TEXT NOT NULL,
+            amount        INTEGER NOT NULL,
+            balance_after INTEGER NOT NULL,
+            market_id     INTEGER,
+            note          TEXT,
+            created_at    REAL NOT NULL
+        )
+    ''')
+    db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_bet_wallet_txn_user
+            ON bet_wallet_txn (guild_id, user_id, created_at DESC)
+    ''')
     db.commit()
     logger.info('1.33.0: betting tables created')
+
+
+@registry.register('1.34.0', 'Betting wallet transaction audit log')
+def upgrade_1_34_0(db):
+    """Create an append-only wallet transaction table for betting audit."""
+    logger.info('1.34.0: Creating betting wallet transaction audit table')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS bet_wallet_txn (
+            txn_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            guild_id      TEXT NOT NULL,
+            user_id       TEXT NOT NULL,
+            actor_id      TEXT,
+            action        TEXT NOT NULL,
+            amount        INTEGER NOT NULL,
+            balance_after INTEGER NOT NULL,
+            market_id     INTEGER,
+            note          TEXT,
+            created_at    REAL NOT NULL
+        )
+    ''')
+    db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_bet_wallet_txn_user
+            ON bet_wallet_txn (guild_id, user_id, created_at DESC)
+    ''')
+    db.commit()
+    logger.info('1.34.0: betting wallet transaction audit table created')

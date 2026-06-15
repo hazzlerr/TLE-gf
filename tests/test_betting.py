@@ -6,12 +6,13 @@ from datetime import datetime, timezone
 import pytest
 
 from tle.util.db.user_db_conn import UserDbConn, namedtuple_factory
-from tle.util.db.user_db_upgrades import upgrade_1_33_0
+from tle.util.db.user_db_upgrades import upgrade_1_33_0, upgrade_1_34_0
 from tle.util import odds_api
 from tle.util import football_data
 from tle.cogs.betting import (
     outcome_from_score, payout_amount, normalize_pick, parse_amount,
-    extract_bet_tokens, resolve_pick, parse_settle_arg, rank_line, is_due,
+    extract_bet_tokens, resolve_pick, resolve_bet_pick, parse_settle_arg,
+    rank_line, is_due, normalized_market_odds, normalize_event,
 )
 
 
@@ -106,6 +107,7 @@ class TestExtractBetTokens:
         # Country names can be multiple words — must still parse.
         assert extract_bet_tokens('Cape Verde 100') == ('Cape Verde', '100')
         assert extract_bet_tokens('250 Saudi Arabia') == ('Saudi Arabia', '250')
+        assert extract_bet_tokens('not Saudi Arabia 250') == ('not Saudi Arabia', '250')
 
     def test_ignores_ordinary_chat(self):
         assert extract_bet_tokens('lets go spain') is None  # no amount token
@@ -143,6 +145,41 @@ class TestResolvePick:
     def test_unknown_is_none(self):
         assert resolve_pick('bananas', 'Spain', 'Cape Verde') is None
         assert resolve_pick(None, 'Spain', 'Cape Verde') is None
+
+
+class TestResolveBetPick:
+    def test_negative_team_and_outcome(self):
+        assert resolve_bet_pick('not Spain', 'Spain', 'Cape Verde') == 'not_home'
+        assert resolve_bet_pick('not draw', 'Spain', 'Cape Verde') == 'not_draw'
+        assert resolve_bet_pick('no Cape Verde', 'Spain', 'Cape Verde') == 'not_away'
+
+    def test_draw_rejected_when_market_has_no_draw(self):
+        assert resolve_bet_pick('draw', 'Spain', 'Cape Verde', allow_draw=False) is None
+        assert resolve_bet_pick('not draw', 'Spain', 'Cape Verde',
+                                allow_draw=False) is None
+
+
+class TestNormalizedOdds:
+    def test_removes_overround(self):
+        fair = normalized_market_odds({'home': 2.0, 'draw': 4.0, 'away': 4.0})
+        probs = sum(1 / fair[p] for p in ('home', 'draw', 'away'))
+        assert abs(probs - 1.0) < 1e-9
+        assert abs(fair['home'] - 2.0) < 1e-9
+
+    def test_knockout_folds_draw_into_advancing_teams(self):
+        fair = normalized_market_odds(
+            {'home': 2.0, 'draw': 4.0, 'away': 4.0}, knockout=True)
+        assert fair['draw'] == 0.0
+        assert abs((1 / fair['home']) + (1 / fair['away']) - 1.0) < 1e-9
+        assert abs(fair['home'] - 1.5) < 1e-3
+
+    def test_normalize_event_marks_knockout(self):
+        event = {'commence_time': datetime(2026, 6, 28, 19, 0,
+                                           tzinfo=timezone.utc).timestamp(),
+                 'odds': {'home': 2.0, 'draw': 4.0, 'away': 4.0}}
+        out = normalize_event(event)
+        assert out['market_type'] == 'advance'
+        assert out['odds']['draw'] == 0.0
 
 
 class TestParseSettleArg:
@@ -366,11 +403,25 @@ class TestFootballDataParse:
     def test_finished_with_scores(self):
         raw = {'status': 'FINISHED', 'utcDate': '2026-06-15T16:01:00Z',
                'homeTeam': {'name': 'Spain'}, 'awayTeam': {'name': 'Cape Verde'},
-               'score': {'fullTime': {'home': 3, 'away': 1}}}
+               'score': {'winner': 'HOME_TEAM',
+                         'fullTime': {'home': 3, 'away': 1}}}
         p = football_data.parse_match(raw)
         assert p['finished'] is True
         assert p['home'] == 'Spain' and p['away'] == 'Cape Verde'
         assert p['home_score'] == 3 and p['away_score'] == 1
+        assert p['winner'] == 'home'
+
+    def test_finished_penalties_keeps_winner(self):
+        raw = {'status': 'FINISHED', 'utcDate': '2026-07-01T16:01:00Z',
+               'homeTeam': {'name': 'Spain'}, 'awayTeam': {'name': 'Cape Verde'},
+               'score': {'winner': 'AWAY_TEAM', 'duration': 'PENALTY_SHOOTOUT',
+                         'fullTime': {'homeTeam': 4, 'awayTeam': 5},
+                         'regularTime': {'homeTeam': 1, 'awayTeam': 1}}}
+        p = football_data.parse_match(raw)
+        assert p['finished'] is True
+        assert p['home_score'] == 4 and p['away_score'] == 5
+        assert p['winner'] == 'away'
+        assert p['duration'] == 'PENALTY_SHOOTOUT'
 
     def test_in_play_not_finished(self):
         raw = {'status': 'IN_PLAY', 'utcDate': '2026-06-15T16:01:00Z',
@@ -389,7 +440,7 @@ class TestFootballDataMatching:
     def _m(self, home, away, score, commence=1000.0, finished=True):
         return {'home': home, 'away': away, 'home_score': score[0],
                 'away_score': score[1], 'commence_time': commence,
-                'finished': finished}
+                'finished': finished, 'winner': None}
 
     def test_exact_match(self):
         fd = [self._m('Spain', 'Cape Verde', (3, 1))]
@@ -399,6 +450,12 @@ class TestFootballDataMatching:
         # Provider lists Cape Verde as home; map scores back to our orientation.
         fd = [self._m('Cape Verde', 'Spain', (1, 3))]
         assert football_data.find_result('Spain', 'Cape Verde', 1000.0, fd) == (3, 1)
+
+    def test_flipped_home_away_swaps_winner(self):
+        fd = [self._m('Cape Verde', 'Spain', (1, 3))]
+        fd[0]['winner'] = 'away'
+        result = football_data.find_match_result('Spain', 'Cape Verde', 1000.0, fd)
+        assert result['winner'] == 'home'
 
     def test_alias_match(self):
         fd = [self._m('Korea Republic', 'Brazil', (0, 2))]
@@ -474,6 +531,9 @@ class TestWallet:
         assert db.bet_get_balance(GUILD, USER_A) is None
         assert db.bet_ensure_wallet(GUILD, USER_A, 1000) == 1000
         assert db.bet_get_balance(GUILD, USER_A) == 1000
+        rows = db.bet_wallet_history(GUILD, USER_A)
+        assert [(r.action, r.amount, r.balance_after) for r in rows] == [
+            ('init', 1000, 1000)]
 
     def test_ensure_idempotent(self, db):
         db.bet_ensure_wallet(GUILD, USER_A, 1000)
@@ -481,6 +541,7 @@ class TestWallet:
         db.conn.execute('UPDATE bet_wallet SET balance = 50 WHERE user_id = ?',
                         (USER_A,))
         assert db.bet_ensure_wallet(GUILD, USER_A, 1000) == 50
+        assert len(db.bet_wallet_history(GUILD, USER_A)) == 1
 
     def test_guild_isolation(self, db):
         db.bet_ensure_wallet('1', USER_A, 1000)
@@ -491,11 +552,15 @@ class TestDaily:
     def test_grants_once(self, db):
         granted, bal, reason = db.bet_claim_daily(GUILD, USER_A, '2026-06-15', 100, 1000)
         assert granted is True and bal == 1100 and reason == 'ok'
+        rows = db.bet_wallet_history(GUILD, USER_A)
+        assert [r.action for r in rows[:2]] == ['daily', 'init']
+        assert rows[0].amount == 100 and rows[0].actor_id == USER_A
 
     def test_second_claim_same_day_refused(self, db):
         db.bet_claim_daily(GUILD, USER_A, '2026-06-15', 100, 1000)
         granted, bal, reason = db.bet_claim_daily(GUILD, USER_A, '2026-06-15', 100, 1000)
         assert granted is False and bal == 1100 and reason == 'already'
+        assert [r.action for r in db.bet_wallet_history(GUILD, USER_A)].count('daily') == 1
 
     def test_next_day_grants_again(self, db):
         db.bet_claim_daily(GUILD, USER_A, '2026-06-15', 100, 1000)
@@ -553,6 +618,12 @@ class TestPlaceBet:
         ok, reason, bal = db.bet_place(GUILD, mid, USER_A, 'home', 300, 1.0, 1000)
         assert ok and reason == 'ok' and bal == 700
         assert db.bet_get_balance(GUILD, USER_A) == 700
+        rows = db.bet_wallet_history(GUILD, USER_A)
+        assert [(r.action, r.amount, r.balance_after, r.market_id)
+                for r in rows[:2]] == [
+                    ('wager_stake', -300, 700, mid),
+                    ('init', 1000, 1000, None),
+                ]
 
     def test_insufficient_balance(self, db):
         mid = _make_market(db)
@@ -569,6 +640,10 @@ class TestPlaceBet:
         assert ok and bal == 800  # 700 + 300 refund - 200
         w = db.bet_get_wager(mid, USER_A)
         assert w.pick == 'away' and w.stake == 200  # odds derived from market
+        rows = db.bet_wallet_history(GUILD, USER_A)
+        assert [r.action for r in rows[:2]] == ['wager_stake', 'wager_refund']
+        assert rows[0].amount == -200 and rows[0].balance_after == 800
+        assert rows[1].amount == 300 and rows[1].balance_after == 1000
 
     def test_rebet_to_larger_stake_within_refunded_budget(self, db):
         mid = _make_market(db)
@@ -599,12 +674,29 @@ class TestSettle:
         assert db.bet_get_balance(GUILD, USER_B) == 900   # unchanged
         assert db.bet_market_get(mid).status == 'settled'
         assert db.bet_market_get(mid).result == 'home'
+        hist = db.bet_wallet_history(GUILD, USER_A)
+        assert hist[0].action == 'payout' and hist[0].amount == 200
+        assert hist[0].market_id == mid
 
     def test_draw_outcome(self, db):
         mid = _make_market(db)
         db.bet_place(GUILD, mid, USER_A, 'draw', 100, 1.0, 1000)
         db.bet_settle(GUILD, mid, 'draw', 1, 1, 5.0)
         assert db.bet_get_balance(GUILD, USER_A) == 1200  # 900 + 300
+
+    def test_negative_pick_wins_when_event_does_not_happen(self, db):
+        mid = _make_market(db, odds=(2.0, 4.0, 4.0))
+        db.bet_place(GUILD, mid, USER_A, 'not_home', 100, 1.0, 1000)
+        rows = db.bet_settle(GUILD, mid, 'draw', 1, 1, 5.0)
+        by_user = {r[0]: r for r in rows}
+        assert by_user[USER_A][4] == 200  # P(not home)=0.5 => odds 2.0
+        assert db.bet_get_balance(GUILD, USER_A) == 1100
+
+    def test_negative_pick_loses_when_event_happens(self, db):
+        mid = _make_market(db, odds=(2.0, 4.0, 4.0))
+        db.bet_place(GUILD, mid, USER_A, 'not_home', 100, 1.0, 1000)
+        db.bet_settle(GUILD, mid, 'home', 2, 1, 5.0)
+        assert db.bet_get_balance(GUILD, USER_A) == 900
 
     def test_profit_leaderboard(self, db):
         mid = _make_market(db)
@@ -615,6 +707,14 @@ class TestSettle:
                 for r in db.bet_profit_leaderboard(GUILD)}
         assert prof[USER_A] == (100, 1, 1)   # +200 payout - 100 stake
         assert prof[USER_B] == (-100, 1, 0)
+
+    def test_profit_leaderboard_with_negative_pick(self, db):
+        mid = _make_market(db, odds=(2.0, 4.0, 4.0))
+        db.bet_place(GUILD, mid, USER_A, 'not_home', 100, 1.0, 1000)
+        db.bet_settle(GUILD, mid, 'away', 0, 1, 5.0)
+        prof = {r.user_id: (r.profit, r.bets, r.wins)
+                for r in db.bet_profit_leaderboard(GUILD)}
+        assert prof[USER_A] == (100, 1, 1)
 
     def test_double_settle_is_noop(self, db):
         """The status='open' guard must make a second settle pay nobody."""
@@ -643,6 +743,9 @@ class TestVoid:
         assert dict(refunds) == {USER_A: 300}
         assert db.bet_get_balance(GUILD, USER_A) == 1000  # fully restored
         assert db.bet_market_get(mid).status == 'cancelled'
+        hist = db.bet_wallet_history(GUILD, USER_A)
+        assert hist[0].action == 'void_refund'
+        assert hist[0].amount == 300 and hist[0].balance_after == 1000
 
     def test_voided_excluded_from_profit(self, db):
         mid = _make_market(db)
@@ -691,16 +794,35 @@ class TestModTools:
         m = db.bet_market_get(mid)
         assert m.result == 'away' and m.result_home == 1 and m.result_away == 2
 
+    def test_resettle_negative_pick_delta(self, db):
+        mid = _make_market(db, odds=(2.0, 4.0, 4.0))
+        db.bet_place(GUILD, mid, USER_A, 'not_home', 100, 1.0, 1000)
+        db.bet_settle(GUILD, mid, 'home', 1, 0, 5.0)
+        assert db.bet_get_balance(GUILD, USER_A) == 900
+        db.bet_resettle(GUILD, mid, 'draw', 1, 1, 6.0)
+        assert db.bet_get_balance(GUILD, USER_A) == 1100
+
     def test_resettle_only_on_settled(self, db):
         mid = _make_market(db)
         assert db.bet_resettle(GUILD, mid, 'home', 1, 0, 5.0) is None  # still open
 
     def test_adjust_balance_grant_and_floor(self, db):
-        assert db.bet_adjust_balance(GUILD, USER_A, 250, 1000) == 1250
+        assert db.bet_adjust_balance(
+            GUILD, USER_A, 250, 1000, actor_id=USER_B,
+            action='mod_grant') == 1250
+        hist = db.bet_wallet_history(GUILD, USER_A)
+        assert hist[0].action == 'mod_grant'
+        assert hist[0].actor_id == USER_B and hist[0].amount == 250
         assert db.bet_adjust_balance(GUILD, USER_A, -5000, 1000) == 0  # floored
+        assert db.bet_wallet_history(GUILD, USER_A)[0].amount == -1250
 
     def test_set_balance(self, db):
-        assert db.bet_set_balance(GUILD, USER_A, 500, 1000) == 500
+        assert db.bet_set_balance(
+            GUILD, USER_A, 500, 1000, actor_id=USER_B,
+            action='mod_setbalance') == 500
+        hist = db.bet_wallet_history(GUILD, USER_A)
+        assert hist[0].action == 'mod_setbalance'
+        assert hist[0].actor_id == USER_B and hist[0].amount == -500
         assert db.bet_set_balance(GUILD, USER_A, -10, 1000) == 0
 
     def test_close_betting(self, db):
@@ -791,6 +913,26 @@ class TestMigration:
         assert 'odds' not in cols and 'payout' not in cols
         indexes = [r[1] for r in conn.execute('PRAGMA index_list(bet_market)')]
         assert 'idx_bet_market_open_event' in indexes
+        conn.execute(
+            'INSERT INTO bet_wallet_txn '
+            '(guild_id, user_id, actor_id, action, amount, balance_after, '
+            'market_id, note, created_at) '
+            'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+            ('1', '10', '99', 'mod_grant', 50, 1050, None, None, 1.0))
+        assert conn.execute('SELECT COUNT(*) FROM bet_wallet_txn').fetchone()[0] == 1
+        conn.close()
+
+    def test_upgrade_134_creates_wallet_audit_for_existing_betting_db(self):
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = namedtuple_factory
+        upgrade_1_33_0(conn)
+        conn.execute('DROP TABLE bet_wallet_txn')
+        upgrade_1_34_0(conn)
+        tables = [r[0] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'")]
+        assert 'bet_wallet_txn' in tables
+        indexes = [r[1] for r in conn.execute('PRAGMA index_list(bet_wallet_txn)')]
+        assert 'idx_bet_wallet_txn_user' in indexes
         conn.close()
 
 
@@ -855,6 +997,22 @@ class TestExecuteBet:
         status, data = self._run(
             cog._execute_bet(GUILD, market, self._user(USER_A), 'away', 'all'))
         assert status == 'ok' and data['stake'] == 1000 and data['balance'] == 0
+
+    def test_negative_pick_uses_derived_odds(self, db, cog):
+        mid = _make_market(db, commence=1e12, odds=(2.0, 4.0, 4.0))
+        market = db.bet_market_get(mid)
+        status, data = self._run(
+            cog._execute_bet(GUILD, market, self._user(USER_A), 'not_home', '100'))
+        assert status == 'ok'
+        assert abs(data['odds'] - 2.0) < 1e-9
+        assert data['potential'] == 200
+
+    def test_draw_rejected_on_no_draw_market(self, db, cog):
+        mid = _make_market(db, commence=1e12, odds=(1.5, 0.0, 3.0))
+        market = db.bet_market_get(mid)
+        status, _ = self._run(
+            cog._execute_bet(GUILD, market, self._user(USER_A), 'draw', '100'))
+        assert status == 'invalid_pick'
 
     def test_rebet_can_use_escrowed_stake(self, db, cog):
         mid = _make_market(db, commence=1e12)
@@ -954,10 +1112,14 @@ class _FakeMsg:
         self.id = _FakeMsg._n
         self.thread = None
         self.deleted = False
+        self.edited_embed = None
 
     async def create_thread(self, name=None, auto_archive_duration=None):
         self.thread = _FakeThread(self.id + 100000)
         return self.thread
+
+    async def edit(self, embed=None, **kw):
+        self.edited_embed = embed
 
     async def delete(self):
         self.deleted = True
@@ -1045,17 +1207,46 @@ class TestAutoOpen:
         ev = _wc_event(commence=_t.time() + 3600)  # kickoff in 1h → due
         self._arm_events(cog, [ev], monkeypatch)
 
-        self._run(cog._refresh_schedule())
+        async def scenario():
+            await cog._refresh_schedule()
 
-        market = db.bet_market_get_active(GUILD, '222')
-        assert market is not None
-        assert market.home_team == 'Spain'
-        assert market.odds_home == 1.25  # frozen from the event
-        assert market.message_id is not None
-        assert market.thread_id is not None
-        assert len(channel.sent) == 1                 # one announcement
-        assert channel.sent[0].thread is not None     # thread created
-        assert len(channel.sent[0].thread.sent) == 1  # intro embed posted
+            market = db.bet_market_get_active(GUILD, '222')
+            assert market is not None
+            assert market.home_team == 'Spain'
+            assert market.odds_home == 1.25  # frozen from the event
+            assert market.message_id is not None
+            assert market.thread_id is not None
+            assert len(channel.sent) == 1                 # one announcement
+            assert channel.sent[0].thread is not None     # thread created
+            assert len(channel.sent[0].thread.sent) == 1  # intro embed posted
+            assert market.market_id in cog._close_timers  # closes exactly at kickoff
+            cog._close_timers[market.market_id].cancel()
+
+        self._run(scenario())
+
+    def test_fire_close_marks_market_edits_message_and_posts_once(self, setup):
+        import time as _t
+        cog, db, channel = setup
+        msg = self._run(channel.send(embed=None))
+        thread = _FakeThread(333)
+        cog.bot._channels[333] = thread
+        mid = db.bet_market_create(
+            GUILD, '222', 'evtClose', 'soccer_fifa_world_cup', 'Spain',
+            'Cape Verde', _t.time() - 1, 1.25, 5.5, 12.0, USER_A, 0.0)
+        db.bet_market_set_message(mid, msg.id)
+        db.bet_market_set_thread(mid, 333)
+
+        self._run(cog._fire_close(mid))
+
+        market = db.bet_market_get(mid)
+        assert market.bets_closed == 1
+        assert msg.edited_embed is not None
+        assert 'Betting ended' in msg.edited_embed.description
+        assert len(thread.sent) == 1
+        assert 'Betting ended' in thread.sent[0]
+
+        self._run(cog._fire_close(mid))
+        assert len(thread.sent) == 1  # DB guard prevents duplicate close notices
 
     def test_does_not_open_game_outside_window(self, setup, monkeypatch):
         import time as _t
@@ -1217,6 +1408,36 @@ class TestAutoSettleFootballData:
         assert m.result_home == 3 and m.result_away == 1
         # payout = round(100 * 1.25) = 125 → 900 + 125
         assert db.bet_get_balance(GUILD, USER_A) == 1025
+
+    def test_knockout_settles_by_advancing_winner(self, db, monkeypatch):
+        import time as _t
+        from tle.util import codeforces_common as cf_common
+        from tle.util import football_data as fd
+        from tle import constants
+        from tle.cogs.betting import Betting
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        monkeypatch.setattr(constants, 'BET_START_BALANCE', 1000, raising=False)
+        monkeypatch.setattr(constants, 'FOOTBALL_DATA_API_KEY', 'fdkey',
+                            raising=False)
+        mid = db.bet_market_create(
+            GUILD, '222', 'evtWC', 'soccer_fifa_world_cup', 'Spain',
+            'Cape Verde', _t.time() - 100, 1.5, 0.0, 3.0, USER_A, 0.0)
+        db.bet_place(GUILD, mid, USER_A, 'away', 100, 1.0, 1000)
+
+        channel = _FakeChannel(222)
+        bot = _FakeBot([_FakeGuild(int(GUILD), channel)], {222: channel})
+        cog = Betting(bot)
+
+        async def _fake_fetch(token, **kw):
+            return [{'home': 'Spain', 'away': 'Cape Verde',
+                     'commence_time': _t.time() - 100, 'finished': True,
+                     'home_score': 1, 'away_score': 1, 'winner': 'away'}]
+        monkeypatch.setattr(fd, 'fetch_wc_matches', _fake_fetch)
+
+        self._run(cog._settle_via_football_data())
+        m = db.bet_market_get(mid)
+        assert m.status == 'settled' and m.result == 'away'
+        assert db.bet_get_balance(GUILD, USER_A) == 1200
 
     def test_no_key_no_settle(self, db, monkeypatch):
         import time as _t

@@ -66,17 +66,29 @@ def _canon_key(name):
     return _CANON.get(_norm(name), _norm(name))
 
 
+def _score_value(node, side):
+    if not node:
+        return None
+    # Current v4 docs use home/away; older examples use homeTeam/awayTeam.
+    return node.get(side, node.get(f'{side}Team'))
+
+
+def _winner(raw_winner):
+    return {'HOME_TEAM': 'home', 'AWAY_TEAM': 'away', 'DRAW': 'draw'}.get(raw_winner)
+
+
 def parse_match(raw):
     """Normalize a football-data match into
-    {home, away, commence_time(unix), finished, home_score, away_score}.
+    {home, away, commence_time(unix), finished, home_score, away_score, winner}.
 
     finished is True only when the game is over AND both full-time scores are
     present.
     """
     status = raw.get('status')
-    ft = (raw.get('score') or {}).get('fullTime') or {}
-    home_score = ft.get('home')
-    away_score = ft.get('away')
+    score = raw.get('score') or {}
+    ft = score.get('fullTime') or {}
+    home_score = _score_value(ft, 'home')
+    away_score = _score_value(ft, 'away')
     commence = raw.get('utcDate')
     finished = (status in ('FINISHED', 'AWARDED')
                 and home_score is not None and away_score is not None)
@@ -87,6 +99,8 @@ def parse_match(raw):
         'finished': finished,
         'home_score': home_score,
         'away_score': away_score,
+        'winner': _winner(score.get('winner')),
+        'duration': score.get('duration'),
     }
 
 
@@ -100,6 +114,18 @@ def find_result(home_team, away_team, commence_time, fd_matches,
     flipped, the scores are swapped back so they line up with the supplied
     home_team/away_team. The date window tolerates provider time differences.
     """
+    result = find_match_result(
+        home_team, away_team, commence_time, fd_matches,
+        max_time_diff=max_time_diff)
+    if result is None:
+        return None
+    return (result['home_score'], result['away_score'])
+
+
+def find_match_result(home_team, away_team, commence_time, fd_matches,
+                      *, max_time_diff=86400):
+    """Find a FINISHED football-data match and return a dict mapped to the
+    supplied home/away orientation, including the winner when available."""
     h, a = _canon_key(home_team), _canon_key(away_team)
     for m in fd_matches:
         if not m['finished']:
@@ -111,8 +137,20 @@ def find_result(home_team, away_team, commence_time, fd_matches,
                 and abs(commence_time - m['commence_time']) > max_time_diff):
             continue
         if mh == h and ma == a:
-            return (m['home_score'], m['away_score'])
-        return (m['away_score'], m['home_score'])  # provider flipped orientation
+            return dict(m)
+        winner = m.get('winner')
+        if winner == 'home':
+            winner = 'away'
+        elif winner == 'away':
+            winner = 'home'
+        return {
+            **m,
+            'home': m['away'],
+            'away': m['home'],
+            'home_score': m['away_score'],
+            'away_score': m['home_score'],
+            'winner': winner,
+        }
     return None
 
 
