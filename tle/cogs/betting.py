@@ -1283,8 +1283,7 @@ class Betting(commands.Cog):
         await ctx.send(embed=discord_common.embed_success(
             'Auto-open **resumed** — markets will open ~2h before kickoff again.'))
 
-    @bet.command(name='book', brief='Show all bets on the active market (mod)')
-    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    @bet.command(name='book', brief='Show all bets on the active market')
     async def book(self, ctx):
         market = self._find_market(ctx)
         if market is None:

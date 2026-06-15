@@ -106,6 +106,7 @@ environment
 .mypy_cache/
 
 .idea/
+.DS_Store
 pip-wheel-metadata/
 
 # vscode
