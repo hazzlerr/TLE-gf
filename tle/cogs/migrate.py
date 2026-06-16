@@ -10,29 +10,36 @@ Flow:
 
 The first emoji is the main emoji; subsequent emojis are aliases that get
 merged into the main emoji during posting and registered as aliases on complete.
+
+The crawl/post/export/complete/command logic lives in mixin modules
+(``_migrate_phases``, ``_migrate_export``, ``_migrate_complete``,
+``_migrate_commands``) to keep each file small. Tunables defined here are read
+dynamically by the mixins so tests can monkeypatch ``tle.cogs.migrate._RATE_DELAY``
+etc.
 """
-import asyncio
-import gzip
-import io
-import json
 import logging
 import pathlib
-import time
 
 import discord
 from discord.ext import commands
 
 from tle import constants
-from tle.util import codeforces_common as cf_common
 from tle.util import discord_common
-from tle.cogs._starboard_helpers import _emoji_str
-from tle.cogs._migrate_helpers import (
+# Re-exported for callers/tests importing from tle.cogs.migrate.
+from tle.cogs._starboard_helpers import _emoji_str  # noqa: F401
+from tle.cogs._migrate_helpers import (  # noqa: F401
     parse_old_bot_message,
     serialize_embed_fallback,
     build_fallback_message,
 )
-from tle.cogs.starboard import Starboard, _starboard_content
-from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError
+from tle.cogs.starboard import Starboard, _starboard_content  # noqa: F401
+from tle.cogs._migrate_retry import discord_retry, RetryExhaustedError  # noqa: F401
+from tle.cogs._migrate_phases import MigratePhasesMixin
+from tle.cogs._migrate_export import MigrateExportMixin
+from tle.cogs._migrate_complete import MigrateCompleteMixin
+from tle.cogs._migrate_commands import (
+    MigrateCommandsMixin, _pause_kvs_key, _paginate,  # noqa: F401
+)
 from tle.util.discord_common import requires_guild_feature
 
 logger = logging.getLogger(__name__)
@@ -48,559 +55,30 @@ _EXPORT_PROGRESS_INTERVAL = 250
 _EXPORT_CONTEXT_LIMIT_MAX = 50
 
 
-
-def _pause_kvs_key(guild_id):
-    return f'migration_pre_pause_status:{guild_id}'
-
-
-class Migrate(commands.Cog):
+class Migrate(MigratePhasesMixin, MigrateExportMixin, MigrateCompleteMixin,
+              MigrateCommandsMixin, commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._tasks = {}   # guild_id -> asyncio.Task
         self._paused = {}  # guild_id -> asyncio.Event (clear = paused)
 
-    # ------------------------------------------------------------------
-    # Background crawl + post task
-    # ------------------------------------------------------------------
-
-    async def _wait_if_paused(self, guild_id):
-        """Block until unpaused. Returns immediately if not paused."""
-        event = self._paused.get(guild_id)
-        if event is not None and not event.is_set():
-            logger.info(f'Migration: guild={guild_id} paused, waiting...')
-            await event.wait()
-            logger.info(f'Migration: guild={guild_id} resumed from pause')
-
-    async def _run_migration(self, guild_id, old_channel_id, new_channel_id, emoji_set):
-        """Background task: crawl old channel, then post to new channel."""
-        await self.bot.wait_until_ready()
-        db = cf_common.user_db
-
-        logger.info(f'=== MIGRATION START === guild={guild_id}')
-
-        try:
-            migration = db.get_migration(guild_id)
-            if migration is None:
-                logger.warning(f'Migration: guild={guild_id} migration record not found, aborting')
-                return
-
-            # Skip crawl if already in posting phase (resume from posting)
-            if migration.status != 'posting':
-                await self._crawl_phase(guild_id, old_channel_id, emoji_set, db)
-
-                migration = db.get_migration(guild_id)
-                if migration is None or migration.status == 'failed':
-                    logger.warning(f'Migration: guild={guild_id} crawl phase ended with '
-                                   f'status={migration.status if migration else "deleted"}')
-                    return
-
-                db.update_migration_status(guild_id, 'posting')
-
-            await self._post_phase(guild_id, new_channel_id, emoji_set, db)
-
-            db.update_migration_status(guild_id, 'done')
-            logger.info(f'=== MIGRATION COMPLETE === guild={guild_id}')
-
-        except asyncio.CancelledError:
-            logger.info(f'Migration: guild={guild_id} cancelled')
-            # Don't update status — the cancel command already cleaned up
-            raise
-        except Exception as e:
-            logger.error(f'Migration: guild={guild_id} FAILED: {e}', exc_info=True)
-            db.update_migration_status(guild_id, 'failed')
-        finally:
-            self._tasks.pop(guild_id, None)
-
-    async def _fetch_source_channel(self, source_channel_id):
-        """Get a source channel, falling back to fetch_channel for threads."""
-        ch = self.bot.get_channel(source_channel_id)
-        if ch is not None:
-            return ch
-        return await discord_retry(
-            lambda: self.bot.fetch_channel(source_channel_id),
-            max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
-        )
-
-    @staticmethod
-    def _message_iso(value):
-        return value.isoformat() if value is not None else None
-
-    @staticmethod
-    def _message_user_payload(user):
-        if user is None:
-            return None
-        return {
-            'id': str(user.id),
-            'name': getattr(user, 'name', None),
-            'display_name': getattr(user, 'display_name', None),
-            'bot': bool(getattr(user, 'bot', False)),
-        }
-
-    @staticmethod
-    def _message_attachment_payload(attachment):
-        return {
-            'id': str(getattr(attachment, 'id', '')),
-            'filename': getattr(attachment, 'filename', None),
-            'url': getattr(attachment, 'url', None),
-            'proxy_url': getattr(attachment, 'proxy_url', None),
-            'content_type': getattr(attachment, 'content_type', None),
-            'size': getattr(attachment, 'size', None),
-            'width': getattr(attachment, 'width', None),
-            'height': getattr(attachment, 'height', None),
-            'spoiler': (
-                attachment.is_spoiler()
-                if hasattr(attachment, 'is_spoiler') else False
-            ),
-            'description': getattr(attachment, 'description', None),
-        }
-
-    @staticmethod
-    def _message_embed_payload(embed):
-        if hasattr(embed, 'to_dict'):
-            return embed.to_dict()
-        return dict(embed) if isinstance(embed, dict) else {'repr': repr(embed)}
-
-    @staticmethod
-    def _message_reaction_payload(reaction):
-        return {
-            'emoji': _emoji_str(reaction.emoji),
-            'count': int(reaction.count),
-        }
-
-    def _message_json_payload(self, message):
-        reference = None
-        if getattr(message, 'reference', None) is not None:
-            reference = {
-                'message_id': (
-                    str(message.reference.message_id)
-                    if getattr(message.reference, 'message_id', None) else None
-                ),
-                'channel_id': (
-                    str(message.reference.channel_id)
-                    if getattr(message.reference, 'channel_id', None) else None
-                ),
-                'guild_id': (
-                    str(message.reference.guild_id)
-                    if getattr(message.reference, 'guild_id', None) else None
-                ),
-            }
-
-        guild = getattr(message, 'guild', None)
-        channel = getattr(message, 'channel', None)
-        return {
-            'id': str(message.id),
-            'channel_id': str(channel.id) if channel is not None else None,
-            'guild_id': str(guild.id) if guild is not None else None,
-            'author': self._message_user_payload(
-                getattr(message, 'author', None)),
-            'created_at': self._message_iso(
-                getattr(message, 'created_at', None)),
-            'edited_at': self._message_iso(
-                getattr(message, 'edited_at', None)),
-            'jump_url': getattr(message, 'jump_url', None),
-            'type': str(getattr(message, 'type', '')),
-            'content': getattr(message, 'content', ''),
-            'attachments': [
-                self._message_attachment_payload(attachment)
-                for attachment in getattr(message, 'attachments', [])
-            ],
-            'embeds': [
-                self._message_embed_payload(embed)
-                for embed in getattr(message, 'embeds', [])
-            ],
-            'reactions': [
-                self._message_reaction_payload(reaction)
-                for reaction in getattr(message, 'reactions', [])
-            ],
-            'reference': reference,
-            'pinned': bool(getattr(message, 'pinned', False)),
-            'tts': bool(getattr(message, 'tts', False)),
-        }
-
-    @staticmethod
-    def _parse_export_args(args):
-        emojis = []
-        limit = None
-        context_limit = 0
-        for arg in args:
-            if arg.startswith('+limit='):
-                try:
-                    limit = int(arg.split('=', 1)[1])
-                except ValueError as exc:
-                    raise commands.BadArgument(
-                        '+limit must be an integer.') from exc
-                if limit <= 0:
-                    raise commands.BadArgument(
-                        '+limit must be a positive integer.')
-            elif arg.startswith('+context='):
-                try:
-                    context_limit = int(arg.split('=', 1)[1])
-                except ValueError as exc:
-                    raise commands.BadArgument(
-                        '+context must be an integer.') from exc
-                if context_limit < 0:
-                    raise commands.BadArgument(
-                        '+context must be a non-negative integer.')
-                if context_limit > _EXPORT_CONTEXT_LIMIT_MAX:
-                    raise commands.BadArgument(
-                        f'+context must be at most {_EXPORT_CONTEXT_LIMIT_MAX}.')
-            else:
-                emojis.append(arg)
-        return set(emojis), limit, context_limit
-
-    async def _fetch_message_context_before(self, source_channel, original_msg,
-                                            context_limit):
-        if context_limit <= 0:
-            return []
-
-        async def fetch_context():
-            messages = []
-            async for msg in source_channel.history(
-                    before=original_msg, limit=context_limit,
-                    oldest_first=False):
-                messages.append(msg)
-            messages.reverse()
-            return [self._message_json_payload(msg) for msg in messages]
-
-        return await discord_retry(
-            fetch_context,
-            max_retries=_MAX_RETRIES,
-            base_delay=_RETRY_BASE_DELAY,
-        )
-
-    async def _build_pillboard_export(self, old_channel, emoji_filter, limit,
-                                      context_limit=0, progress_cb=None):
-        rows = []
-        scanned = 0
-        parsed_count = 0
-        fetched = 0
-        failed = 0
-        context_fetched = 0
-        context_failed = 0
-
-        async for old_bot_msg in old_channel.history(
-                oldest_first=True, limit=limit):
-            scanned += 1
-            parsed = parse_old_bot_message(old_bot_msg.content or '')
-            if parsed is None:
-                continue
-            (emoji, displayed_count, guild_id, source_channel_id,
-             original_msg_id) = parsed
-            if emoji_filter and emoji not in emoji_filter:
-                continue
-            parsed_count += 1
-
-            row = {
-                'pillboard': {
-                    'message': self._message_json_payload(old_bot_msg),
-                    'emoji': emoji,
-                    'displayed_count': displayed_count,
-                },
-                'original_ref': {
-                    'guild_id': str(guild_id),
-                    'channel_id': str(source_channel_id),
-                    'message_id': str(original_msg_id),
-                    'jump_url': (
-                        f'https://discord.com/channels/{guild_id}/'
-                        f'{source_channel_id}/{original_msg_id}'
-                    ),
-                },
-                'original': None,
-                'context_before': [],
-                'context_fetch_status': (
-                    'not_requested' if context_limit == 0 else 'pending'
-                ),
-                'context_fetch_error': None,
-                'fetch_status': 'ok',
-                'fetch_error': None,
-            }
-            try:
-                source_channel = await self._fetch_source_channel(
-                    source_channel_id)
-                original_msg = await discord_retry(
-                    lambda: source_channel.fetch_message(original_msg_id),
-                    max_retries=_MAX_RETRIES,
-                    base_delay=_RETRY_BASE_DELAY,
-                )
-            except (discord.NotFound, discord.Forbidden,
-                    discord.HTTPException, RetryExhaustedError) as exc:
-                row['fetch_status'] = type(exc).__name__
-                row['fetch_error'] = str(exc)
-                if context_limit > 0:
-                    row['context_fetch_status'] = 'original_fetch_failed'
-                failed += 1
-            else:
-                row['original'] = self._message_json_payload(original_msg)
-                fetched += 1
-                if context_limit > 0:
-                    try:
-                        row['context_before'] = (
-                            await self._fetch_message_context_before(
-                                source_channel, original_msg, context_limit)
-                        )
-                    except (discord.NotFound, discord.Forbidden,
-                            discord.HTTPException,
-                            RetryExhaustedError) as exc:
-                        row['context_fetch_status'] = type(exc).__name__
-                        row['context_fetch_error'] = str(exc)
-                        context_failed += 1
-                    else:
-                        row['context_fetch_status'] = 'ok'
-                        context_fetched += 1
-            rows.append(row)
-            if (
-                    progress_cb is not None
-                    and parsed_count % _EXPORT_PROGRESS_INTERVAL == 0):
-                await progress_cb({
-                    'scanned': scanned,
-                    'parsed': parsed_count,
-                    'fetched': fetched,
-                    'failed': failed,
-                })
-            await asyncio.sleep(0)
-
-        return {
-            'scanned': scanned,
-            'parsed': parsed_count,
-            'fetched': fetched,
-            'failed': failed,
-            'context_fetched': context_fetched,
-            'context_failed': context_failed,
-            'rows': rows,
-        }
-
-    async def _crawl_phase(self, guild_id, old_channel_id, emoji_set, db):
-        """Crawl the old bot's channel, collecting entries and reactors."""
-        old_channel = self.bot.get_channel(old_channel_id)
-        if old_channel is None:
-            logger.error(f'Migration: guild={guild_id} old channel {old_channel_id} not found')
-            db.update_migration_status(guild_id, 'failed')
-            return
-
-        migration = db.get_migration(guild_id)
-        after = None
-        if migration.last_crawled_msg_id:
-            after = discord.Object(id=int(migration.last_crawled_msg_id))
-
-        crawl_done = migration.crawl_done
-        crawl_failed = migration.crawl_failed
-
-        logger.info(f'Migration crawl: guild={guild_id} channel={old_channel_id} '
-                     f'checkpoint={migration.last_crawled_msg_id} '
-                     f'done={crawl_done} failed={crawl_failed}')
-
-        async for old_bot_msg in old_channel.history(after=after, oldest_first=True, limit=None):
-            if not old_bot_msg.content:
-                continue
-
-            parsed = parse_old_bot_message(old_bot_msg.content)
-            if parsed is None:
-                continue
-
-            _parsed_emoji, displayed_count, msg_guild_id, source_channel_id, original_msg_id = parsed
-
-            # Try to fetch the original message with retry
-            original_msg = None
-            try:
-                source_channel = await self._fetch_source_channel(source_channel_id)
-                original_msg = await discord_retry(
-                    lambda: source_channel.fetch_message(original_msg_id),
-                    max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
-                )
-            except (discord.NotFound, discord.Forbidden):
-                pass  # permanent — message deleted or no access
-            except RetryExhaustedError as e:
-                db.add_migration_entry(
-                    guild_id, str(original_msg_id), _parsed_emoji,
-                    str(old_bot_msg.id), str(old_channel_id)
-                )
-                db.update_migration_entry_retry_exhausted(
-                    str(original_msg_id), _parsed_emoji, str(e.last_exception))
-                crawl_done += 1
-                crawl_failed += 1
-                logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done}] '
-                               f'msg={original_msg_id} RETRY EXHAUSTED: {e}')
-                db.update_migration_checkpoint(
-                    guild_id, str(old_bot_msg.id), crawl_done, crawl_failed)
-                await self._wait_if_paused(guild_id)
-                await asyncio.sleep(_RATE_DELAY)
-                continue
-
-            # Always save the old bot's message as fallback — even for crawled
-            # entries, the original might be temporarily unavailable during posting
-            fallback = serialize_embed_fallback(old_bot_msg)
-
-            if original_msg is not None:
-                # Scan ALL reactions on the original message for any emoji we care about.
-                # Don't trust the old bot's display emoji — just look at the actual reactions.
-                found_any = False
-                for reaction in original_msg.reactions:
-                    emoji_str = _emoji_str(reaction.emoji)
-                    if emoji_str not in emoji_set:
-                        continue
-                    found_any = True
-
-                    # Add entry (idempotent for resume)
-                    db.add_migration_entry(
-                        guild_id, str(original_msg_id), emoji_str,
-                        str(old_bot_msg.id), str(old_channel_id)
-                    )
-
-                    star_count = reaction.count
-                    reactor_ids = []
-                    try:
-                        async for user in reaction.users():
-                            reactor_ids.append(str(user.id))
-                    except discord.HTTPException as e:
-                        logger.warning(f'Migration crawl: guild={guild_id} [{crawl_done + 1}] '
-                                       f'reactor fetch failed for msg={original_msg_id} '
-                                       f'emoji={emoji_str}: {e}')
-
-                    if reactor_ids:
-                        db.bulk_add_reactors(str(original_msg_id), emoji_str, reactor_ids)
-
-                    db.update_migration_entry_crawled(
-                        str(original_msg_id), emoji_str,
-                        str(source_channel_id), str(original_msg.author.id),
-                        star_count, fallback
-                    )
-                    logger.info(f'Migration crawl: guild={guild_id} [{crawl_done + 1}] '
-                                f'emoji={emoji_str} msg={original_msg_id} '
-                                f'author={original_msg.author} count={star_count}')
-
-                if not found_any:
-                    # Original exists but has no matching reactions — reactions
-                    # were likely on the old bot's starboard post, not the original.
-                    # Use the displayed count from the old bot's header and mark
-                    # as crawled (not deleted — the message is real).
-                    emoji_str = _parsed_emoji
-                    db.add_migration_entry(
-                        guild_id, str(original_msg_id), emoji_str,
-                        str(old_bot_msg.id), str(old_channel_id)
-                    )
-                    db.update_migration_entry_crawled(
-                        str(original_msg_id), emoji_str,
-                        str(source_channel_id), str(original_msg.author.id),
-                        displayed_count, fallback
-                    )
-
-                crawl_done += 1
-                logger.info(f'Migration crawl: guild={guild_id} [{crawl_done}] '
-                            f'msg={original_msg_id} done')
-            else:
-                # Original message deleted, inaccessible, or channel gone.
-                # Use the parsed emoji from the old bot's message header.
-                emoji_str = _parsed_emoji
-                fallback = serialize_embed_fallback(old_bot_msg)
-                db.add_migration_entry(
-                    guild_id, str(original_msg_id), emoji_str,
-                    str(old_bot_msg.id), str(old_channel_id)
-                )
-                db.update_migration_entry_deleted(
-                    str(original_msg_id), emoji_str, fallback
-                )
-                crawl_done += 1
-                crawl_failed += 1
-                logger.info(f'Migration crawl: guild={guild_id} [{crawl_done}] '
-                            f'emoji={emoji_str} msg={original_msg_id} DELETED/INACCESSIBLE')
-
-            # Checkpoint after each message
-            db.update_migration_checkpoint(
-                guild_id, str(old_bot_msg.id), crawl_done, crawl_failed
+    def _launch(self, guild_id, migration, emoji_set):
+        """Create and register a background migration task for this guild."""
+        import asyncio
+        task = asyncio.create_task(
+            self._run_migration(
+                guild_id,
+                int(migration.old_channel_id),
+                int(migration.new_channel_id),
+                emoji_set
             )
+        )
+        self._tasks[guild_id] = task
+        return task
 
-            await self._wait_if_paused(guild_id)
-            await asyncio.sleep(_RATE_DELAY)
-
-        db.set_migration_crawl_total(guild_id, crawl_done)
-        logger.info(f'Migration crawl: guild={guild_id} finished — '
-                     f'{crawl_done} processed, {crawl_failed} failed')
-
-    async def _post_phase(self, guild_id, new_channel_id, emoji_set, db):
-        """Post crawled entries to the new starboard channel in chronological order.
-
-        Each entry is posted with its original emoji — no merging or conversion.
-        Alias resolution only happens later during ;migrate complete.
-        Uses exponential backoff on transient Discord errors.
-        """
-        new_channel = self.bot.get_channel(new_channel_id)
-        if new_channel is None:
-            logger.error(f'Migration post: guild={guild_id} new channel {new_channel_id} not found')
-            db.update_migration_status(guild_id, 'failed')
-            return
-
-        entries = db.get_migration_entries_for_posting(guild_id)
-        db.set_migration_post_totals(guild_id, len(entries))
-
-        logger.info(f'Migration post: guild={guild_id} starting — {len(entries)} entries to post')
-
-        post_done = 0
-        post_failed = 0
-
-        # Get the old channel for fetching old bot messages on the fly
-        old_channel = self.bot.get_channel(int(
-            db.get_migration(guild_id).old_channel_id))
-
-        for entry in entries:
-            try:
-                # If we have the old bot's message data, use it directly.
-                # Otherwise fetch it on the fly from the old channel.
-                if entry.embed_fallback:
-                    content, embeds = build_fallback_message(
-                        entry, entry.embed_fallback, entry.emoji)
-                elif old_channel is not None:
-                    try:
-                        old_bot_msg = await discord_retry(
-                            lambda: old_channel.fetch_message(int(entry.old_bot_msg_id)),
-                            max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
-                        )
-                        # Save it so we don't fetch again on retry
-                        fallback = serialize_embed_fallback(old_bot_msg)
-                        db.set_embed_fallback(entry.original_msg_id, entry.emoji, fallback)
-                        content, embeds = build_fallback_message(
-                            entry, fallback, entry.emoji)
-                    except (discord.NotFound, discord.Forbidden, RetryExhaustedError):
-                        content, embeds = build_fallback_message(
-                            entry, None, entry.emoji)
-                else:
-                    content, embeds = build_fallback_message(
-                        entry, None, entry.emoji)
-
-                sent = await discord_retry(
-                    lambda: new_channel.send(content=content, embeds=embeds),
-                    max_retries=_MAX_RETRIES, base_delay=_RETRY_BASE_DELAY,
-                )
-
-                db.update_migration_entry_posted(entry.original_msg_id, entry.emoji, str(sent.id))
-                post_done += 1
-                db.update_migration_post_done(guild_id, post_done)
-
-                logger.info(f'Migration post: guild={guild_id} [{post_done}/{len(entries)}] '
-                            f'msg={entry.original_msg_id} emoji={entry.emoji}')
-
-            except RetryExhaustedError as e:
-                logger.error(f'Migration post: guild={guild_id} RETRY EXHAUSTED '
-                             f'msg={entry.original_msg_id} emoji={entry.emoji}: {e}')
-                db.update_migration_entry_retry_exhausted(
-                    entry.original_msg_id, entry.emoji, str(e.last_exception))
-                post_done += 1
-                post_failed += 1
-                db.update_migration_post_done(guild_id, post_done)
-            except Exception as e:
-                logger.error(f'Migration post: guild={guild_id} FAILED '
-                             f'msg={entry.original_msg_id} emoji={entry.emoji}: {e}',
-                             exc_info=True)
-                db.update_migration_entry_retry_exhausted(
-                    entry.original_msg_id, entry.emoji, str(e))
-                post_done += 1
-                post_failed += 1
-                db.update_migration_post_done(guild_id, post_done)
-
-            await self._wait_if_paused(guild_id)
-            await asyncio.sleep(_RATE_DELAY)
-
-        logger.info(f'Migration post: guild={guild_id} finished — '
-                     f'{post_done}/{len(entries)} ({post_failed} failed)')
+    def _task_running(self, guild_id):
+        task = self._tasks.get(guild_id)
+        return task is not None and not task.done()
 
     # ------------------------------------------------------------------
     # Commands
@@ -625,82 +103,13 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate start #old-pillboard #new-pillboard :pill: :chocolate_bar:
         """
-        guild_id = ctx.guild.id
-
-        if not emojis:
-            await ctx.send('Please specify at least one emoji to migrate.')
-            return
-
-        existing = cf_common.user_db.get_migration(guild_id)
-        if existing is not None:
-            await ctx.send(f'A migration is already in progress (status: {existing.status}). '
-                           f'Use `;migrate cancel` first.')
-            return
-
-        main_emoji = emojis[0]
-        alias_emojis = list(emojis[1:])
-        alias_map = {alias: main_emoji for alias in alias_emojis}
-
-        emoji_csv = ','.join(emojis)
-        cf_common.user_db.create_migration(
-            guild_id, old_channel.id, new_channel.id, emoji_csv, time.time()
-        )
-
-        if alias_map:
-            cf_common.user_db.set_migration_alias_map(guild_id, json.dumps(alias_map))
-
-        emoji_set = set(emojis)
-        task = asyncio.create_task(
-            self._run_migration(guild_id, old_channel.id, new_channel.id, emoji_set)
-        )
-        self._tasks[guild_id] = task
-
-        logger.info(f'Migration: guild={guild_id} started by {ctx.author} '
-                     f'old={old_channel.id} new={new_channel.id} emojis={emoji_csv} '
-                     f'aliases={alias_map}')
-
-        desc = f'Migration started! Crawling {old_channel.mention} for {", ".join(emojis)}.'
-        if alias_map:
-            alias_desc = ', '.join(f'{a} → {m}' for a, m in alias_map.items())
-            desc += f'\nAliases: {alias_desc}'
-        desc += '\nUse `;migrate status` to check progress.'
-        await ctx.send(desc)
+        await self._impl_start(ctx, old_channel, new_channel, emojis)
 
     @migrate.command(name='status')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def status(self, ctx):
         """Check the progress of the current migration."""
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None:
-            await ctx.send('No migration in progress.')
-            return
-
-        status_counts = cf_common.user_db.count_migration_entries_by_status(guild_id)
-        counts = {r.crawl_status: r.cnt for r in status_counts}
-
-        alias_map = cf_common.user_db.get_migration_alias_map(guild_id)
-
-        lines = [
-            f'**Migration Status:** {migration.status}',
-            f'**Emojis:** {migration.emojis}',
-            f'**Crawl:** {migration.crawl_done} done, {migration.crawl_failed} failed'
-            f' (total: {migration.crawl_total})',
-        ]
-
-        if migration.status in ('posting', 'done', 'failed'):
-            lines.append(f'**Post:** {migration.post_done}/{migration.post_total}')
-
-        if alias_map:
-            alias_desc = ', '.join(f'{a} → {m}' for a, m in alias_map.items())
-            lines.append(f'**Aliases:** {alias_desc}')
-
-        if counts:
-            parts = [f'{k}: {v}' for k, v in sorted(counts.items())]
-            lines.append(f'**Entries by status:** {", ".join(parts)}')
-
-        await ctx.send('\n'.join(lines))
+        await self._impl_status(ctx)
 
     @migrate.command(name='export')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
@@ -729,99 +138,6 @@ class Migrate(commands.Cog):
         """
         await self._cmd_pillboard_export(ctx, pillboard_channel, *args)
 
-    async def _cmd_pillboard_export(self, ctx, old_channel, *args):
-        try:
-            emoji_filter, limit, context_limit = self._parse_export_args(args)
-        except commands.BadArgument as exc:
-            await ctx.send(str(exc))
-            return
-
-        progress_message = await ctx.send(
-            f'Exporting pillboard messages from {old_channel.mention}. '
-            'This might take a while. Progress updates every '
-            f'{_EXPORT_PROGRESS_INTERVAL} parsed post(s).')
-        started_at = time.time()
-
-        async def progress_cb(progress):
-            if progress_message is None or not hasattr(progress_message, 'edit'):
-                return
-            elapsed = int(time.time() - started_at)
-            try:
-                await progress_message.edit(content=(
-                    f'Exporting pillboard messages from {old_channel.mention}: '
-                    f'scanned **{progress["scanned"]}**, '
-                    f'parsed **{progress["parsed"]}**, '
-                    f'fetched **{progress["fetched"]}**, '
-                    f'failed **{progress["failed"]}** '
-                    f'({elapsed}s).'
-                ))
-            except discord.HTTPException:
-                pass
-
-        result = await self._build_pillboard_export(
-            old_channel, emoji_filter, limit, context_limit,
-            progress_cb=progress_cb)
-        payload = {
-            'exported_at': time.time(),
-            'guild_id': str(ctx.guild.id),
-            'pillboard_channel_id': str(old_channel.id),
-            'emoji_filter': sorted(emoji_filter),
-            'limit': limit,
-            'context_limit': context_limit,
-            'summary': {
-                'scanned': result['scanned'],
-                'parsed': result['parsed'],
-                'fetched': result['fetched'],
-                'failed': result['failed'],
-                'context_fetched': result['context_fetched'],
-                'context_failed': result['context_failed'],
-                'seconds': round(time.time() - started_at, 3),
-            },
-            'messages': result['rows'],
-        }
-        data = json.dumps(payload, indent=2, ensure_ascii=False).encode('utf-8')
-
-        _EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-        filename = (
-            f'pillboard_export_{ctx.guild.id}_{old_channel.id}_'
-            f'{int(started_at)}.json'
-        )
-        path = _EXPORT_DIR / filename
-        path.write_bytes(data)
-
-        summary = (
-            f'Pillboard export complete: scanned **{result["scanned"]}**, '
-            f'parsed **{result["parsed"]}**, fetched **{result["fetched"]}**, '
-            f'failed **{result["failed"]}**'
-        )
-        if context_limit > 0:
-            summary += (
-                f', context fetched **{result["context_fetched"]}**, '
-                f'context failed **{result["context_failed"]}**'
-            )
-        summary += '.'
-        upload_limit = getattr(ctx.guild, 'filesize_limit', 8 * 1024 * 1024)
-        if len(data) <= upload_limit:
-            await ctx.send(
-                summary,
-                file=discord.File(io.BytesIO(data), filename=filename))
-            return
-
-        gz_data = gzip.compress(data)
-        gz_filename = f'{filename}.gz'
-        gz_path = _EXPORT_DIR / gz_filename
-        gz_path.write_bytes(gz_data)
-        if len(gz_data) <= upload_limit:
-            await ctx.send(
-                f'{summary}\nRaw JSON was too large for Discord, so I attached '
-                'a compressed `.json.gz` file.',
-                file=discord.File(io.BytesIO(gz_data), filename=gz_filename))
-        else:
-            await ctx.send(
-                f'{summary}\nJSON is too large to upload, even compressed '
-                f'({len(gz_data)} compressed bytes; limit {upload_limit}). '
-                f'Saved on the server at `{path}` and `{gz_path}`.')
-
     @migrate.command(name='complete')
     @commands.has_role(constants.TLE_ADMIN)
     async def complete(self, ctx, new_channel: discord.TextChannel):
@@ -829,137 +145,7 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate complete #new-pillboard
         """
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None:
-            await ctx.send('No migration to complete.')
-            return
-
-        if migration.status != 'done':
-            await ctx.send(f'Migration is not done yet (status: {migration.status}). '
-                           f'Wait for it to finish first.')
-            return
-
-        db = cf_common.user_db
-        emojis = migration.emojis.split(',')
-
-        posted_entries = db.get_posted_migration_entries(guild_id)
-
-        # Warn about post_failed entries before completing
-        failed_counts = db.count_migration_entries_by_status(guild_id)
-        failed_map = {r.crawl_status: r.cnt for r in failed_counts}
-        pf_count = failed_map.get('post_failed', 0)
-        re_count = failed_map.get('retry_exhausted', 0)
-        total_failed = pf_count + re_count
-
-        if total_failed > 0:
-            await ctx.send(f'**Warning:** {total_failed} entries failed and will not be '
-                           f'imported. Use `;migrate retry-failed` to retry them, or proceed '
-                           f'with `;migrate complete {new_channel.mention}` again to accept the loss.')
-            if not posted_entries:
-                await ctx.send('No posted entries to import. Use `;migrate retry-failed` '
-                               'to retry failed entries first.')
-                return
-
-        logger.info(f'Migration complete: guild={guild_id} importing {len(posted_entries)} entries '
-                     f'({pf_count} post_failed entries discarded)')
-
-        # Load alias map
-        alias_map = db.get_migration_alias_map(guild_id)
-        main_emojis = set(emojis) - set(alias_map.keys()) if alias_map else set(emojis)
-
-        # Copy posted entries into starboard tables, de-duplicating merged entries.
-        # Use raw SQL in a single transaction to avoid per-row commit() calls —
-        # 3000+ individual commits block the event loop and kill the gateway.
-        conn = db.conn
-        seen_msgs = set()
-        imported = 0
-        for i, entry in enumerate(posted_entries):
-            resolved_emoji = alias_map.get(entry.emoji, entry.emoji) if alias_map else entry.emoji
-
-            # Skip duplicate entries from merged aliases (same original_msg_id)
-            dedup_key = (entry.original_msg_id, resolved_emoji)
-            if dedup_key in seen_msgs:
-                continue
-            seen_msgs.add(dedup_key)
-
-            # Compute merged star count if aliases exist
-            star_count = entry.star_count or 0
-            if alias_map:
-                all_family = [resolved_emoji] + [k for k, v in alias_map.items()
-                                                  if v == resolved_emoji]
-                merged_count = db.get_merged_reactor_count(entry.original_msg_id, all_family)
-                if merged_count > 0:
-                    star_count = merged_count
-
-            conn.execute(
-                'INSERT OR IGNORE INTO starboard_message_v1 '
-                '(original_msg_id, starboard_msg_id, guild_id, emoji, author_id, channel_id) '
-                'VALUES (?, ?, ?, ?, ?, ?)',
-                (str(entry.original_msg_id), str(entry.new_starboard_msg_id),
-                 str(guild_id), resolved_emoji,
-                 str(entry.author_id) if entry.author_id else None,
-                 str(entry.source_channel_id) if entry.source_channel_id else None)
-            )
-            if star_count > 0:
-                conn.execute(
-                    'UPDATE starboard_message_v1 SET star_count = ? '
-                    'WHERE original_msg_id = ? AND emoji = ?',
-                    (star_count, str(entry.original_msg_id), resolved_emoji)
-                )
-            imported += 1
-
-            # Yield to event loop periodically so Discord heartbeats aren't blocked
-            if i % 500 == 499:
-                conn.commit()
-                logger.info(f'Migration complete: guild={guild_id} imported {imported} so far')
-                await asyncio.sleep(0)
-
-        # Create emoji configs for main emojis only
-        for emoji in main_emojis:
-            conn.execute(
-                'INSERT INTO starboard_emoji_v1 (guild_id, emoji, threshold, color) '
-                'VALUES (?, ?, ?, ?) '
-                'ON CONFLICT(guild_id, emoji) DO UPDATE SET threshold = excluded.threshold, '
-                'color = excluded.color',
-                (str(guild_id), emoji, 1, constants._DEFAULT_STAR_COLOR)
-            )
-            conn.execute(
-                'UPDATE starboard_emoji_v1 SET channel_id = ? WHERE guild_id = ? AND emoji = ?',
-                (str(new_channel.id), str(guild_id), emoji)
-            )
-
-        # Register aliases
-        for alias_emoji, main_emoji in alias_map.items():
-            conn.execute(
-                'INSERT OR REPLACE INTO starboard_alias (guild_id, alias_emoji, main_emoji) '
-                'VALUES (?, ?, ?)',
-                (str(guild_id), alias_emoji, main_emoji)
-            )
-
-        # Clean up migration data
-        conn.execute(
-            'DELETE FROM starboard_migration_entry WHERE guild_id = ?',
-            (str(guild_id),)
-        )
-        conn.execute(
-            'DELETE FROM starboard_migration WHERE guild_id = ?',
-            (str(guild_id),)
-        )
-
-        conn.commit()
-
-        emoji_list = ', '.join(main_emojis)
-        alias_list = ', '.join(f'{a} → {m}' for a, m in alias_map.items())
-        logger.info(f'Migration complete: guild={guild_id} done — '
-                     f'{imported} imported, emojis={emoji_list}, aliases={alias_list}')
-        msg = f'Migration complete! {imported} messages imported.\n'
-        msg += f'Emoji config created for {emoji_list} in {new_channel.mention}.'
-        if alias_map:
-            msg += f'\nAliases registered: {alias_list}'
-        msg += '\nLive reaction tracking is now active.'
-        await ctx.send(msg)
+        await self._impl_complete(ctx, new_channel)
 
     @migrate.command(name='resume')
     @commands.has_role(constants.TLE_ADMIN)
@@ -968,54 +154,7 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate resume
         """
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None:
-            await ctx.send('No migration to resume.')
-            return
-
-        if migration.status not in ('failed', 'crawling', 'posting'):
-            await ctx.send(f'Migration cannot be resumed (status: {migration.status}). '
-                           f'Use `;migrate complete` if status is done.')
-            return
-
-        if guild_id in self._tasks:
-            task = self._tasks[guild_id]
-            if not task.done():
-                await ctx.send('Migration task is already running.')
-                return
-
-        db = cf_common.user_db
-
-        # Reset failed entries so they can be retried
-        db.reset_post_failed_entries(guild_id)
-        db.reset_retry_exhausted_entries(guild_id)
-
-        # Determine which phase to resume.
-        # crawl_total is set at the END of the crawl phase. If it's 0, the crawl
-        # never finished and we must resume crawling — even if some entries are
-        # already crawled (they were crawled before the crash).
-        # If status is already 'posting', the crawl completed and we resume posting.
-        if migration.status == 'posting' or (migration.status == 'failed' and migration.crawl_total > 0):
-            db.update_migration_status(guild_id, 'posting')
-        else:
-            db.update_migration_status(guild_id, 'crawling')
-
-        emoji_set = set(migration.emojis.split(','))
-        task = asyncio.create_task(
-            self._run_migration(
-                guild_id,
-                int(migration.old_channel_id),
-                int(migration.new_channel_id),
-                emoji_set
-            )
-        )
-        self._tasks[guild_id] = task
-
-        logger.info(f'Migration resume: guild={guild_id} by {ctx.author} '
-                     f'(was status={migration.status})')
-        await ctx.send(f'Migration resumed! Use `;migrate status` to check progress.')
+        await self._impl_resume(ctx)
 
     @migrate.command(name='show-deleted')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
@@ -1027,48 +166,7 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate show-deleted
         """
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None:
-            await ctx.send('No migration in progress.')
-            return
-
-        entries = cf_common.user_db.get_deleted_migration_entries(guild_id)
-
-        if not entries:
-            await ctx.send('No deleted/inaccessible messages found.')
-            return
-
-        header = f'**Deleted/Inaccessible Messages ({len(entries)})**\n'
-        lines = []
-
-        for i, entry in enumerate(entries, 1):
-            old_link = (f'https://discord.com/channels/{guild_id}/'
-                        f'{entry.old_channel_id}/{entry.old_bot_msg_id}')
-            line = f'{i}. {entry.emoji} — [Old post]({old_link})'
-
-            if entry.new_starboard_msg_id:
-                new_link = (f'https://discord.com/channels/{guild_id}/'
-                            f'{migration.new_channel_id}/{entry.new_starboard_msg_id}')
-                line += f' | [New post]({new_link})'
-
-            lines.append(line)
-
-        # Paginate to fit Discord's 2000-char message limit
-        chunks = []
-        current = header
-        for line in lines:
-            if len(current) + len(line) + 1 > 1900:
-                chunks.append(current)
-                current = line
-            else:
-                current += '\n' + line
-        if current:
-            chunks.append(current)
-
-        for chunk in chunks:
-            await ctx.send(chunk)
+        await self._impl_show_deleted(ctx)
 
     @migrate.command(name='retry-failed')
     @commands.has_role(constants.TLE_ADMIN)
@@ -1079,44 +177,7 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate retry-failed
         """
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None:
-            await ctx.send('No migration in progress.')
-            return
-
-        if guild_id in self._tasks:
-            task = self._tasks[guild_id]
-            if not task.done():
-                await ctx.send('Migration task is already running.')
-                return
-
-        db = cf_common.user_db
-        entries = db.get_retry_exhausted_entries(guild_id)
-
-        if not entries:
-            await ctx.send('No failed entries to retry.')
-            return
-
-        count = len(entries)
-        db.reset_retry_exhausted_entries(guild_id)
-        db.update_migration_status(guild_id, 'posting')
-
-        emoji_set = set(migration.emojis.split(','))
-        task = asyncio.create_task(
-            self._run_migration(
-                guild_id,
-                int(migration.old_channel_id),
-                int(migration.new_channel_id),
-                emoji_set
-            )
-        )
-        self._tasks[guild_id] = task
-
-        logger.info(f'Migration retry-failed: guild={guild_id} by {ctx.author} '
-                     f'retrying {count} entries')
-        await ctx.send(f'Retrying {count} failed entries. Use `;migrate status` to check progress.')
+        await self._impl_retry_failed(ctx)
 
     @migrate.command(name='view-failed')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
@@ -1127,42 +188,7 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate view-failed
         """
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None:
-            await ctx.send('No migration in progress.')
-            return
-
-        entries = cf_common.user_db.get_retry_exhausted_entries(guild_id)
-
-        if not entries:
-            await ctx.send('No failed entries.')
-            return
-
-        header = f'**Failed Messages ({len(entries)})**\n'
-        lines = []
-
-        for i, entry in enumerate(entries, 1):
-            old_link = (f'https://discord.com/channels/{guild_id}/'
-                        f'{entry.old_channel_id}/{entry.old_bot_msg_id}')
-            error = (entry.last_error or 'unknown')[:80]
-            line = f'{i}. {entry.emoji} — [Old post]({old_link}) — `{error}`'
-            lines.append(line)
-
-        chunks = []
-        current = header
-        for line in lines:
-            if len(current) + len(line) + 1 > 1900:
-                chunks.append(current)
-                current = line
-            else:
-                current += '\n' + line
-        if current:
-            chunks.append(current)
-
-        for chunk in chunks:
-            await ctx.send(chunk)
+        await self._impl_view_failed(ctx)
 
     @migrate.command(name='restart-post')
     @commands.has_role(constants.TLE_ADMIN)
@@ -1173,77 +199,7 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate restart-post
         """
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None:
-            await ctx.send('No migration in progress.')
-            return
-
-        # Stop any running/paused task first
-        event = self._paused.pop(guild_id, None)
-        if event is not None:
-            event.set()
-        cf_common.user_db.kvs_set(_pause_kvs_key(guild_id), '')
-        task = self._tasks.pop(guild_id, None)
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except (asyncio.CancelledError, Exception):
-                pass
-
-        db = cf_common.user_db
-        new_channel = self.bot.get_channel(int(migration.new_channel_id))
-        if new_channel is None:
-            await ctx.send(f'New channel {migration.new_channel_id} not found.')
-            return
-
-        # Delete all messages the bot posted in the new channel
-        msg_ids = db.get_all_posted_msg_ids(guild_id)
-        await ctx.send(f'Deleting {len(msg_ids)} posted messages from {new_channel.mention}...')
-
-        deleted = 0
-        failed = 0
-        for msg_id in msg_ids:
-            try:
-                msg = await new_channel.fetch_message(int(msg_id))
-                await msg.delete()
-                deleted += 1
-            except discord.NotFound:
-                deleted += 1  # already gone
-            except (discord.Forbidden, discord.HTTPException) as e:
-                failed += 1
-                if failed <= 3:
-                    logger.warning(f'Migration restart-post: failed to delete msg {msg_id}: {e}')
-            await asyncio.sleep(0.3)
-
-        if failed > 0:
-            await ctx.send(f'Warning: failed to delete {failed} messages '
-                           f'(bot may lack Manage Messages permission).')
-
-        # Reset all entries back to crawled/deleted
-        db.reset_all_entries_for_repost(guild_id)
-        db.update_migration_status(guild_id, 'posting')
-        db.set_migration_post_totals(guild_id, 0)
-        db.update_migration_post_done(guild_id, 0)
-
-        # Re-launch post phase
-        emoji_set = set(migration.emojis.split(','))
-        task = asyncio.create_task(
-            self._run_migration(
-                guild_id,
-                int(migration.old_channel_id),
-                int(migration.new_channel_id),
-                emoji_set
-            )
-        )
-        self._tasks[guild_id] = task
-
-        logger.info(f'Migration restart-post: guild={guild_id} by {ctx.author} '
-                     f'deleted {deleted}/{len(msg_ids)} messages, re-posting')
-        await ctx.send(f'Deleted {deleted} messages. Re-posting now. '
-                       f'Use `;migrate status` to check progress.')
+        await self._impl_restart_post(ctx)
 
     @migrate.command(name='pause')
     @commands.has_role(constants.TLE_ADMIN)
@@ -1252,30 +208,7 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate pause
         """
-        guild_id = ctx.guild.id
-
-        migration = cf_common.user_db.get_migration(guild_id)
-        if migration is None:
-            await ctx.send('No migration in progress.')
-            return
-
-        if migration.status == 'paused':
-            await ctx.send('Migration is already paused.')
-            return
-
-        # Store the current status in KVS so unpause can restore it (survives restart)
-        cf_common.user_db.kvs_set(_pause_kvs_key(guild_id), migration.status)
-        cf_common.user_db.update_migration_status(guild_id, 'paused')
-
-        # If a task is running, block it with an event
-        if guild_id in self._tasks and not self._tasks[guild_id].done():
-            event = asyncio.Event()
-            self._paused[guild_id] = event
-
-        logger.info(f'Migration pause: guild={guild_id} by {ctx.author} '
-                     f'(was {migration.status})')
-        await ctx.send('Migration paused. Use `;migrate unpause` to continue. '
-                       'Safe to restart the server — it will NOT auto-resume.')
+        await self._impl_pause(ctx)
 
     @migrate.command(name='unpause')
     @commands.has_role(constants.TLE_ADMIN)
@@ -1284,72 +217,13 @@ class Migrate(commands.Cog):
 
         Usage: ;migrate unpause
         """
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None or migration.status != 'paused':
-            await ctx.send('Migration is not paused.')
-            return
-
-        # Restore the previous status from KVS
-        kvs_key = _pause_kvs_key(guild_id)
-        prev_status = cf_common.user_db.kvs_get(kvs_key) or 'crawling'
-        cf_common.user_db.update_migration_status(guild_id, prev_status)
-        cf_common.user_db.kvs_set(kvs_key, '')  # clean up
-
-        # Unblock the in-memory event if a task is waiting
-        event = self._paused.pop(guild_id, None)
-        if event is not None:
-            event.set()
-            logger.info(f'Migration unpause: guild={guild_id} by {ctx.author} '
-                         f'(restored to {prev_status}, task still running)')
-            await ctx.send('Migration unpaused.')
-        else:
-            # No running task (server was restarted while paused) — re-launch
-            emoji_set = set(migration.emojis.split(','))
-            task = asyncio.create_task(
-                self._run_migration(
-                    guild_id,
-                    int(migration.old_channel_id),
-                    int(migration.new_channel_id),
-                    emoji_set
-                )
-            )
-            self._tasks[guild_id] = task
-            logger.info(f'Migration unpause: guild={guild_id} by {ctx.author} '
-                         f'(restored to {prev_status}, re-launched task)')
-            await ctx.send('Migration unpaused and re-launched.')
+        await self._impl_unpause(ctx)
 
     @migrate.command(name='cancel')
     @commands.has_role(constants.TLE_ADMIN)
     async def cancel(self, ctx):
         """Cancel the current migration and clean up."""
-        guild_id = ctx.guild.id
-        migration = cf_common.user_db.get_migration(guild_id)
-
-        if migration is None:
-            await ctx.send('No migration to cancel.')
-            return
-
-        logger.info(f'Migration cancel: guild={guild_id} by {ctx.author} '
-                     f'(was status={migration.status})')
-
-        # Clean up pause state
-        event = self._paused.pop(guild_id, None)
-        if event is not None:
-            event.set()
-        cf_common.user_db.kvs_set(_pause_kvs_key(guild_id), '')
-
-        # Cancel background task if running
-        task = self._tasks.pop(guild_id, None)
-        if task and not task.done():
-            task.cancel()
-
-        # Clean up DB
-        cf_common.user_db.delete_migration_entries(guild_id)
-        cf_common.user_db.delete_migration(guild_id)
-
-        await ctx.send('Migration cancelled and data cleaned up.')
+        await self._impl_cancel(ctx)
 
     # ------------------------------------------------------------------
     # Resume on restart
@@ -1359,35 +233,7 @@ class Migrate(commands.Cog):
     @discord_common.once
     async def on_ready(self):
         """Resume any in-progress migrations after bot restart."""
-        # Wait for user_db to be initialized
-        if cf_common.user_db is None:
-            logger.debug('Migration: user_db not ready in on_ready, skipping resume')
-            return
-
-        resumed = 0
-        for guild in self.bot.guilds:
-            migration = cf_common.user_db.get_migration(guild.id)
-            if migration is None:
-                continue
-
-            if migration.status in ('crawling', 'posting'):
-                emoji_set = set(migration.emojis.split(','))
-                logger.info(f'Migration resume: guild={guild.id} status={migration.status} '
-                            f'checkpoint={migration.last_crawled_msg_id} '
-                            f'crawl_done={migration.crawl_done} emojis={migration.emojis}')
-                task = asyncio.create_task(
-                    self._run_migration(
-                        guild.id,
-                        int(migration.old_channel_id),
-                        int(migration.new_channel_id),
-                        emoji_set
-                    )
-                )
-                self._tasks[guild.id] = task
-                resumed += 1
-
-        if resumed:
-            logger.info(f'Migration resume: {resumed} migration(s) resumed across all guilds')
+        await self._impl_resume_on_ready()
 
 
 async def setup(bot):
