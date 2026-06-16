@@ -802,7 +802,8 @@ class Handles(commands.Cog):
         buffer = io.BytesIO()
         img.save(buffer, 'png')
         buffer.seek(0)
-        await ctx.send(msg, file=discord.File(buffer, 'handles.png'))
+        await ctx.send(msg, file=discord.File(buffer, 'handles.png'),
+                       allowed_mentions=discord.AllowedMentions.none())
 
     async def _update_ranks_all(self, guild):
         """For each member in the guild, fetches their current ratings and updates their role if
