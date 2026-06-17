@@ -13,6 +13,19 @@ from discord.ext import commands
 
 from tle.util import codeforces_common as cf_common
 from tle.util import discord_common
+# Gitgud scoring + team-elo math are owned by the codeforces cog (;gitgud,
+# ;teamrate). Import the single source so rpoll's gg/mgg/team formulas can't
+# silently drift from it. (_codeforces_helpers imports nothing from rpoll.)
+from tle.cogs._codeforces_helpers import (  # noqa: F401  (re-exported names)
+    composeRatings,
+    getEloWinProbability,
+    _GITGUD_MORE_POINTS_START_TIME,
+    _GITGUD_SCORE_DISTRIB,
+    _GITGUD_SCORE_DISTRIB_MAX,
+    _GITGUD_SCORE_DISTRIB_MIN,
+    _ONE_WEEK_DURATION,
+    _calculateGitgudScoreForDelta,
+)
 
 # Number emojis for options 0-4
 _NUMBER_EMOJIS = ['1\N{COMBINING ENCLOSING KEYCAP}',
@@ -38,13 +51,6 @@ _FORMULA_LABELS = {
     'akari': 'sum of Daily Akari ratings',
     'akariexp': 'exponential of Daily Akari rating: `2^(rating/400) * 100`',
 }
-
-_GITGUD_SCORE_DISTRIB = (1, 2, 3, 5, 8, 12, 17, 23)
-_GITGUD_SCORE_DISTRIB_MIN = -400
-_GITGUD_SCORE_DISTRIB_MAX = 300
-_ONE_WEEK_DURATION = 7 * 24 * 60 * 60
-_GITGUD_MORE_POINTS_START_TIME = 1680300000
-
 
 class RpollError(commands.CommandError):
     pass
@@ -87,25 +93,17 @@ def _apply_formula(formula, ratings):
 
 
 def _get_elo_win_probability(player_rating, opponent_rating):
-    """Match the team-rating win probability used by ;teamrate."""
-    return 1.0 / (1 + 10 ** ((opponent_rating - player_rating) / 400.0))
+    """Match the team-rating win probability used by ;teamrate (single source)."""
+    return getEloWinProbability(player_rating, opponent_rating)
 
 
 def _compose_team_rating(ratings):
-    """Match the team-rating composition used by ;teamrate."""
-    left = -100.0
-    right = 10000.0
-    rating_counts = Counter(ratings)
-    for _ in range(20):
-        candidate_rating = (left + right) / 2.0
-        win_probability = 1.0
-        for rating, count in rating_counts.items():
-            win_probability *= _get_elo_win_probability(candidate_rating, rating) ** count
-        if win_probability < 0.5:
-            left = candidate_rating
-        else:
-            right = candidate_rating
-    return round((left + right) / 2)
+    """Match the team-rating composition used by ;teamrate (single source).
+
+    Supplies the rpoll bounds and Counter-collapse, then defers to the
+    codeforces ``composeRatings`` binary search.
+    """
+    return composeRatings(-100.0, 10000.0, list(Counter(ratings).items()))
 
 
 def _compose_osu_score(ratings, decay=0.67):
@@ -116,13 +114,8 @@ def _compose_osu_score(ratings, decay=0.67):
 
 
 def _calculate_gitgud_score_for_delta(delta):
-    """Match the gg/mgg point distribution."""
-    if delta <= _GITGUD_SCORE_DISTRIB_MIN:
-        return _GITGUD_SCORE_DISTRIB[0]
-    if delta >= _GITGUD_SCORE_DISTRIB_MAX:
-        return _GITGUD_SCORE_DISTRIB[-1]
-    index = (delta - _GITGUD_SCORE_DISTRIB_MIN) // 100
-    return _GITGUD_SCORE_DISTRIB[index]
+    """Match the gg/mgg point distribution (single source: ;gitgud)."""
+    return _calculateGitgudScoreForDelta(delta)
 
 
 def _get_monthly_gitgud_score(user_id, created_at):
