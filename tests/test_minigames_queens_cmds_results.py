@@ -86,7 +86,7 @@ class TestQueensCommandsResults(_QueensCommandsBase):
         captured = {}
 
         async def extract_filters(_ctx, _args):
-            return [], None, None, None, None
+            return [], False, None, None, None, None
 
         async def capture_results(_ctx, date_arg, **_kwargs):
             captured['date'] = date_arg
@@ -103,39 +103,53 @@ class TestQueensCommandsResults(_QueensCommandsBase):
 
         assert captured['date'] == '2026-07-28'
 
-    def test_queens_rating_filters_reject_decay(self, db, monkeypatch):
+    def test_queens_rating_filters_accept_decay_reject_test(
+            self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         alice = _FakeDiscordMember(300, 'alice', 'Alice')
         guild = _FakeGuild(100, members=[alice])
         ctx = self._make_ctx(guild, alice)
         cog = Minigames(bot=None)
 
-        with pytest.raises(MinigameCogError, match='do not use decay'):
-            asyncio.run(cog._extract_queens_rating_filters(ctx, ['+decay']))
+        # Queens rates inactivity now, so +decay is a real view.
+        (remaining, include_decay, _excluded_ids, _included_ids, _weekdays,
+         _date_bounds) = asyncio.run(
+            cog._extract_queens_rating_filters(ctx, ['+decay']))
+        assert remaining == []
+        assert include_decay is True
 
-        (members, excluded_ids, included_ids, weekdays, date_bounds,
-         recalculate) = asyncio.run(cog._parse_queens_rating_args(
-            ctx, ['+recalculate'], allow_recalculate=True))
+        # +test (first-skip-last-place) stays Akari-only.
+        with pytest.raises(MinigameCogError, match=r'\+test'):
+            asyncio.run(cog._extract_queens_rating_filters(ctx, ['+test']))
+
+        (members, include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds, recalculate) = asyncio.run(
+            cog._parse_queens_rating_args(
+                ctx, ['+recalculate'], allow_recalculate=True))
         assert members == [alice]
+        assert include_decay is False
         assert recalculate is True
         assert not (excluded_ids or included_ids or weekdays or date_bounds)
 
         with pytest.raises(MinigameCogError, match='only supported'):
             asyncio.run(cog._parse_queens_rating_args(ctx, ['+recalculate']))
 
-        (remaining, excluded_ids, included_ids, weekdays, date_bounds) = asyncio.run(
+        (remaining, include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds) = asyncio.run(
             cog._extract_queens_rating_filters(
                 ctx, [
                     '+dow=mon,wed', '+include=alice',
                     'd>=08062026', 'd<10062026',
                 ]))
+        assert include_decay is False
         assert remaining == []
         assert excluded_ids == set()
         assert included_ids == {'300'}
         assert weekdays == {0, 2}
         assert date_bounds is not None
 
-        (remaining, excluded_ids, included_ids, weekdays, date_bounds) = asyncio.run(
+        (remaining, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds) = asyncio.run(
             cog._extract_queens_rating_filters(
                 ctx, ['+weekday=monday,wednesday,saturday']))
         assert remaining == []

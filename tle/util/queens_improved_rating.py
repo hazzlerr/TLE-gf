@@ -271,8 +271,9 @@ def compute_queens_improved_ratings(
 
     The return and history shapes match :func:`compute_ratings`, so every
     existing ``+beta`` table and graph can use this engine without storing
-    a second rating snapshot. Queens leaves inactivity decay disabled; Akari's
-    adapter supplies its own decay parameters. When enabled, above-start
+    a second rating snapshot. Inactivity decay is off unless the caller passes
+    decay parameters; both Queens and Akari now supply their own, so the beta
+    ladder decays exactly like the canonical one. When enabled, above-start
     absentees decay toward ``start_rating`` on concluded active days and their
     lost points are split equally among that day's valid participants. Each
     rated update is centered and then reduced by 0.25 points per participant;

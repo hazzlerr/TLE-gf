@@ -358,6 +358,52 @@ class TestQueensCommandsRatings(_QueensCommandsBase):
         assert 'solo' in pages[0][1].description
         assert '**#' not in pages[0][1].description
 
+    def test_queens_rating_decay_view_plots_absent_days(self, db, monkeypatch):
+        """``+decay`` threads inactivity days into the Queens rating graph."""
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        db.set_guild_config(100, 'queens', '1')
+        alice = _FakeDiscordMember(300, 'alice', 'Alice')
+        bob = _FakeDiscordMember(301, 'bob', 'Bob')
+        guild = _FakeGuild(100, members=[alice, bob])
+        ctx = self._make_ctx(guild, alice)
+        cog = Minigames(bot=object())
+
+        for member, name in ((alice, 'Alice LinkedIn'), (bob, 'Bob LinkedIn')):
+            db.set_minigame_player_link(
+                100, 'queens', member.id, name,
+                normalize_queens_name(name), None, 1.0, alice.id)
+        self._save_queens_result(db, 1, alice.id, '2026-06-08', 5)
+        self._save_queens_result(db, 2, bob.id, '2026-06-08', 10)
+        self._save_queens_result(db, 3, alice.id, '2026-06-09', 4)
+        self._save_queens_result(db, 4, bob.id, '2026-06-09', 9)
+        # Alice skips the last concluded day; bob keeps playing.
+        self._save_queens_result(db, 5, bob.id, '2026-06-10', 7)
+        cog._recompute_minigame_ratings(100, QUEENS_GAME)
+
+        captured = {}
+        fake_file = SimpleNamespace(filename='plot.png')
+
+        def _rating(series):
+            captured['dates'] = [
+                [str(point.puzzle_date) for point in history]
+                for history, _name in series
+            ]
+            captured['is_decay'] = [
+                [bool(getattr(point, 'is_decay', False)) for point in history]
+                for history, _name in series
+            ]
+            return fake_file
+        monkeypatch.setattr(minigames_module, 'plot_akari_rating', _rating)
+
+        asyncio.run(cog._cmd_queens_rating(ctx, [alice]))
+        assert captured['dates'] == [['2026-06-08', '2026-06-09']]
+        assert captured['is_decay'] == [[False, False]]
+
+        asyncio.run(cog._cmd_queens_rating(ctx, [alice], include_decay=True))
+        assert captured['dates'] == [
+            ['2026-06-08', '2026-06-09', '2026-06-10']]
+        assert captured['is_decay'] == [[False, False, True]]
+
     def test_queens_history_shows_solo_only_days(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         db.set_guild_config(100, 'queens', '1')

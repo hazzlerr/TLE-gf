@@ -3,7 +3,9 @@
 import datetime as dt
 import re
 from collections import namedtuple
+from zoneinfo import ZoneInfo
 
+from tle import constants
 from tle.cogs._minigame_common import (
     GameDef, ParsedResult, RatingDef, normalize_puzzle_date,
 )
@@ -17,6 +19,9 @@ _URL_RE = re.compile(r'https?://\S+', re.IGNORECASE)
 _DETECT_RE = re.compile(r'Queens|No hints|No mistakes|\b\d{1,2}:\d{2}\b', re.IGNORECASE)
 _QUEENS_ANCHOR_DATE = dt.date(2026, 6, 8)
 _QUEENS_ANCHOR_NUMBER = 769
+# LinkedIn rolls the daily puzzle over at midnight Pacific, so that — not the
+# host's local midnight — is what "today's puzzle" means everywhere in Queens.
+_QUEENS_TIME_ZONE = ZoneInfo('America/Los_Angeles')
 # LinkedIn ramps Queens up through each Monday-Sunday puzzle week.  Map the
 # four weekday bands directly to evenly spaced weekly-rating levels:
 # Easy, Medium, Hard, Very Hard.
@@ -62,6 +67,36 @@ def parse_queens_time(time_text):
 def _queens_date_for_puzzle_number(puzzle_number):
     return _QUEENS_ANCHOR_DATE + dt.timedelta(
         days=int(puzzle_number) - _QUEENS_ANCHOR_NUMBER)
+
+
+def _queens_puzzle_number_for_date(puzzle_date):
+    """Inverse of :func:`_queens_date_for_puzzle_number`.
+
+    The single source of truth for the Queens calendar — the cog-side module
+    re-exports this rather than carrying a second copy of the anchor, so the
+    decay gate and every command display can never drift apart.
+    """
+    puzzle_date = normalize_puzzle_date(puzzle_date)
+    return _QUEENS_ANCHOR_NUMBER + (puzzle_date - _QUEENS_ANCHOR_DATE).days
+
+
+def _queens_current_puzzle_date(now=None):
+    """Return the active LinkedIn puzzle date at midnight Pacific Time."""
+    if now is None:
+        now = dt.datetime.now(dt.timezone.utc)
+    return now.astimezone(_QUEENS_TIME_ZONE).date()
+
+
+def current_puzzle_number():
+    """The Queens puzzle that is in progress on LinkedIn's clock.
+
+    Inactivity decay is gated on this: today's puzzle has not concluded for
+    players who simply haven't posted yet, so it must not cost them rating.
+    Deliberately the Pacific puzzle day rather than the host's ``date.today()``
+    — a bot running east of Pacific would otherwise call the open day finished
+    and decay absentees hours before LinkedIn rolls the puzzle over.
+    """
+    return _queens_puzzle_number_for_date(_queens_current_puzzle_date())
 
 
 def parse_queens_message(content):
@@ -231,8 +266,9 @@ QUEENS_GAME = GameDef(
     result_group_key=queens_result_group_key,
     rating=RatingDef(
         rank_fn=rank_queens_participants,
-        decay_base=0.0,
-        decay_max=0.0,
-        decay_grace=0,
+        decay_base=constants.QUEENS_DECAY_BASE,
+        decay_max=constants.QUEENS_DECAY_MAX,
+        decay_grace=constants.QUEENS_DECAY_GRACE,
+        current_puzzle_number_fn=current_puzzle_number,
     ),
 )

@@ -411,7 +411,7 @@ class TestQueensImportMigration:
         assert akari.rating == 1500
         assert akari.games == 1
 
-    def test_queens_rating_does_not_decay_absent_players(self, db, monkeypatch):
+    def test_queens_rating_decays_absent_players(self, db, monkeypatch):
         monkeypatch.setattr(cf_common, 'user_db', db)
         for user_id, name in (
                 (300, 'Alice LinkedIn'),
@@ -440,5 +440,12 @@ class TestQueensImportMigration:
         cog._recompute_minigame_ratings(100, QUEENS_GAME)
 
         alice_after = db.get_minigame_rating(100, 'queens', 300)
-        assert abs(alice_after.rating - alice_before.rating) < 1e-9
         assert alice_after.skip_streak == 1
+        # First absent day closes decay_base of the gap back to the default.
+        expected = (
+            (constants.AKARI_START_RATING - alice_before.rating)
+            * constants.QUEENS_DECAY_BASE
+        )
+        assert alice_after.rating < alice_before.rating
+        assert abs(
+            (alice_after.rating - alice_before.rating) - expected) < 1e-9

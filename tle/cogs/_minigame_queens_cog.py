@@ -11,7 +11,6 @@ import hashlib
 import re
 from collections import namedtuple
 from types import SimpleNamespace
-from zoneinfo import ZoneInfo
 
 import discord
 
@@ -20,7 +19,15 @@ from tle.cogs._minigame_common import (
     format_duration, normalize_puzzle_date, pick_best_results,
     previous_streak_day,
 )
-from tle.cogs._minigame_queens import QUEENS_GAME
+# The Queens calendar (anchor, both date/number directions, and the Pacific
+# "today") lives in ``_minigame_queens`` because the rating definition there
+# gates inactivity decay on it.  Re-exported here so every existing
+# ``from _minigame_queens_cog import ...`` keeps working.
+from tle.cogs._minigame_queens import (
+    QUEENS_GAME, _QUEENS_ANCHOR_DATE, _QUEENS_ANCHOR_NUMBER,  # noqa: F401
+    _QUEENS_TIME_ZONE, _queens_current_puzzle_date,  # noqa: F401
+    _queens_date_for_puzzle_number, _queens_puzzle_number_for_date,
+)
 from tle.cogs._minigame_helpers import MinigameCogError
 
 
@@ -46,9 +53,6 @@ _QUEENS_HISTORY_PER_PAGE = 15
 _QUEENS_ANONYMOUS_LINK_MARKER = 'tle:queens:anonymous'
 _QUEENS_ANONYMOUS_LABEL = 'Anonymous'
 _QUEENS_ANONYMOUS_FLAGS = {'+anon', '+anonymous'}
-_QUEENS_ANCHOR_DATE = dt.date(2026, 6, 8)
-_QUEENS_ANCHOR_NUMBER = 769
-_QUEENS_TIME_ZONE = ZoneInfo('America/Los_Angeles')
 
 _QUEENS_ADMINS_KEY = 'queens_admin_user_ids'
 # Backfill JSON files can be much larger (years of history × many
@@ -80,16 +84,6 @@ def _parse_queens_date(date_text):
         f'Could not parse Queens date `{date_text}`. Use `YYYY-MM-DD`.')
 
 
-def _queens_puzzle_number_for_date(puzzle_date):
-    puzzle_date = normalize_puzzle_date(puzzle_date)
-    return _QUEENS_ANCHOR_NUMBER + (puzzle_date - _QUEENS_ANCHOR_DATE).days
-
-
-def _queens_date_for_puzzle_number(puzzle_number):
-    return _QUEENS_ANCHOR_DATE + dt.timedelta(
-        days=int(puzzle_number) - _QUEENS_ANCHOR_NUMBER)
-
-
 def _parse_queens_date_or_number(value):
     try:
         return _parse_queens_date(value)
@@ -100,13 +94,6 @@ def _parse_queens_date_or_number(value):
         if text.isdigit():
             return _queens_date_for_puzzle_number(int(text))
         raise
-
-
-def _queens_current_puzzle_date(now=None):
-    """Return the active LinkedIn puzzle date at midnight Pacific Time."""
-    if now is None:
-        now = dt.datetime.now(dt.timezone.utc)
-    return now.astimezone(_QUEENS_TIME_ZONE).date()
 
 
 def _queens_puzzle_numbers_for_date(puzzle_date):

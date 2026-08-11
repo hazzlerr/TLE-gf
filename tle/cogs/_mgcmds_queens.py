@@ -177,7 +177,8 @@ class QueensCmdsMixin:
             arg for arg in args
             if str(arg).strip().casefold() != '+unrated')
         args, improved = _split_queens_improved_filter(args)
-        remaining, excluded_ids, included_ids, weekdays, date_bounds = (
+        (remaining, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds) = (
             await self._extract_queens_rating_filters(ctx, args))
         if len(remaining) > 1:
             raise MinigameCogError(
@@ -201,7 +202,8 @@ class QueensCmdsMixin:
     @queens_mod_only()
     async def queens_results_debug(self, ctx, *args):
         args, improved = _split_queens_improved_filter(args)
-        remaining, excluded_ids, included_ids, weekdays, date_bounds = (
+        (remaining, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds) = (
             await self._extract_queens_rating_filters(ctx, args))
         if len(remaining) > 1:
             raise MinigameCogError(
@@ -317,7 +319,8 @@ class QueensCmdsMixin:
         weekly = '+weekly' in args
         args = tuple(arg for arg in args if arg != '+weekly')
         args, improved = _split_queens_improved_filter(args)
-        remaining, excluded_ids, included_ids, weekdays, date_bounds = (
+        (remaining, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds) = (
             await self._extract_queens_rating_filters(ctx, args))
         if remaining:
             raise MinigameCogError(
@@ -331,31 +334,32 @@ class QueensCmdsMixin:
 
     @queens.group(name='rating',
                   brief='Show Queens rating graph',
-                  usage='[@user1 @user2 ...] [+beta] [+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date] [+recalculate]',
+                  usage='[@user1 @user2 ...] [+decay] [+beta] [+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date] [+recalculate]',
                   invoke_without_command=True)
     async def queens_rating(self, ctx, *args):
         args, improved = _split_queens_improved_filter(args)
-        (members, excluded_ids, included_ids, weekdays, date_bounds,
-         recalculate) = await self._parse_queens_rating_args(
+        (members, include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds, recalculate) = await self._parse_queens_rating_args(
             ctx, args, allow_recalculate=True)
         await self._cmd_queens_rating(
-            ctx, members,
+            ctx, members, include_decay=include_decay,
             excluded_ids=excluded_ids, included_ids=included_ids,
             weekdays=weekdays, date_bounds=date_bounds,
             recalculate=recalculate, improved=improved)
 
     @queens_rating.command(name='debug',
                            brief='(Mod) Rating graph for any rated user',
-                           usage='@user1 [@user2 ...] [+beta] [+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date] [+recalculate]')
+                           usage='@user1 [@user2 ...] [+decay] [+beta] [+exclude=…] [+include=…] [+dow=mon,wed|weekday|weekend] [d>=date] [d<date] [+recalculate]')
     @queens_mod_only()
     async def queens_rating_debug(self, ctx, *args):
         args, improved = _split_queens_improved_filter(args)
-        (members, excluded_ids, included_ids, weekdays, date_bounds,
-         recalculate) = (
+        (members, include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds, recalculate) = (
             await self._parse_queens_rating_args(
                 ctx, args, member_required=True, allow_recalculate=True))
         await self._cmd_queens_rating(
             ctx, members, require_registered=False,
+            include_decay=include_decay,
             excluded_ids=excluded_ids, included_ids=included_ids,
             weekdays=weekdays, date_bounds=date_bounds,
             recalculate=recalculate, improved=improved)
@@ -366,7 +370,8 @@ class QueensCmdsMixin:
                   invoke_without_command=True)
     async def queens_performance(self, ctx, *args):
         args, improved = _split_queens_improved_filter(args)
-        members, excluded_ids, included_ids, weekdays, date_bounds, _recalculate = (
+        (members, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds, _recalculate) = (
             await self._parse_queens_rating_args(ctx, args))
         await self._cmd_queens_performance(
             ctx, members,
@@ -379,7 +384,8 @@ class QueensCmdsMixin:
     @queens_mod_only()
     async def queens_performance_debug(self, ctx, *args):
         args, improved = _split_queens_improved_filter(args)
-        members, excluded_ids, included_ids, weekdays, date_bounds, _recalculate = (
+        (members, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds, _recalculate) = (
             await self._parse_queens_rating_args(
                 ctx, args, member_required=True))
         await self._cmd_queens_performance(
@@ -393,7 +399,8 @@ class QueensCmdsMixin:
                   invoke_without_command=True)
     async def queens_history(self, ctx, *args):
         args, improved = _split_queens_improved_filter(args)
-        members, excluded_ids, included_ids, weekdays, date_bounds, _recalculate = (
+        (members, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds, _recalculate) = (
             await self._parse_queens_rating_args(ctx, args))
         if len(members) != 1:
             raise MinigameCogError(
@@ -409,7 +416,8 @@ class QueensCmdsMixin:
     @queens_mod_only()
     async def queens_history_debug(self, ctx, *args):
         args, improved = _split_queens_improved_filter(args)
-        members, excluded_ids, included_ids, weekdays, date_bounds, _recalculate = (
+        (members, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds, _recalculate) = (
             await self._parse_queens_rating_args(
                 ctx, args, member_required=True))
         if len(members) != 1:
@@ -434,7 +442,8 @@ class QueensCmdsMixin:
         weekly = '+weekly' in args
         args = tuple(arg for arg in args if arg != '+weekly')
         args, improved = _split_queens_improved_filter(args)
-        remaining, excluded_ids, included_ids, weekdays, date_bounds = (
+        (remaining, _include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds) = (
             await self._extract_queens_rating_filters(ctx, args))
         if remaining:
             raise MinigameCogError(

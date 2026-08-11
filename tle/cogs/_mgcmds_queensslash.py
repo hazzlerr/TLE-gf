@@ -257,6 +257,7 @@ class QueensSlashMixin:
         weekdays='Queens days: mon,wed, weekday, or weekend',
         date_filter='Rating date filter, e.g. d>=01062026 d<08062026',
         recalculate='Recalculate ratings from the filtered result set',
+        decay='Show inactivity days on the graph',
         beta='Use the beta testing rating system')
     async def slash_queens_rating(
         self, interaction: discord.Interaction,
@@ -264,6 +265,7 @@ class QueensSlashMixin:
         weekdays: Optional[str] = None,
         date_filter: Optional[str] = None,
         recalculate: Optional[bool] = False,
+        decay: bool = False,
         beta: bool = False,
     ):
         await interaction.response.defer()
@@ -271,6 +273,7 @@ class QueensSlashMixin:
         try:
             await self._cmd_queens_rating(
                 _SlashCtx(interaction), [target],
+                include_decay=bool(decay),
                 weekdays=self._slash_queens_weekdays(weekdays),
                 date_bounds=self._slash_queens_date_bounds(date_filter),
                 recalculate=bool(recalculate), improved=beta)

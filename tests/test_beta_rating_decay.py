@@ -1,11 +1,14 @@
-"""Akari beta decay behavior and Queens beta decay isolation."""
+"""Akari and Queens beta decay behavior."""
 
+import datetime as dt
 import math
 from collections import namedtuple
 
 from tle import constants
+from tle.cogs import _minigame_queens as queens_module
+from tle.cogs import _minigame_queens_cog as queens_cog_module
 from tle.cogs._mgimpl_rating import ImplRatingMixin
-from tle.cogs._minigame_queens import QUEENS_GAME
+from tle.cogs._minigame_queens import QUEENS_GAME, current_puzzle_number
 from tle.util.akari_beta_rating import compute_akari_beta_ratings
 from tle.util.queens_improved_rating import (
     _FIELD_DEFLATION,
@@ -149,19 +152,47 @@ def test_akari_beta_adapter_uses_the_shared_decay_engine():
     )
 
 
-def test_queens_beta_runtime_keeps_canonical_no_decay_policy():
+def test_queens_beta_runtime_keeps_canonical_decay_policy():
     mixin = ImplRatingMixin()
     canonical = mixin._minigame_compute_kwargs(
         QUEENS_GAME, improved=False)
     beta = mixin._minigame_compute_kwargs(QUEENS_GAME, improved=True)
 
-    assert canonical['decay_base'] == 0.0
-    assert canonical['decay_max'] == 0.0
+    assert canonical['decay_base'] == constants.QUEENS_DECAY_BASE
+    assert canonical['decay_max'] == constants.QUEENS_DECAY_MAX
     assert beta == canonical
-    assert beta['decay_base'] == 0.0
-    assert beta['decay_max'] == 0.0
-    assert beta['decay_grace'] == 0
-    assert 'current_puzzle_number' not in beta
+    assert beta['decay_base'] == constants.QUEENS_DECAY_BASE
+    assert beta['decay_max'] == constants.QUEENS_DECAY_MAX
+    assert beta['decay_grace'] == constants.QUEENS_DECAY_GRACE
+    # The in-progress puzzle must not decay players who haven't posted yet.
+    assert beta['current_puzzle_number'] == current_puzzle_number()
+
+
+def test_queens_decay_gate_follows_the_pacific_puzzle_day(monkeypatch):
+    """The open day is LinkedIn's, not the host's ``date.today()``."""
+    monkeypatch.setattr(
+        queens_module, '_queens_current_puzzle_date',
+        lambda: dt.date(2026, 6, 8))
+    assert current_puzzle_number() == 769
+
+    monkeypatch.setattr(
+        queens_module, '_queens_current_puzzle_date',
+        lambda: dt.date(2026, 6, 9))
+    assert current_puzzle_number() == 770
+
+
+def test_queens_calendar_has_a_single_source_of_truth():
+    """The cog module re-exports the anchor helpers, never a second copy."""
+    assert (queens_cog_module._queens_puzzle_number_for_date
+            is queens_module._queens_puzzle_number_for_date)
+    assert (queens_cog_module._queens_date_for_puzzle_number
+            is queens_module._queens_date_for_puzzle_number)
+    assert (queens_cog_module._queens_current_puzzle_date
+            is queens_module._queens_current_puzzle_date)
+    assert (queens_cog_module._QUEENS_ANCHOR_DATE
+            is queens_module._QUEENS_ANCHOR_DATE)
+    assert (queens_cog_module._QUEENS_ANCHOR_NUMBER
+            == queens_module._QUEENS_ANCHOR_NUMBER)
 
 
 def test_queens_beta_engine_defaults_to_no_decay():

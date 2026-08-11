@@ -137,15 +137,25 @@ class ImplQueensCmdMixin:
             f'{QUEENS_GAME.display_name} ratings recomputed.'))
 
     async def _extract_queens_rating_filters(self, ctx, args):
+        """Split Queens rating flags, mirroring the Akari six-tuple shape.
+
+        ``+decay`` is a real view now that Queens rates inactivity like Akari:
+        it threads absent days into the rating graph.  Commands with nothing
+        to draw it on accept and ignore it, exactly as the Akari ones do.
+        ``+test`` stays Akari-only — the first-skip-last-place experiment is
+        not wired into the Queens compute kwargs.
+        """
         args, weekdays = _split_queens_weekday_filter(args)
         args, date_bounds = _split_queens_rating_date_filter(args)
         (remaining, include_decay, excluded_ids, included_ids,
          _include_inactive, test_decay) = await self._extract_akari_filters(
             ctx, args)
-        if include_decay or test_decay:
+        if test_decay:
             raise MinigameCogError(
-                f'{QUEENS_GAME.display_name} ratings do not use decay.')
-        return remaining, excluded_ids, included_ids, weekdays, date_bounds
+                f'`+test` is not supported for {QUEENS_GAME.display_name} '
+                f'ratings.')
+        return (remaining, include_decay, excluded_ids, included_ids,
+                weekdays, date_bounds)
 
     async def _parse_queens_rating_args(self, ctx, args, *,
                                         member_required=False,
@@ -154,7 +164,8 @@ class ImplQueensCmdMixin:
         if recalculate and not allow_recalculate:
             raise MinigameCogError(
                 '`+recalculate` is only supported by `;queens rating`.')
-        remaining, excluded_ids, included_ids, weekdays, date_bounds = (
+        (remaining, include_decay, excluded_ids, included_ids, weekdays,
+         date_bounds) = (
             await self._extract_queens_rating_filters(ctx, args))
         members = [await self._resolve_member(ctx, token) for token in remaining]
         if not members:
@@ -162,8 +173,8 @@ class ImplQueensCmdMixin:
                 raise MinigameCogError('A user is required for this command.')
             members = [ctx.author]
         return (
-            members, excluded_ids, included_ids, weekdays, date_bounds,
-            recalculate,
+            members, include_decay, excluded_ids, included_ids, weekdays,
+            date_bounds, recalculate,
         )
 
     async def _cmd_queens_ratings(self, ctx, *, show_all=False,
@@ -305,9 +316,16 @@ class ImplQueensCmdMixin:
 
     async def _cmd_queens_rating(self, ctx, members, *,
                                  require_registered=True,
+                                 include_decay=False,
                                  excluded_ids=None, included_ids=None,
                                  weekdays=None, date_bounds=None,
                                  recalculate=False, improved=False):
+        """Per-user Queens rating graph.
+
+        ``include_decay=True`` (the ``+decay`` arg) threads inactivity days
+        into the plotted history so absent-day slopes are visible; played days
+        stay the marker anchors, and solo days remain omitted either way.
+        """
         self._require_enabled(ctx.guild.id, QUEENS_GAME)
         if not improved:
             self._recompute_minigame_ratings(ctx.guild.id, QUEENS_GAME)
@@ -323,6 +341,7 @@ class ImplQueensCmdMixin:
             if filtered:
                 row, history = self._minigame_user_data(
                     ctx.guild.id, QUEENS_GAME, member.id,
+                    include_decay=include_decay,
                     excluded_ids=excluded_ids, included_ids=included_ids,
                     weekdays=weekdays, date_bounds=replay_date_bounds,
                     improved=improved)
@@ -330,7 +349,8 @@ class ImplQueensCmdMixin:
                 row = cf_common.user_db.get_minigame_rating(
                     ctx.guild.id, QUEENS_GAME.name, member.id)
                 history = self._minigame_user_history(
-                    ctx.guild.id, QUEENS_GAME, member.id)
+                    ctx.guild.id, QUEENS_GAME, member.id,
+                    include_decay=include_decay)
             if not recalculate:
                 history = _filter_queens_rating_date_history(history, date_bounds)
             if row is None:
@@ -341,7 +361,8 @@ class ImplQueensCmdMixin:
                 raise MinigameCogError(
                     f'`{self._queens_public_user_name(ctx.guild, member.id)}` has no rated '
                     f'{QUEENS_GAME.display_name} days to plot yet.')
-            graph_history = _filter_queens_contested_rating_history(history)
+            graph_history = _filter_queens_contested_rating_history(
+                history, keep_decay=include_decay)
             if not graph_history:
                 raise MinigameCogError(
                     f'`{self._queens_public_user_name(ctx.guild, member.id)}` has no contested '

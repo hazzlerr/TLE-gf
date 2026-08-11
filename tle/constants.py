@@ -83,6 +83,17 @@ AKARI_MAX_PUZZLE_LOOKAHEAD = 2
 # Players who haven't played within this many days are hidden from the ranking.
 AKARI_RANKING_MAX_INACTIVE_DAYS = 30
 
+# ── LinkedIn Queens minigame (tle/cogs/_minigame_queens.py) ────────────────
+# Inactivity decay, same shape and the same values as the Akari knobs above:
+# every consecutive skipped Queens day pulls an above-default rating toward the
+# starting rating by min(QUEENS_DECAY_MAX, base*(streak-grace)) of the remaining
+# gap, and the lost points are redistributed to that day's active players. Kept
+# as separate constants (rather than aliasing the Akari ones) so the two ladders
+# can be tuned independently later.
+QUEENS_DECAY_BASE = 0.04
+QUEENS_DECAY_MAX = 0.08
+QUEENS_DECAY_GRACE = 0
+
 # ── Soccer betting minigame (tle/cogs/betting.py) ──────────────────────────
 # Live 1X2 odds and final scores come from The Odds API (the-odds-api.com).
 # Set ODDS_API_KEY to a free-tier key to enable `;bet matches`/`;bet open` and
