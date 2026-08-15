@@ -88,23 +88,26 @@ class AkariSlashMixin:
         except Exception as _slash_exc:
             await self._slash_handle_error(interaction, _slash_exc)
 
-    @akari_slash.command(name='top', description='Show winners leaderboard')
+    @akari_slash.command(name='top', description='Show outright winners leaderboard')
     @app_commands.describe(
         timeframe='Time period filter', mode='Scoring mode',
-        weekdays='Days: mon,wed, weekday, or weekend')
+        weekdays='Days: mon,wed, weekday, or weekend',
+        ties='Also count shared wins, ordered by the combined total')
     @app_commands.choices(timeframe=_TIMEFRAME_CHOICES, mode=_MODE_CHOICES)
     async def slash_akari_top(
         self, interaction: discord.Interaction,
         timeframe: Optional[app_commands.Choice[str]] = None,
         mode: Optional[app_commands.Choice[str]] = None,
         weekdays: Optional[str] = None,
+        ties: bool = False,
     ):
         await interaction.response.defer()
         try:
             await self._cmd_top(
                 _SlashCtx(interaction), AKARI_GAME,
                 *self._slash_choice_args(timeframe, mode),
-                *self._slash_queens_weekday_args(weekdays))
+                *self._slash_queens_weekday_args(weekdays),
+                *(('+ties',) if ties else ()))
         except Exception as _slash_exc:
             await self._slash_handle_error(interaction, _slash_exc)
 

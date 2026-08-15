@@ -138,23 +138,27 @@ class QueensSlashMixin:
         except Exception as _slash_exc:
             await self._slash_handle_error(interaction, _slash_exc)
 
-    @queens_slash.command(name='top', description='Show fastest-result winners')
+    @queens_slash.command(
+        name='top', description='Show outright fastest-result winners')
     @app_commands.describe(
         timeframe='Time period filter', mode='Scoring mode',
-        weekdays='Queens days: mon,wed, weekday, or weekend')
+        weekdays='Queens days: mon,wed, weekday, or weekend',
+        ties='Also count shared wins, ordered by the combined total')
     @app_commands.choices(timeframe=_TIMEFRAME_CHOICES, mode=_MODE_CHOICES)
     async def slash_queens_top(
         self, interaction: discord.Interaction,
         timeframe: Optional[app_commands.Choice[str]] = None,
         mode: Optional[app_commands.Choice[str]] = None,
         weekdays: Optional[str] = None,
+        ties: bool = False,
     ):
         await interaction.response.defer()
         try:
             await self._cmd_top(
                 _SlashCtx(interaction), QUEENS_GAME,
                 *self._slash_choice_args(timeframe, mode),
-                *self._slash_queens_weekday_args(weekdays))
+                *self._slash_queens_weekday_args(weekdays),
+                *(('+ties',) if ties else ()))
         except Exception as _slash_exc:
             await self._slash_handle_error(interaction, _slash_exc)
 

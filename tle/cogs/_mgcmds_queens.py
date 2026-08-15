@@ -151,8 +151,15 @@ class QueensCmdsMixin:
             ctx, QUEENS_GAME, arguments)
         await self._cmd_vs_members(ctx, QUEENS_GAME, members, *filters)
 
-    @queens.command(name='top', brief='Show fastest-result winners',
-                    usage='[filters...] [+dow=mon,wed|weekday|weekend]')
+    @queens.command(name='week', aliases=['weekly'],
+                    brief='Show the weekly server recap',
+                    usage='[YYYY-MM-DD|last]')
+    async def queens_week(self, ctx, *args):
+        await self._cmd_week(ctx, QUEENS_GAME, *args)
+
+    @queens.command(name='top', brief='Show outright fastest-result winners',
+                    usage='[+ties] [filters...] '
+                          '[+dow=mon,wed|weekday|weekend]')
     async def queens_top(self, ctx, *args):
         await self._cmd_top(ctx, QUEENS_GAME, *args)
 

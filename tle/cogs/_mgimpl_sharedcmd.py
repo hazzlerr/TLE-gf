@@ -12,7 +12,8 @@ from tle.util import ranking
 
 from tle.cogs._minigame_common import (
     compute_vs, compute_vs_matchups, compute_streak, compute_longest_streak,
-    compute_top, pick_best_results, format_duration, parse_date_args, resolve_scoring,
+    compute_top_breakdown, pick_best_results, format_duration, parse_date_args,
+    resolve_scoring,
 )
 from tle.cogs._minigame_akari import (
     AKARI_GAME,
@@ -353,6 +354,11 @@ class ImplSharedCmdMixin:
     async def _cmd_top(self, ctx, game, *args):
         self._require_enabled(ctx.guild.id, game)
         self._sync_minigame_results_for_read(ctx.guild.id, game)
+        show_ties = any(
+            str(arg).strip().casefold() == '+ties' for arg in args)
+        args = tuple(
+            arg for arg in args
+            if str(arg).strip().casefold() != '+ties')
         try:
             args, scoring_name, scoring = resolve_scoring(game, args)
             args, weekdays = _split_queens_weekday_filter(args)
@@ -370,7 +376,7 @@ class ImplSharedCmdMixin:
         if game.name == QUEENS_GAME.name:
             rows = self._filter_queens_registered_result_rows(ctx.guild.id, rows)
         rows = _filter_queens_weekday_rows(rows, weekdays)
-        winners = compute_top(
+        winners = compute_top_breakdown(
             rows,
             is_eligible=scoring.is_eligible_winner,
             best_result_sort_key_fn=scoring.best_result_sort_key,
@@ -378,27 +384,46 @@ class ImplSharedCmdMixin:
             group_key_fn=scoring.result_group_key,
             min_participants=(2 if game.name == QUEENS_GAME.name else 1),
         )
+        if not show_ties:
+            # Outright wins only; a player who never won a puzzle alone drops off.
+            winners = sorted(
+                ((user_id, solo, tied) for user_id, solo, tied in winners
+                 if solo),
+                key=lambda item: (-item[1], int(item[0])),
+            )
         if not winners:
             raise MinigameCogError(
-                f'No {game.display_name} winners found for this range.')
+                f'No {game.display_name} '
+                f'{"winners" if show_ties else "outright winners"} '
+                f'found for this range.')
 
         suffix_parts = []
         if scoring_name:
             suffix_parts.append(scoring_name.title())
+        if show_ties:
+            suffix_parts.append('With Ties')
         weekday_label = _format_queens_weekday_filter(weekdays)
         if weekday_label:
             suffix_parts.append(weekday_label)
         title_suffix = f' ({", ".join(suffix_parts)})' if suffix_parts else ''
         # Standard competition ranking so users tied on win count share a rank
         # instead of being split by the secondary (user_id) sort.
-        ranked = ranking.rank_items(winners, lambda item: item[1])
+        rank_key = (
+            (lambda item: item[1] + item[2]) if show_ties
+            else (lambda item: item[1]))
+        ranked = ranking.rank_items(winners, rank_key)
         pages = []
         per_page = 10
         for chunk in paginator.chunkify(ranked, per_page):
             lines = []
-            for rank, (user_id, wins) in chunk:
+            for rank, (user_id, solo, tied) in chunk:
                 name = self._minigame_public_user_name(ctx.guild, game, user_id)
-                lines.append(f'**#{rank}** `{name}` — **{wins}** wins')
+                if show_ties:
+                    lines.append(
+                        f'**#{rank}** `{name}` — **{solo + tied}** wins '
+                        f'({solo} solo, {tied} tied)')
+                else:
+                    lines.append(f'**#{rank}** `{name}` — **{solo}** wins')
             embed = discord.Embed(
                 title=f'{game.display_name} Winners{title_suffix}',
                 description='\n'.join(lines),

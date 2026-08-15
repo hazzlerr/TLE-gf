@@ -154,8 +154,14 @@ class AkariCmdsMixin:
     async def akari_streak(self, ctx, *args):
         await self._cmd_streak(ctx, AKARI_GAME, *args)
 
-    @akari.command(name='top', brief='Show winners leaderboard',
-                   usage='[filters...] [raw|all]')
+    @akari.command(name='week', aliases=['weekly'],
+                   brief='Show the weekly server recap',
+                   usage='[YYYY-MM-DD|last]')
+    async def akari_week(self, ctx, *args):
+        await self._cmd_week(ctx, AKARI_GAME, *args)
+
+    @akari.command(name='top', brief='Show outright winners leaderboard',
+                   usage='[+ties] [filters...] [raw|all]')
     async def akari_top(self, ctx, *args):
         await self._cmd_top(ctx, AKARI_GAME, *args)
 

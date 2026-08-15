@@ -106,6 +106,7 @@ from tle.cogs._mgimpl_ingest import ImplIngestMixin
 from tle.cogs._mgimpl_import import ImplImportMixin
 from tle.cogs._mgimpl_sharedcmd import ImplSharedCmdMixin
 from tle.cogs._mgimpl_vs import ImplVsMixin
+from tle.cogs._mgimpl_weekly import ImplWeeklyMixin
 from tle.cogs._mgimpl_akaria import ImplAkariAMixin
 from tle.cogs._mgimpl_akarib import ImplAkariBMixin
 from tle.cogs._mgimpl_akaric import ImplAkariCMixin
@@ -153,6 +154,7 @@ class Minigames(
     ImplImportMixin,
     ImplSharedCmdMixin,
     ImplVsMixin,
+    ImplWeeklyMixin,
     ImplAkariAMixin,
     ImplAkariBMixin,
     ImplAkariCMixin,
