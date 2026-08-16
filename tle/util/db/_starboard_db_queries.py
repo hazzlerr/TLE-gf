@@ -78,7 +78,11 @@ class StarboardQueriesDbMixin:
         placeholders = ','.join('?' * len(emoji_family))
         query = f'''
             SELECT r.user_id, COUNT(DISTINCT m.original_msg_id) as stars_given
-            FROM starboard_reactors r
+            FROM (
+                SELECT original_msg_id, emoji, user_id FROM starboard_reactors
+                UNION
+                SELECT original_msg_id, emoji, user_id FROM starboard_proxy_reactors
+            ) r
             JOIN starboard_message_v1 m
                 ON r.original_msg_id = m.original_msg_id AND m.emoji = ?
             WHERE m.guild_id = ? AND r.emoji IN ({placeholders})
@@ -103,7 +107,11 @@ class StarboardQueriesDbMixin:
         placeholders = ','.join('?' * len(emoji_family))
         query = f'''
             SELECT r.user_id, COUNT(DISTINCT m.original_msg_id) as self_stars
-            FROM starboard_reactors r
+            FROM (
+                SELECT original_msg_id, emoji, user_id FROM starboard_reactors
+                UNION
+                SELECT original_msg_id, emoji, user_id FROM starboard_proxy_reactors
+            ) r
             JOIN starboard_message_v1 m
                 ON r.original_msg_id = m.original_msg_id AND m.emoji = ?
             WHERE m.guild_id = ? AND r.emoji IN ({placeholders})
@@ -159,24 +167,25 @@ class StarboardQueriesDbMixin:
         # Look up the main emoji before deleting the alias
         main_emoji = self.resolve_alias(guild_id, alias_emoji)
         if main_emoji is not None:
-            # Migrate alias reactors to main emoji, scoped to this guild's messages
-            self.conn.execute('''
-                INSERT OR IGNORE INTO starboard_reactors (original_msg_id, emoji, user_id)
-                SELECT r.original_msg_id, ?, r.user_id
-                FROM starboard_reactors r
-                WHERE r.emoji = ?
-                  AND r.original_msg_id IN (
-                      SELECT original_msg_id FROM starboard_message_v1 WHERE guild_id = ?
-                  )
-            ''', (main_emoji, alias_emoji, guild_id))
-            # Delete alias reactor rows only for this guild's messages
-            self.conn.execute('''
-                DELETE FROM starboard_reactors
-                WHERE emoji = ?
-                  AND original_msg_id IN (
-                      SELECT original_msg_id FROM starboard_message_v1 WHERE guild_id = ?
-                  )
-            ''', (alias_emoji, guild_id))
+            for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+                # Migrate alias reactors to main emoji, scoped to this guild's messages
+                self.conn.execute(f'''
+                    INSERT OR IGNORE INTO {table} (original_msg_id, emoji, user_id)
+                    SELECT r.original_msg_id, ?, r.user_id
+                    FROM {table} r
+                    WHERE r.emoji = ?
+                      AND r.original_msg_id IN (
+                          SELECT original_msg_id FROM starboard_message_v1 WHERE guild_id = ?
+                      )
+                ''', (main_emoji, alias_emoji, guild_id))
+                # Delete alias reactor rows only for this guild's messages
+                self.conn.execute(f'''
+                    DELETE FROM {table}
+                    WHERE emoji = ?
+                      AND original_msg_id IN (
+                          SELECT original_msg_id FROM starboard_message_v1 WHERE guild_id = ?
+                      )
+                ''', (alias_emoji, guild_id))
         rc = self.conn.execute(
             'DELETE FROM starboard_alias WHERE guild_id = ? AND alias_emoji = ?',
             (guild_id, alias_emoji)

@@ -72,21 +72,31 @@ def _setup_boards(db):
 
 
 class TestReactionAddExclusion:
-    def test_reaction_on_starboard_post_is_ignored(self, db, monkeypatch):
+    def test_reaction_on_starboard_post_targets_the_original(self, db, monkeypatch):
+        """A starboard post is never starred itself — the reaction is
+        forwarded to the original message (proxy path)."""
         _setup_boards(db)
         cog, calls = _build_cog(monkeypatch, db)
         payload = _FakePayload(GUILD_A, STAR_CHANNEL, SB_POST_MSG, 'u1', STAR)
         asyncio.run(cog._handle_reaction_add(payload))
-        assert calls == [], 'a starboard post must not be starred'
+        assert len(calls) == 1
+        args, kwargs = calls[0]
+        assert args[4].message_id == ORIGINAL_MSG, \
+            'the engine must run for the original, never the bot post'
+        assert kwargs['record_reactor'] is False
 
-    def test_cross_board_reaction_on_starboard_post_is_ignored(self, db, monkeypatch):
+    def test_cross_board_reaction_on_starboard_post_targets_the_original(
+            self, db, monkeypatch):
         """The exact abuse: pill react on a star-board post must not move the
-        bot's post onto the pill board."""
+        bot's post onto the pill board — it counts for the original instead."""
         _setup_boards(db)
         cog, calls = _build_cog(monkeypatch, db)
         payload = _FakePayload(GUILD_A, STAR_CHANNEL, SB_POST_MSG, 'u1', PILL)
         asyncio.run(cog._handle_reaction_add(payload))
-        assert calls == []
+        assert len(calls) == 1
+        args, _ = calls[0]
+        assert args[0] == PILL_CHANNEL, 'a pill react targets the pill board'
+        assert args[4].message_id == ORIGINAL_MSG
         assert not db.check_exists_starboard_message_v1(SB_POST_MSG, PILL)
 
     def test_reaction_in_starboard_channel_is_ignored(self, db, monkeypatch):

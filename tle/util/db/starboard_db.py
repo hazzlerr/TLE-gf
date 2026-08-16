@@ -14,14 +14,17 @@ from tle.util.db._starboard_db_constants import (
     _NO_TIME_BOUND,
     snowflake_to_unix_sql,
 )
+from tle.util.db._starboard_db_proxy import StarboardProxyDbMixin
 from tle.util.db._starboard_db_queries import StarboardQueriesDbMixin
 
 
-class StarboardDbMixin(StarboardQueriesDbMixin):
+class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
     """Mixin providing all starboard DB methods. Expects self.conn to be a sqlite3 connection.
 
     Leaderboard, alias and per-user-default methods are inherited from
-    StarboardQueriesDbMixin (split out to keep this module under 500 lines)."""
+    StarboardQueriesDbMixin; proxy reactor tracking and the pooled reactor
+    counts from StarboardProxyDbMixin (split out to keep this module under
+    500 lines)."""
 
     def _create_starboard_tables(self):
         self.conn.execute(
@@ -69,6 +72,16 @@ class StarboardDbMixin(StarboardQueriesDbMixin):
         # Starboard reactors — tracks which users reacted with which emoji
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS starboard_reactors (
+                original_msg_id TEXT,
+                emoji           TEXT,
+                user_id         TEXT,
+                PRIMARY KEY (original_msg_id, emoji, user_id)
+            )
+        ''')
+        # Proxy reactors — reactions on the bot's starboard posts, keyed by
+        # the original message they stand in for (see _starboard_db_proxy)
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS starboard_proxy_reactors (
                 original_msg_id TEXT,
                 emoji           TEXT,
                 user_id         TEXT,
@@ -184,13 +197,14 @@ class StarboardDbMixin(StarboardQueriesDbMixin):
         all_emojis = [emoji] + alias_emojis
         placeholders = ','.join('?' * len(all_emojis))
         # Clean up reactors for messages belonging to this guild+emoji (including alias reactors)
-        self.conn.execute(f'''
-            DELETE FROM starboard_reactors
-            WHERE emoji IN ({placeholders}) AND original_msg_id IN (
-                SELECT original_msg_id FROM starboard_message_v1
-                WHERE guild_id = ? AND emoji = ?
-            )
-        ''', (*all_emojis, guild_id, emoji))
+        for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+            self.conn.execute(f'''
+                DELETE FROM {table}
+                WHERE emoji IN ({placeholders}) AND original_msg_id IN (
+                    SELECT original_msg_id FROM starboard_message_v1
+                    WHERE guild_id = ? AND emoji = ?
+                )
+            ''', (*all_emojis, guild_id, emoji))
         self.conn.execute(
             'DELETE FROM starboard_emoji_v1 WHERE guild_id = ? AND emoji = ?',
             (guild_id, emoji)
@@ -273,24 +287,27 @@ class StarboardDbMixin(StarboardQueriesDbMixin):
             # Look up the message first to cascade-delete reactors
             msg = self.get_starboard_message_by_starboard_id(starboard_msg_id)
             if msg:
-                self.conn.execute(
-                    'DELETE FROM starboard_reactors WHERE original_msg_id = ? AND emoji = ?',
-                    (msg.original_msg_id, msg.emoji)
-                )
+                for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+                    self.conn.execute(
+                        f'DELETE FROM {table} WHERE original_msg_id = ? AND emoji = ?',
+                        (msg.original_msg_id, msg.emoji)
+                    )
             query = 'DELETE FROM starboard_message_v1 WHERE starboard_msg_id = ?'
             rc = self.conn.execute(query, (str(starboard_msg_id),)).rowcount
         elif original_msg_id is not None and emoji is not None:
-            self.conn.execute(
-                'DELETE FROM starboard_reactors WHERE original_msg_id = ? AND emoji = ?',
-                (str(original_msg_id), emoji)
-            )
+            for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+                self.conn.execute(
+                    f'DELETE FROM {table} WHERE original_msg_id = ? AND emoji = ?',
+                    (str(original_msg_id), emoji)
+                )
             query = 'DELETE FROM starboard_message_v1 WHERE original_msg_id = ? AND emoji = ?'
             rc = self.conn.execute(query, (str(original_msg_id), emoji)).rowcount
         elif original_msg_id is not None:
-            self.conn.execute(
-                'DELETE FROM starboard_reactors WHERE original_msg_id = ?',
-                (str(original_msg_id),)
-            )
+            for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+                self.conn.execute(
+                    f'DELETE FROM {table} WHERE original_msg_id = ?',
+                    (str(original_msg_id),)
+                )
             query = 'DELETE FROM starboard_message_v1 WHERE original_msg_id = ?'
             rc = self.conn.execute(query, (str(original_msg_id),)).rowcount
         else:
@@ -354,16 +371,6 @@ class StarboardDbMixin(StarboardQueriesDbMixin):
         """Get the number of unique reactors for this emoji on this message."""
         query = 'SELECT COUNT(*) as cnt FROM starboard_reactors WHERE original_msg_id = ? AND emoji = ?'
         return self.conn.execute(query, (str(original_msg_id), emoji)).fetchone().cnt
-
-    def get_merged_reactor_count(self, original_msg_id, emojis):
-        """Count distinct users who reacted with ANY of the given emojis on a message.
-        Useful for merging starboards (e.g., star + flame = unique users across both)."""
-        if not emojis:
-            return 0
-        placeholders = ','.join('?' * len(emojis))
-        query = (f'SELECT COUNT(DISTINCT user_id) as cnt FROM starboard_reactors '
-                 f'WHERE original_msg_id = ? AND emoji IN ({placeholders})')
-        return self.conn.execute(query, (str(original_msg_id), *emojis)).fetchone().cnt
 
     def bulk_add_reactors(self, original_msg_id, emoji, user_ids):
         """Bulk-insert reactors (idempotent via INSERT OR IGNORE)."""
