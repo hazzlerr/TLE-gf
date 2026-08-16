@@ -80,14 +80,14 @@ class TestStickyMarks:
     def test_proxy_self_react_records_mark(self, db):
         """Self-starring via the starboard post surface counts too."""
         _track_message(db)
-        db.add_proxy_reactor(MSG, STAR, AUTHOR)
+        db.add_proxy_reactor(MSG, STAR, AUTHOR, SB_POST)
         db.update_starboard_star_count(MSG, STAR, 1)
 
         row = _narcissus_row(db)
         assert row is not None and row.self_stars == 1
         assert row.unreacted == 0
 
-        db.remove_proxy_reactor(MSG, STAR, AUTHOR)
+        db.remove_proxy_reactor(MSG, STAR, AUTHOR, SB_POST)
         row = _narcissus_row(db)
         assert row.self_stars == 1
         assert row.unreacted == 1
@@ -153,7 +153,7 @@ class TestSeedMigration:
         db.add_reactor(MSG, THUMBS_UP, AUTHOR)     # alias self-react
         db.add_starboard_message_v1('101', '201', GUILD_A, STAR,
                                     author_id='user2', channel_id='999')
-        db.add_proxy_reactor('101', STAR, 'user2')  # proxy self-react
+        db.add_proxy_reactor('101', STAR, 'user2', '201')  # proxy self-react
         upgrade_1_52_0(db.conn)
 
         assert _narcissus_row(db, AUTHOR).self_stars == 1

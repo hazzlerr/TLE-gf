@@ -139,11 +139,19 @@ class StarboardQueriesDbMixin:
         # Look up the main emoji before deleting the alias
         main_emoji = self.resolve_alias(guild_id, alias_emoji)
         if main_emoji is not None:
-            for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+            table_columns = (
+                ('starboard_reactors',
+                 '(original_msg_id, emoji, user_id)',
+                 'r.original_msg_id, ?, r.user_id'),
+                ('starboard_proxy_reactors',
+                 '(original_msg_id, emoji, user_id, via_starboard_msg_id)',
+                 'r.original_msg_id, ?, r.user_id, r.via_starboard_msg_id'),
+            )
+            for table, columns, select_cols in table_columns:
                 # Migrate alias reactors to main emoji, scoped to this guild's messages
                 self.conn.execute(f'''
-                    INSERT OR IGNORE INTO {table} (original_msg_id, emoji, user_id)
-                    SELECT r.original_msg_id, ?, r.user_id
+                    INSERT OR IGNORE INTO {table} {columns}
+                    SELECT {select_cols}
                     FROM {table} r
                     WHERE r.emoji = ?
                       AND r.original_msg_id IN (

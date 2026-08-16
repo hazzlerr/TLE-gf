@@ -188,6 +188,10 @@ class BackfillMixin:
                                     msg.original_msg_id, msg.emoji, user_ids
                                 )
                                 break
+                        # Never clobber proxy reactors, which are invisible
+                        # on the original message's own reactions.
+                        count = max(count, cf_common.user_db.get_merged_reactor_count(
+                            msg.original_msg_id, [msg.emoji]))
                         cf_common.user_db.update_starboard_author_and_count(
                             msg.original_msg_id, msg.emoji,
                             str(original_msg.author.id), count,

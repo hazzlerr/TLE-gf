@@ -13,28 +13,39 @@ pools — one user reacting on both surfaces counts once.
 class StarboardProxyDbMixin:
     """Proxy reactors and pooled reactor counts. Expects ``self.conn``."""
 
-    def add_proxy_reactor(self, original_msg_id, emoji, user_id):
-        """Record a reaction made on a starboard post. INSERT OR IGNORE (idempotent)."""
+    def add_proxy_reactor(self, original_msg_id, emoji, user_id,
+                          via_starboard_msg_id):
+        """Record a reaction made on a starboard post. INSERT OR IGNORE (idempotent).
+
+        ``via_starboard_msg_id`` is the post the reaction physically sits on,
+        so deleting that post can cascade exactly its own proxy rows."""
         self.conn.execute(
             'INSERT OR IGNORE INTO starboard_proxy_reactors '
-            '(original_msg_id, emoji, user_id) VALUES (?, ?, ?)',
-            (str(original_msg_id), emoji, str(user_id))
+            '(original_msg_id, emoji, user_id, via_starboard_msg_id) '
+            'VALUES (?, ?, ?, ?)',
+            (str(original_msg_id), emoji, str(user_id),
+             str(via_starboard_msg_id))
         )
         self.conn.commit()
 
-    def remove_proxy_reactor(self, original_msg_id, emoji, user_id):
-        """Remove a starboard-post reaction. Returns rowcount (0 or 1)."""
+    def remove_proxy_reactor(self, original_msg_id, emoji, user_id,
+                             via_starboard_msg_id):
+        """Remove a starboard-post reaction from that surface only.
+        Returns rowcount (0 or 1)."""
         rc = self.conn.execute(
             'DELETE FROM starboard_proxy_reactors '
-            'WHERE original_msg_id = ? AND emoji = ? AND user_id = ?',
-            (str(original_msg_id), emoji, str(user_id))
+            'WHERE original_msg_id = ? AND emoji = ? AND user_id = ? '
+            'AND via_starboard_msg_id = ?',
+            (str(original_msg_id), emoji, str(user_id),
+             str(via_starboard_msg_id))
         ).rowcount
         self.conn.commit()
         return rc
 
     def get_proxy_reactors(self, original_msg_id, emoji):
-        """Get all user IDs whose reaction with this emoji came via a starboard post."""
-        query = ('SELECT user_id FROM starboard_proxy_reactors '
+        """Get all user IDs whose reaction with this emoji came via a starboard
+        post (each user once, however many posts they reacted on)."""
+        query = ('SELECT DISTINCT user_id FROM starboard_proxy_reactors '
                  'WHERE original_msg_id = ? AND emoji = ?')
         return [r.user_id for r in self.conn.execute(
             query, (str(original_msg_id), emoji)).fetchall()]

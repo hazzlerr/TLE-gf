@@ -225,7 +225,7 @@ class TestProxyReactionAdd:
 class TestProxyReactionRemove:
     def test_remove_on_sb_post_removes_only_proxy_row(self, db, monkeypatch):
         _setup_boards(db)
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u3')
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u3', SB_POST_MSG)
         message = _FakeMessage(ORIGINAL_MSG, [_FakeReaction(STAR, 2)])
         cog, updates, _ = _build_cog(monkeypatch, db, message)
         payload = _FakePayload(GUILD_A, STAR_CHANNEL, SB_POST_MSG, 'u3', STAR)
@@ -240,7 +240,7 @@ class TestProxyReactionRemove:
         """u1 reacted on both surfaces; un-reacting on the sb post must keep
         the original-message reaction counting."""
         _setup_boards(db)
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1')
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)
         message = _FakeMessage(ORIGINAL_MSG, [_FakeReaction(STAR, 2)])
         cog, updates, _ = _build_cog(monkeypatch, db, message)
         payload = _FakePayload(GUILD_A, STAR_CHANNEL, SB_POST_MSG, 'u1', STAR)
@@ -253,7 +253,7 @@ class TestProxyReactionRemove:
 
     def test_remove_on_original_keeps_proxy_reaction(self, db, monkeypatch):
         _setup_boards(db)
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1')
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)
         message = _FakeMessage(ORIGINAL_MSG, [_FakeReaction(STAR, 1)])
         cog, updates, _ = _build_cog(monkeypatch, db, message)
         payload = _FakePayload(GUILD_A, SOURCE_CHANNEL, ORIGINAL_MSG, 'u1', STAR)
@@ -269,37 +269,68 @@ class TestProxyDbMethods:
     def test_merged_count_unions_and_dedupes(self, db):
         db.add_reactor(ORIGINAL_MSG, STAR, 'u1')
         db.add_reactor(ORIGINAL_MSG, STAR, 'u2')
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u2')
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u3')
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u2', SB_POST_MSG)
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u3', SB_POST_MSG)
         assert db.get_merged_reactor_count(ORIGINAL_MSG, [STAR]) == 3
         assert db.get_merged_physical_reactor_count(ORIGINAL_MSG, [STAR]) == 2
 
     def test_add_proxy_reactor_is_idempotent(self, db):
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1')
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1')
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)
         assert db.get_proxy_reactors(ORIGINAL_MSG, STAR) == ['u1']
 
+    def test_same_user_on_two_posts_counts_once(self, db):
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', 8888)
+        assert db.get_proxy_reactors(ORIGINAL_MSG, STAR) == ['u1']
+        assert db.get_merged_reactor_count(ORIGINAL_MSG, [STAR]) == 1
+
     def test_remove_proxy_reactor_rowcount(self, db):
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1')
-        assert db.remove_proxy_reactor(ORIGINAL_MSG, STAR, 'u1') == 1
-        assert db.remove_proxy_reactor(ORIGINAL_MSG, STAR, 'u1') == 0
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)
+        assert db.remove_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG) == 1
+        assert db.remove_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG) == 0
+
+    def test_remove_proxy_reactor_is_surface_scoped(self, db):
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', 8888)
+        db.remove_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)
+        assert db.get_proxy_reactors(ORIGINAL_MSG, STAR) == ['u1'], \
+            'the reaction on the other post must keep counting'
 
     def test_remove_starboard_message_cascades_proxy_rows(self, db):
         _setup_boards(db)
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u3')
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u3', SB_POST_MSG)
         db.remove_starboard_message(original_msg_id=ORIGINAL_MSG, emoji=STAR)
         assert db.get_proxy_reactors(ORIGINAL_MSG, STAR) == []
 
     def test_remove_by_starboard_id_cascades_proxy_rows(self, db):
         _setup_boards(db)
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u3')
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u3', SB_POST_MSG)
         db.remove_starboard_message(starboard_msg_id=SB_POST_MSG)
         assert db.get_proxy_reactors(ORIGINAL_MSG, STAR) == []
 
+    def test_post_deletion_spares_rows_on_other_posts(self, db):
+        """M is on both boards; a star react placed on the PILL post must
+        survive deletion of the STAR post (its surface still exists)."""
+        _setup_boards(db)
+        PILL_POST = 7778
+        db.add_starboard_message_v1(
+            ORIGINAL_MSG, PILL_POST, GUILD_A, PILL,
+            author_id=str(AUTHOR_ID), channel_id=str(SOURCE_CHANNEL))
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u4', PILL_POST)
+        db.add_proxy_reactor(ORIGINAL_MSG, PILL, 'u5', SB_POST_MSG)
+
+        db.remove_starboard_message(starboard_msg_id=SB_POST_MSG)
+
+        assert db.get_proxy_reactors(ORIGINAL_MSG, STAR) == ['u4'], \
+            'reaction physically on the surviving pill post keeps counting'
+        assert db.get_proxy_reactors(ORIGINAL_MSG, PILL) == [], \
+            'reaction physically on the deleted star post dies with it'
+
     def test_star_givers_includes_proxy_reactors_once(self, db):
         _setup_boards(db)
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u9')   # proxy-only giver
-        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1')   # also physical
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u9', SB_POST_MSG)  # proxy-only
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', SB_POST_MSG)  # also physical
         rows = db.get_star_givers_leaderboard(GUILD_A, STAR)
         counts = {r.user_id: r.stars_given for r in rows}
         assert counts['u9'] == 1
@@ -309,7 +340,7 @@ class TestProxyDbMethods:
         _setup_boards(db)
         GLOW = '\N{GLOWING STAR}'
         db.add_starboard_alias(GUILD_A, GLOW, STAR)
-        db.add_proxy_reactor(ORIGINAL_MSG, GLOW, 'u7')
+        db.add_proxy_reactor(ORIGINAL_MSG, GLOW, 'u7', SB_POST_MSG)
         db.remove_starboard_alias(GUILD_A, GLOW)
         assert 'u7' in db.get_proxy_reactors(ORIGINAL_MSG, STAR)
         assert db.get_proxy_reactors(ORIGINAL_MSG, GLOW) == []

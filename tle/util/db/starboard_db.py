@@ -14,20 +14,21 @@ from tle.util.db._starboard_db_constants import (
     _NO_TIME_BOUND,
     snowflake_to_unix_sql,
 )
+from tle.util.db._starboard_db_config import GuildConfigDbMixin
 from tle.util.db._starboard_db_narcissus import StarboardNarcissusDbMixin
 from tle.util.db._starboard_db_proxy import StarboardProxyDbMixin
 from tle.util.db._starboard_db_queries import StarboardQueriesDbMixin
 
 
 class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin,
-                       StarboardNarcissusDbMixin):
+                       StarboardNarcissusDbMixin, GuildConfigDbMixin):
     """Mixin providing all starboard DB methods. Expects self.conn to be a sqlite3 connection.
 
     Leaderboard, alias and per-user-default methods are inherited from
     StarboardQueriesDbMixin; proxy reactor tracking and the pooled reactor
     counts from StarboardProxyDbMixin; sticky self-star marks from
-    StarboardNarcissusDbMixin (split out to keep this module under 500
-    lines)."""
+    StarboardNarcissusDbMixin; guild key-value config from
+    GuildConfigDbMixin (split out to keep this module under 500 lines)."""
 
     def _create_starboard_tables(self):
         self.conn.execute(
@@ -82,14 +83,22 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin,
             )
         ''')
         # Proxy reactors — reactions on the bot's starboard posts, keyed by
-        # the original message they stand in for (see _starboard_db_proxy)
+        # the original message they stand in for plus the post they were
+        # physically placed on (see _starboard_db_proxy)
         self.conn.execute('''
             CREATE TABLE IF NOT EXISTS starboard_proxy_reactors (
-                original_msg_id TEXT,
-                emoji           TEXT,
-                user_id         TEXT,
-                PRIMARY KEY (original_msg_id, emoji, user_id)
+                original_msg_id      TEXT,
+                emoji                TEXT,
+                user_id              TEXT,
+                via_starboard_msg_id TEXT,
+                PRIMARY KEY (original_msg_id, emoji, user_id,
+                             via_starboard_msg_id)
             )
+        ''')
+        # Every reaction event looks messages up by their starboard post id
+        self.conn.execute('''
+            CREATE INDEX IF NOT EXISTS ix_starboard_message_v1_sb_id
+            ON starboard_message_v1 (starboard_msg_id)
         ''')
         # Starboard emoji aliases — alias emojis that count toward the main emoji
         self.conn.execute('''
@@ -209,6 +218,14 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin,
                     WHERE guild_id = ? AND emoji = ?
                 )
             ''', (*all_emojis, guild_id, emoji))
+        # Proxy rows of any emoji placed on this board's posts lose their surface
+        self.conn.execute('''
+            DELETE FROM starboard_proxy_reactors
+            WHERE via_starboard_msg_id IN (
+                SELECT starboard_msg_id FROM starboard_message_v1
+                WHERE guild_id = ? AND emoji = ?
+            )
+        ''', (guild_id, emoji))
         # Narcissus marks are keyed by main emoji, not raw reaction emoji
         self.conn.execute(
             'DELETE FROM starboard_narcissus WHERE guild_id = ? AND emoji = ?',
@@ -296,20 +313,32 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin,
             # Look up the message first to cascade-delete reactors
             msg = self.get_starboard_message_by_starboard_id(starboard_msg_id)
             if msg:
-                for table in ('starboard_reactors', 'starboard_proxy_reactors',
-                              'starboard_narcissus'):
+                for table in ('starboard_reactors', 'starboard_narcissus'):
                     self.conn.execute(
                         f'DELETE FROM {table} WHERE original_msg_id = ? AND emoji = ?',
                         (msg.original_msg_id, msg.emoji)
                     )
+            # Proxy rows die with the surface they were placed on — a react
+            # placed on this message's *other* board posts must survive.
+            self.conn.execute(
+                'DELETE FROM starboard_proxy_reactors WHERE via_starboard_msg_id = ?',
+                (str(starboard_msg_id),)
+            )
             query = 'DELETE FROM starboard_message_v1 WHERE starboard_msg_id = ?'
             rc = self.conn.execute(query, (str(starboard_msg_id),)).rowcount
         elif original_msg_id is not None and emoji is not None:
+            entry = self.get_starboard_message_v1(original_msg_id, emoji)
             for table in ('starboard_reactors', 'starboard_proxy_reactors',
                           'starboard_narcissus'):
                 self.conn.execute(
                     f'DELETE FROM {table} WHERE original_msg_id = ? AND emoji = ?',
                     (str(original_msg_id), emoji)
+                )
+            # Also purge proxy rows of other emojis placed on this entry's post
+            if entry is not None and entry.starboard_msg_id:
+                self.conn.execute(
+                    'DELETE FROM starboard_proxy_reactors WHERE via_starboard_msg_id = ?',
+                    (str(entry.starboard_msg_id),)
                 )
             query = 'DELETE FROM starboard_message_v1 WHERE original_msg_id = ? AND emoji = ?'
             rc = self.conn.execute(query, (str(original_msg_id), emoji)).rowcount
@@ -434,47 +463,4 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin,
         query = 'SELECT emoji, threshold, color, channel_id FROM starboard_emoji_v1 WHERE guild_id = ?'
         return self.conn.execute(query, (guild_id,)).fetchall()
 
-    # --- Guild config methods ---
-
-    def get_guild_config(self, guild_id, key):
-        """Get a guild config value. Returns the value string or None."""
-        guild_id = str(guild_id)
-        query = 'SELECT value FROM guild_config WHERE guild_id = ? AND key = ?'
-        res = self.conn.execute(query, (guild_id, key)).fetchone()
-        return res.value if res else None
-
-    def set_guild_config(self, guild_id, key, value):
-        """Set a guild config value."""
-        guild_id = str(guild_id)
-        self.conn.execute(
-            'INSERT OR REPLACE INTO guild_config (guild_id, key, value) VALUES (?, ?, ?)',
-            (guild_id, key, value)
-        )
-        self.conn.commit()
-
-    def delete_guild_config(self, guild_id, key):
-        """Delete a guild config value."""
-        guild_id = str(guild_id)
-        self.conn.execute(
-            'DELETE FROM guild_config WHERE guild_id = ? AND key = ?',
-            (guild_id, key)
-        )
-        self.conn.commit()
-
-    def delete_guild_configs_by_prefix(self, guild_id, key_prefix):
-        """Delete and count this guild's config keys under ``key_prefix``."""
-        if not key_prefix:
-            raise ValueError('Guild config prefix must not be empty')
-        guild_id = str(guild_id)
-        with self.conn:
-            cursor = self.conn.execute(
-                'DELETE FROM guild_config '
-                'WHERE guild_id = ? AND substr(key, 1, ?) = ?',
-                (guild_id, len(key_prefix), key_prefix))
-        return cursor.rowcount
-
-    def get_all_guild_configs(self, guild_id):
-        """Get all config entries for a guild."""
-        guild_id = str(guild_id)
-        query = 'SELECT key, value FROM guild_config WHERE guild_id = ?'
-        return self.conn.execute(query, (guild_id,)).fetchall()
+    # Guild config methods live in GuildConfigDbMixin (_starboard_db_config).

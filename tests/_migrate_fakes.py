@@ -147,7 +147,9 @@ class _FakeMigrateDb(StarboardDbMixin, MigrationDbMixin):
                 PRIMARY KEY (original_msg_id, emoji, user_id))''',
             '''CREATE TABLE IF NOT EXISTS starboard_proxy_reactors (
                 original_msg_id TEXT, emoji TEXT, user_id TEXT,
-                PRIMARY KEY (original_msg_id, emoji, user_id))''',
+                via_starboard_msg_id TEXT,
+                PRIMARY KEY (original_msg_id, emoji, user_id,
+                             via_starboard_msg_id))''',
             '''CREATE TABLE IF NOT EXISTS starboard_narcissus (
                 guild_id TEXT, original_msg_id TEXT, emoji TEXT, user_id TEXT,
                 PRIMARY KEY (original_msg_id, emoji, user_id))''',

@@ -393,3 +393,79 @@ def upgrade_1_52_0(db):
     ''')
     db.commit()
     logger.info('1.52.0: Upgrade complete')
+
+
+@registry.register('1.53.0', 'Surface-scoped proxy reactors, board-post entry purge')
+def upgrade_1_53_0(db):
+    """Rebuild proxy reactors with their surface, purge board-post entries.
+
+    ``starboard_proxy_reactors`` gains ``via_starboard_msg_id`` (the post a
+    proxy reaction physically sits on) so deleting a post cascades exactly
+    its own rows.  The table shipped unreleased in this same deploy, so a
+    plain rebuild loses nothing.
+
+    Also deletes ``starboard_message_v1`` entries whose "original" is itself
+    a bot starboard post — rows created by the pre-exclusion abuse (spam
+    reacts on a bot post put the post itself onto another board).  Left in
+    place, the proxy path would redirect the reaction engine at a bot post.
+    """
+    logger.info('1.53.0: Rebuilding proxy reactors, purging board-post entries')
+    db.execute('DROP TABLE IF EXISTS starboard_proxy_reactors')
+    db.execute('''
+        CREATE TABLE starboard_proxy_reactors (
+            original_msg_id      TEXT,
+            emoji                TEXT,
+            user_id              TEXT,
+            via_starboard_msg_id TEXT,
+            PRIMARY KEY (original_msg_id, emoji, user_id,
+                         via_starboard_msg_id)
+        )
+    ''')
+    # Defensive creates so a partial schema (e.g. an LLM-only test DB running
+    # the registry) turns the purge into a no-op instead of an error.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_message_v1 (
+            original_msg_id     TEXT,
+            starboard_msg_id    TEXT,
+            guild_id            TEXT,
+            emoji               TEXT,
+            author_id           TEXT,
+            star_count          INTEGER DEFAULT 0,
+            channel_id          TEXT,
+            PRIMARY KEY (original_msg_id, emoji)
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_reactors (
+            original_msg_id TEXT,
+            emoji           TEXT,
+            user_id         TEXT,
+            PRIMARY KEY (original_msg_id, emoji, user_id)
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_narcissus (
+            guild_id        TEXT,
+            original_msg_id TEXT,
+            emoji           TEXT,
+            user_id         TEXT,
+            PRIMARY KEY (original_msg_id, emoji, user_id)
+        )
+    ''')
+    abuse_originals = '''
+        SELECT m.original_msg_id FROM starboard_message_v1 m
+        WHERE EXISTS (
+            SELECT 1 FROM starboard_message_v1 p
+            WHERE p.starboard_msg_id = m.original_msg_id
+        )
+    '''
+    for table in ('starboard_reactors', 'starboard_narcissus'):
+        db.execute(
+            f'DELETE FROM {table} WHERE original_msg_id IN ({abuse_originals})')
+    purged = db.execute(
+        f'DELETE FROM starboard_message_v1 '
+        f'WHERE original_msg_id IN ({abuse_originals})').rowcount
+    if purged:
+        logger.info('1.53.0: Purged %d board-post starboard entrie(s)', purged)
+    db.commit()
+    logger.info('1.53.0: Upgrade complete')
