@@ -310,3 +310,86 @@ def upgrade_1_51_0(db):
             ambiguous)
     db.commit()
     logger.info('1.51.0: Upgrade complete')
+
+
+@registry.register('1.52.0', 'Sticky narcissus self-star marks')
+def upgrade_1_52_0(db):
+    """Seed permanent self-star marks from currently-live self-reactions.
+
+    Narcissus used to be a live reactor count, so un-reacting erased the
+    self-star.  ``starboard_narcissus`` marks are permanent; going forward
+    they are recorded whenever an author has a live self-reaction while
+    their message is on the starboard.  Historical un-reacts are unknowable,
+    so the seed captures what is still visible: every author with a live
+    self-reaction (main emoji or alias, on the original message or a
+    starboard post) on an already-starboarded message.
+    """
+    logger.info('1.52.0: Seeding sticky narcissus self-star marks')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_narcissus (
+            guild_id        TEXT,
+            original_msg_id TEXT,
+            emoji           TEXT,
+            user_id         TEXT,
+            PRIMARY KEY (original_msg_id, emoji, user_id)
+        )
+    ''')
+    # Startup order runs create_tables before migrations, but be safe for
+    # DBs upgraded out-of-band: create every table the seed reads so a
+    # partial schema turns the seed into a no-op instead of an error.
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_proxy_reactors (
+            original_msg_id TEXT,
+            emoji           TEXT,
+            user_id         TEXT,
+            PRIMARY KEY (original_msg_id, emoji, user_id)
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_message_v1 (
+            original_msg_id     TEXT,
+            starboard_msg_id    TEXT,
+            guild_id            TEXT,
+            emoji               TEXT,
+            author_id           TEXT,
+            star_count          INTEGER DEFAULT 0,
+            channel_id          TEXT,
+            PRIMARY KEY (original_msg_id, emoji)
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_reactors (
+            original_msg_id TEXT,
+            emoji           TEXT,
+            user_id         TEXT,
+            PRIMARY KEY (original_msg_id, emoji, user_id)
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS starboard_alias (
+            guild_id    TEXT,
+            alias_emoji TEXT,
+            main_emoji  TEXT,
+            PRIMARY KEY (guild_id, alias_emoji)
+        )
+    ''')
+    db.execute('''
+        INSERT OR IGNORE INTO starboard_narcissus
+            (guild_id, original_msg_id, emoji, user_id)
+        SELECT m.guild_id, m.original_msg_id, m.emoji, m.author_id
+        FROM starboard_message_v1 m
+        JOIN (
+            SELECT original_msg_id, emoji, user_id FROM starboard_reactors
+            UNION
+            SELECT original_msg_id, emoji, user_id FROM starboard_proxy_reactors
+        ) r ON r.original_msg_id = m.original_msg_id
+           AND r.user_id = m.author_id
+        WHERE m.author_id IS NOT NULL AND m.author_id != '__UNKNOWN__'
+          AND (r.emoji = m.emoji OR EXISTS (
+              SELECT 1 FROM starboard_alias a
+              WHERE a.guild_id = m.guild_id
+                AND a.alias_emoji = r.emoji
+                AND a.main_emoji = m.emoji))
+    ''')
+    db.commit()
+    logger.info('1.52.0: Upgrade complete')

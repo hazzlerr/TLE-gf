@@ -14,17 +14,20 @@ from tle.util.db._starboard_db_constants import (
     _NO_TIME_BOUND,
     snowflake_to_unix_sql,
 )
+from tle.util.db._starboard_db_narcissus import StarboardNarcissusDbMixin
 from tle.util.db._starboard_db_proxy import StarboardProxyDbMixin
 from tle.util.db._starboard_db_queries import StarboardQueriesDbMixin
 
 
-class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
+class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin,
+                       StarboardNarcissusDbMixin):
     """Mixin providing all starboard DB methods. Expects self.conn to be a sqlite3 connection.
 
     Leaderboard, alias and per-user-default methods are inherited from
     StarboardQueriesDbMixin; proxy reactor tracking and the pooled reactor
-    counts from StarboardProxyDbMixin (split out to keep this module under
-    500 lines)."""
+    counts from StarboardProxyDbMixin; sticky self-star marks from
+    StarboardNarcissusDbMixin (split out to keep this module under 500
+    lines)."""
 
     def _create_starboard_tables(self):
         self.conn.execute(
@@ -106,6 +109,7 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
                 PRIMARY KEY (guild_id, user_id)
             )
         ''')
+        self._create_narcissus_tables()
 
     # --- Old starboard methods (kept for migration compatibility) ---
 
@@ -205,6 +209,11 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
                     WHERE guild_id = ? AND emoji = ?
                 )
             ''', (*all_emojis, guild_id, emoji))
+        # Narcissus marks are keyed by main emoji, not raw reaction emoji
+        self.conn.execute(
+            'DELETE FROM starboard_narcissus WHERE guild_id = ? AND emoji = ?',
+            (guild_id, emoji)
+        )
         self.conn.execute(
             'DELETE FROM starboard_emoji_v1 WHERE guild_id = ? AND emoji = ?',
             (guild_id, emoji)
@@ -287,7 +296,8 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
             # Look up the message first to cascade-delete reactors
             msg = self.get_starboard_message_by_starboard_id(starboard_msg_id)
             if msg:
-                for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+                for table in ('starboard_reactors', 'starboard_proxy_reactors',
+                              'starboard_narcissus'):
                     self.conn.execute(
                         f'DELETE FROM {table} WHERE original_msg_id = ? AND emoji = ?',
                         (msg.original_msg_id, msg.emoji)
@@ -295,7 +305,8 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
             query = 'DELETE FROM starboard_message_v1 WHERE starboard_msg_id = ?'
             rc = self.conn.execute(query, (str(starboard_msg_id),)).rowcount
         elif original_msg_id is not None and emoji is not None:
-            for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+            for table in ('starboard_reactors', 'starboard_proxy_reactors',
+                          'starboard_narcissus'):
                 self.conn.execute(
                     f'DELETE FROM {table} WHERE original_msg_id = ? AND emoji = ?',
                     (str(original_msg_id), emoji)
@@ -303,7 +314,8 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
             query = 'DELETE FROM starboard_message_v1 WHERE original_msg_id = ? AND emoji = ?'
             rc = self.conn.execute(query, (str(original_msg_id), emoji)).rowcount
         elif original_msg_id is not None:
-            for table in ('starboard_reactors', 'starboard_proxy_reactors'):
+            for table in ('starboard_reactors', 'starboard_proxy_reactors',
+                          'starboard_narcissus'):
                 self.conn.execute(
                     f'DELETE FROM {table} WHERE original_msg_id = ?',
                     (str(original_msg_id),)
@@ -324,6 +336,7 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
             (count, str(original_msg_id), emoji)
         )
         self.conn.commit()
+        self._maybe_record_narcissus(original_msg_id, emoji)
 
     def update_starboard_author_and_count(self, original_msg_id, emoji, author_id, count,
                                           channel_id=None):
@@ -341,6 +354,7 @@ class StarboardDbMixin(StarboardQueriesDbMixin, StarboardProxyDbMixin):
                 (str(author_id), count, str(original_msg_id), emoji)
             )
         self.conn.commit()
+        self._maybe_record_narcissus(original_msg_id, emoji)
 
     # --- Reactor tracking ---
 

@@ -92,36 +92,8 @@ class StarboardQueriesDbMixin:
         '''
         return self.conn.execute(query, (emoji, guild_id) + tuple(emoji_family) + tuple(time_params)).fetchall()
 
-    def get_narcissus_leaderboard(self, guild_id, emoji, dlo=0, dhi=_NO_TIME_BOUND,
-                                   emoji_family=None):
-        """Get leaderboard of users who starred their own messages the most.
-
-        emoji_family: list of emojis to count reactors for (main + aliases).
-        Uses COUNT(DISTINCT m.original_msg_id) to avoid double-counting.
-        """
-        guild_id = str(guild_id)
-        if emoji_family is None:
-            emoji_family = [emoji]
-        time_clauses, time_params = self._snowflake_time_filter('m.original_msg_id', dlo, dhi)
-        extra = (' AND ' + ' AND '.join(time_clauses)) if time_clauses else ''
-        placeholders = ','.join('?' * len(emoji_family))
-        query = f'''
-            SELECT r.user_id, COUNT(DISTINCT m.original_msg_id) as self_stars
-            FROM (
-                SELECT original_msg_id, emoji, user_id FROM starboard_reactors
-                UNION
-                SELECT original_msg_id, emoji, user_id FROM starboard_proxy_reactors
-            ) r
-            JOIN starboard_message_v1 m
-                ON r.original_msg_id = m.original_msg_id AND m.emoji = ?
-            WHERE m.guild_id = ? AND r.emoji IN ({placeholders})
-                AND r.user_id = m.author_id
-                AND m.author_id IS NOT NULL AND m.author_id != '__UNKNOWN__'
-                {extra}
-            GROUP BY r.user_id
-            ORDER BY self_stars DESC
-        '''
-        return self.conn.execute(query, (emoji, guild_id) + tuple(emoji_family) + tuple(time_params)).fetchall()
+    # get_narcissus_leaderboard lives in StarboardNarcissusDbMixin — narcissus
+    # is sticky-mark based, not a live reactor count (see _starboard_db_narcissus).
 
     def get_top_starboard_messages(self, guild_id, emoji, dlo=0, dhi=_NO_TIME_BOUND,
                                    author_id=None):

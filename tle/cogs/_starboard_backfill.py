@@ -179,12 +179,8 @@ class BackfillMixin:
 
                         count = sum(r.count for r in original_msg.reactions
                                     if _emoji_str(r) == msg.emoji)
-                        cf_common.user_db.update_starboard_author_and_count(
-                            msg.original_msg_id, msg.emoji,
-                            str(original_msg.author.id), count,
-                            channel_id=original_msg.channel.id
-                        )
-                        # Collect all reactors for this emoji
+                        # Collect reactors before the count update so the
+                        # sticky narcissus hook sees a live self-reaction.
                         for r in original_msg.reactions:
                             if _emoji_str(r) == msg.emoji:
                                 user_ids = [str(user.id) async for user in r.users()]
@@ -192,6 +188,11 @@ class BackfillMixin:
                                     msg.original_msg_id, msg.emoji, user_ids
                                 )
                                 break
+                        cf_common.user_db.update_starboard_author_and_count(
+                            msg.original_msg_id, msg.emoji,
+                            str(original_msg.author.id), count,
+                            channel_id=original_msg.channel.id
+                        )
                         logger.info(f'Backfill: updated msg={msg.original_msg_id} '
                                     f'author={original_msg.author} ({original_msg.author.id}) '
                                     f'emoji={msg.emoji} star_count={count} '

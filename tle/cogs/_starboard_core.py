@@ -388,13 +388,15 @@ class CoreMixin:
                 author_id=str(message.author.id),
                 channel_id=str(channel.id)
             )
-            cf_common.user_db.update_starboard_star_count(message.id, emoji_str, reaction_count)
             # Collect all current reactors for each emoji in the family
             for r in message.reactions:
                 r_emoji = _emoji_str(r)
                 if r_emoji in emoji_family:
                     user_ids = [str(user.id) async for user in r.users()]
                     cf_common.user_db.bulk_add_reactors(message.id, r_emoji, user_ids)
+            # Count update runs after reactor collection so the sticky
+            # narcissus hook sees a self-react that predates the post.
+            cf_common.user_db.update_starboard_star_count(message.id, emoji_str, reaction_count)
             logger.info(f'NEW starboard entry: original_msg={message.id} starboard_msg={starboard_message.id} '
                         f'guild={guild.id} emoji={emoji_str} author={message.author} ({message.author.id}) '
                         f'channel={channel.id} count={reaction_count} '
@@ -416,6 +418,13 @@ class CoreMixin:
                 return val
         return 0
 
+    @staticmethod
+    def _row_suffix(row):
+        """Suffix for rows carrying an `unreacted` column (narcissus): how
+        many sticky self-stars had their reaction sneakily removed."""
+        unreacted = getattr(row, 'unreacted', None)
+        return f' ({unreacted} unreacted)' if unreacted else ''
+
     def _get_personal_rank_line(self, ctx, ranked, unit):
         """Get the invoking user's rank as a string for embedding. `ranked`
         is the output of `ranking.rank_items` — `(rank, row)` pairs in display
@@ -424,7 +433,8 @@ class CoreMixin:
         for rank, row in ranked:
             if self._get_user_id(row) == user_id_str:
                 count = self._get_count(row)
-                return f'\nYour rank: **#{rank}** with **{count}** {unit}'
+                return (f'\nYour rank: **#{rank}** with **{count}** {unit}'
+                        f'{self._row_suffix(row)}')
         return '\nYou are not on this leaderboard yet.'
 
     def _make_leaderboard_pages(self, ctx, rows, emoji, title, unit):
@@ -444,7 +454,7 @@ class CoreMixin:
                 count = self._get_count(row)
                 member = ctx.guild.get_member(int(user_id))
                 name = member.mention if member else f'<@{user_id}>'
-                lines.append(f'**#{rank}** {name} — {count} {unit}')
+                lines.append(f'**#{rank}** {name} — {count} {unit}{self._row_suffix(row)}')
             lines.append(personal)
             embed = discord.Embed(
                 title=f'{emoji} {title}',

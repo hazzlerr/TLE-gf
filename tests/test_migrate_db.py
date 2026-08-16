@@ -48,6 +48,23 @@ class FakeMigrateDb(StarboardDbMixin, MigrationDbMixin):
             )
         ''')
         self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS starboard_proxy_reactors (
+                original_msg_id TEXT,
+                emoji           TEXT,
+                user_id         TEXT,
+                PRIMARY KEY (original_msg_id, emoji, user_id)
+            )
+        ''')
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS starboard_narcissus (
+                guild_id        TEXT,
+                original_msg_id TEXT,
+                emoji           TEXT,
+                user_id         TEXT,
+                PRIMARY KEY (original_msg_id, emoji, user_id)
+            )
+        ''')
+        self.conn.execute('''
             CREATE TABLE IF NOT EXISTS starboard_alias (
                 guild_id    TEXT,
                 alias_emoji TEXT,
