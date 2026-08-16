@@ -250,15 +250,28 @@ class StarboardDbMixin(StarboardQueriesDbMixin):
         query = 'SELECT * FROM starboard_message_v1 WHERE original_msg_id = ? AND emoji = ?'
         return self.conn.execute(query, (str(original_msg_id), emoji)).fetchone()
 
+    def get_starboard_message_by_starboard_id(self, starboard_msg_id):
+        """Get the entry whose *bot starboard post* has this message id, or None.
+
+        Used to tell reactions on a starboard post apart from reactions on
+        ordinary messages."""
+        query = 'SELECT * FROM starboard_message_v1 WHERE starboard_msg_id = ?'
+        return self.conn.execute(query, (str(starboard_msg_id),)).fetchone()
+
+    def is_starboard_channel(self, guild_id, channel_id):
+        """True if this channel is a configured starboard channel for any emoji
+        in the guild."""
+        query = ('SELECT 1 FROM starboard_emoji_v1 '
+                 'WHERE guild_id = ? AND channel_id = ?')
+        res = self.conn.execute(query, (str(guild_id), str(channel_id))).fetchone()
+        return res is not None
+
     def remove_starboard_message(self, *, original_msg_id=None, emoji=None, starboard_msg_id=None):
         """Remove starboard message(s) and their reactors.
         Use original_msg_id+emoji or starboard_msg_id."""
         if starboard_msg_id is not None:
             # Look up the message first to cascade-delete reactors
-            msg = self.conn.execute(
-                'SELECT original_msg_id, emoji FROM starboard_message_v1 WHERE starboard_msg_id = ?',
-                (str(starboard_msg_id),)
-            ).fetchone()
+            msg = self.get_starboard_message_by_starboard_id(starboard_msg_id)
             if msg:
                 self.conn.execute(
                     'DELETE FROM starboard_reactors WHERE original_msg_id = ? AND emoji = ?',

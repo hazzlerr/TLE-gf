@@ -96,6 +96,13 @@ class CoreMixin:
             return
         if entry.channel_id is None:
             return  # Emoji configured but no starboard channel set yet
+        # Starboard posts (and anything else living in a board channel) are
+        # display surfaces, not starrable content — without this, reacting on
+        # a bot starboard post can put that post itself onto another board.
+        if cf_common.user_db.get_starboard_message_by_starboard_id(payload.message_id) is not None:
+            return
+        if cf_common.user_db.is_starboard_channel(payload.guild_id, payload.channel_id):
+            return
         channel_id, threshold, color = int(entry.channel_id), entry.threshold, entry.color
         logger.debug(f'Reaction add: raw_emoji={raw_emoji} main_emoji={main_emoji} '
                      f'guild={payload.guild_id} msg={payload.message_id} user={payload.user_id} '
