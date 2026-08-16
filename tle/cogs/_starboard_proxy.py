@@ -76,14 +76,18 @@ class ProxyReactionMixin:
         counting."""
         if str(sb_row.guild_id) != str(payload.guild_id):
             return
-        if self._proxy_target_is_board_surface(payload, sb_row):
-            return
+        # Deleting a proxy row is always safe, so do it before the surface
+        # guard — a row recorded before its source channel became a board
+        # (or before an abuse entry was purged) must not be stuck in the
+        # count forever just because adds are now refused.
         cf_common.user_db.remove_proxy_reactor(
             sb_row.original_msg_id, raw_emoji, payload.user_id,
             payload.message_id)
         logger.debug(f'Proxy reaction remove: sb_post={payload.message_id} -> '
                      f'original={sb_row.original_msg_id} emoji={raw_emoji} '
                      f'user={payload.user_id}')
+        if self._proxy_target_is_board_surface(payload, sb_row):
+            return  # never run the display engine against a board surface
         if not cf_common.user_db.check_exists_starboard_message_v1(
                 sb_row.original_msg_id, main_emoji):
             return

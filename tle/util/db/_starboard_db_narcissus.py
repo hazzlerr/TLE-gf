@@ -66,6 +66,36 @@ class StarboardNarcissusDbMixin:
         self.record_narcissus_mark(
             row.guild_id, original_msg_id, emoji, row.author_id)
 
+    def seed_narcissus_marks(self, guild_id=None):
+        """Record marks for every author with a live self-reaction on an
+        already-tracked message, optionally scoped to one guild.
+
+        Same statement as migration 1.52.0's seed.  Needed by ``;migrate
+        complete``, whose raw-SQL bulk import bypasses the per-update hook
+        and runs long after the startup seed."""
+        guild_clause = 'm.guild_id = ? AND' if guild_id is not None else ''
+        params = (str(guild_id),) if guild_id is not None else ()
+        self.conn.execute(f'''
+            INSERT OR IGNORE INTO starboard_narcissus
+                (guild_id, original_msg_id, emoji, user_id)
+            SELECT m.guild_id, m.original_msg_id, m.emoji, m.author_id
+            FROM starboard_message_v1 m
+            JOIN (
+                SELECT original_msg_id, emoji, user_id FROM starboard_reactors
+                UNION
+                SELECT original_msg_id, emoji, user_id FROM starboard_proxy_reactors
+            ) r ON r.original_msg_id = m.original_msg_id
+               AND r.user_id = m.author_id
+            WHERE {guild_clause} m.author_id IS NOT NULL
+              AND m.author_id != '__UNKNOWN__'
+              AND (r.emoji = m.emoji OR EXISTS (
+                  SELECT 1 FROM starboard_alias a
+                  WHERE a.guild_id = m.guild_id
+                    AND a.alias_emoji = r.emoji
+                    AND a.main_emoji = m.emoji))
+        ''', params)
+        self.conn.commit()
+
     def get_narcissus_leaderboard(self, guild_id, emoji, dlo=0, dhi=_NO_TIME_BOUND,
                                   emoji_family=None):
         """Sticky self-star leaderboard.

@@ -90,17 +90,43 @@ class TestLegacyAbuseRowGuard:
         assert engine_calls == [], 'engine must never run against a bot post'
         assert db.get_proxy_reactors(STAR_POST, STAR) == []
 
-    def test_react_on_abuse_post_remove_is_dropped(self, db, monkeypatch):
+    def test_remove_on_abuse_post_deletes_row_without_refresh(self, db, monkeypatch):
+        """Stale proxy rows must stay deletable behind the guard — only the
+        display engine is kept away from the board surface."""
         _setup_boards(db)
         _add_abuse_row(db)
         db.add_proxy_reactor(STAR_POST, STAR, 'u1', ABUSE_POST)
         cog, _ = _build_cog(monkeypatch, db)
+        refreshes = []
 
+        async def fake_refresh(*args, **kwargs):
+            refreshes.append(args)
+
+        cog._refresh_starboard_display = fake_refresh
         payload = _FakePayload(GUILD_A, PILL_CHANNEL, ABUSE_POST, 'u1', STAR)
         asyncio.run(cog._handle_reaction_remove(payload))
 
-        assert db.get_proxy_reactors(STAR_POST, STAR) == ['u1'], \
-            'guarded remove must not touch rows keyed on a board surface'
+        assert db.get_proxy_reactors(STAR_POST, STAR) == []
+        assert refreshes == [], 'no display refresh against a board surface'
+
+    def test_unreact_still_deletes_after_channel_becomes_board(self, db, monkeypatch):
+        """A legit proxy row must not get stuck when an admin later turns the
+        message's source channel into a board channel."""
+        _setup_boards(db)
+        FIRE = '\N{FIRE}'
+        db.add_proxy_reactor(ORIGINAL_MSG, STAR, 'u1', STAR_POST)
+        db.add_starboard_emoji(GUILD_A, FIRE, 3, 0x111111)
+        db.set_starboard_channel(GUILD_A, FIRE, str(SOURCE_CHANNEL))
+        cog, _ = _build_cog(monkeypatch, db)
+
+        async def fake_refresh(*args, **kwargs):
+            pass
+
+        cog._refresh_starboard_display = fake_refresh
+        payload = _FakePayload(GUILD_A, STAR_CHANNEL, STAR_POST, 'u1', STAR)
+        asyncio.run(cog._handle_reaction_remove(payload))
+
+        assert db.get_proxy_reactors(ORIGINAL_MSG, STAR) == []
 
     def test_channel_guard_catches_untracked_board_original(self, db, monkeypatch):
         """An entry whose original lives in a board channel is refused even
