@@ -24,7 +24,6 @@ logger = logging.getLogger(__name__)
 
 _GOOD_REACTION = '✅'
 _BAD_REACTION = '❌'
-_DATABASE_WAIT_SECONDS = 0.1
 
 
 class CountingCogError(commands.CommandError):
@@ -73,8 +72,6 @@ class Counting(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self._channel_locks = {}
-        self._startup_reparse_started = False
-        self._startup_reparse_done = asyncio.Event()
 
     def _lock_for(self, guild_id, channel_id):
         key = str(guild_id), str(channel_id)
@@ -82,98 +79,6 @@ class Counting(commands.Cog):
         if lock is None:
             lock = self._channel_locks[key] = asyncio.Lock()
         return lock
-
-    @commands.Cog.listener()
-    @discord_common.once
-    async def on_ready(self):
-        """Rebuild every configured checkpoint from Discord once per start."""
-        if self._startup_reparse_started:
-            return
-        self._startup_reparse_started = True
-        try:
-            database = await self._wait_for_database()
-            if database is None:
-                return
-            try:
-                states = database.counting_get_channels()
-            except Exception:
-                logger.exception('Could not load counting channels at startup')
-                return
-
-            reparsed = 0
-            for state in states:
-                if await self._reparse_configured_channel(database, state):
-                    reparsed += 1
-            logger.info(
-                'Startup counting reparse complete: %s/%s channels updated',
-                reparsed, len(states))
-        finally:
-            # Numeric messages that arrived while a later channel was waiting
-            # its turn may now use the freshly rebuilt checkpoint.
-            self._startup_reparse_done.set()
-
-    async def _wait_for_database(self):
-        """Wait for the primary on-ready handler to finish DB setup."""
-        while cf_common.user_db is None:
-            is_closed = getattr(self.bot, 'is_closed', None)
-            if callable(is_closed) and is_closed():
-                logger.info('Counting startup reparse stopped during shutdown')
-                return None
-            await asyncio.sleep(_DATABASE_WAIT_SECONDS)
-        return cf_common.user_db
-
-    async def _resolve_channel(self, channel_id):
-        channel_id = int(channel_id)
-        channel = self.bot.get_channel(channel_id)
-        if channel is None:
-            channel = await self.bot.fetch_channel(channel_id)
-        return channel
-
-    async def _reparse_configured_channel(self, database, saved_state):
-        guild_id = saved_state.guild_id
-        channel_id = saved_state.channel_id
-        lock = self._lock_for(guild_id, channel_id)
-        try:
-            async with lock:
-                channel = await self._resolve_channel(channel_id)
-                if channel is None:
-                    logger.warning(
-                        'Counting channel unavailable at startup guild=%s '
-                        'channel=%s', guild_id, channel_id)
-                    return False
-                channel_guild = getattr(channel, 'guild', None)
-                if (channel_guild is None
-                        or str(channel_guild.id) != str(guild_id)):
-                    logger.warning(
-                        'Counting channel guild mismatch at startup guild=%s '
-                        'channel=%s actual_guild=%s', guild_id, channel_id,
-                        getattr(channel_guild, 'id', None))
-                    return False
-
-                # Refresh metadata after waiting for the lock so a concurrent
-                # `;counting here` cannot have its configuration overwritten
-                # by the snapshot loaded at the start of this pass.
-                current_state = database.counting_get_channel(
-                    guild_id, channel_id)
-                if current_state is None:
-                    return False
-                attempts, current_count, last_message_id, _ = \
-                    await self._scan_channel_history(channel)
-                database.counting_sync_history(
-                    guild_id,
-                    channel_id,
-                    current_count,
-                    last_message_id,
-                    attempts,
-                    configured_by=current_state.configured_by,
-                    configured_at=current_state.configured_at,
-                )
-        except Exception:
-            logger.exception(
-                'Could not reparse counting history at startup guild=%s '
-                'channel=%s', guild_id, channel_id)
-            return False
-        return True
 
     @commands.group(name='counting', aliases=['count'],
                     brief='Counting-channel commands',
@@ -274,15 +179,10 @@ class Counting(commands.Cog):
             return
         guild = getattr(message, 'guild', None)
         channel = getattr(message, 'channel', None)
-        if guild is None or channel is None:
+        if guild is None or channel is None or cf_common.user_db is None:
             return
         content = message.content or ''
         if content.lstrip().startswith(';') or not could_be_count_attempt(content):
-            return
-        if (self._startup_reparse_started
-                and not self._startup_reparse_done.is_set()):
-            await self._startup_reparse_done.wait()
-        if cf_common.user_db is None:
             return
 
         reaction = None
