@@ -10,7 +10,7 @@ from tle.util import codeforces_common as cf_common
 from tle.util import discord_common, gemini_api, xai_api
 from tests.llm_test_utils import FakeLlmDb, FakeMessage, run
 from tests.test_llm_cog import FakeCtx
-from tests.test_llm_history import FakeHistoryChannel, HistMessage
+from tests.llm_test_utils import FakeHistoryChannel, HistMessage
 
 
 @pytest.fixture(autouse=True)

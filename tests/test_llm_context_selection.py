@@ -8,7 +8,7 @@ from tle.cogs import _llm_pipeline as llm_pipeline
 from tle.util import gemini_api, xai_api
 from tle.util.llm_keypool import Lease
 from tests.llm_test_utils import run
-from tests.test_llm_history import FakeHistoryChannel, HistMessage
+from tests.llm_test_utils import FakeHistoryChannel, HistMessage
 
 
 class TestLocalRouting:
