@@ -213,11 +213,11 @@ class CountingDbMixin:
             self, guild_id, channel_id, current_count, last_message_id,
             attempts, *, configured_by=None, configured_at=None,
             recorded_at=None):
-        """Atomically install a scanned checkpoint and upsert history attempts.
+        """Atomically replace a checkpoint and its full history snapshot.
 
-        ``attempts`` is an iterable of mappings.  Re-scans update matching
-        message IDs rather than duplicating their audit records; their original
-        ``recorded_at`` timestamp is preserved.
+        ``attempts`` is an iterable of mappings.  A complete reparse deletes
+        the channel's previous ledger and rebuilds it from Discord, so deleted
+        or newly ignored messages cannot survive in current statistics.
         """
         current_count = _count_value(current_count, allow_zero=True)
         sync_time = time.time() if recorded_at is None else float(recorded_at)
@@ -233,10 +233,8 @@ class CountingDbMixin:
 
         guild_id, channel_id = str(guild_id), str(channel_id)
         with self.conn:
-            # Rows absent from this complete history scan remain preserved as
-            # audit records, but no longer contribute to current statistics.
             self.conn.execute(
-                'UPDATE counting_attempt SET active = 0 '
+                'DELETE FROM counting_attempt '
                 'WHERE guild_id = ? AND channel_id = ?',
                 (guild_id, channel_id))
             self.conn.execute('''
@@ -266,9 +264,8 @@ class CountingDbMixin:
                               limit=None):
         """Return attempts oldest first, with optional user/result filters.
 
-        A full history re-sync marks deleted or edited-away numeric attempts
-        inactive instead of erasing their audit data. They are excluded by
-        default and available with ``include_inactive=True``.
+        ``include_inactive`` remains for compatibility with ledgers created by
+        older releases.  Current full-history reparses replace those rows.
         """
         clauses = ['guild_id = ?', 'channel_id = ?']
         params = [str(guild_id), str(channel_id)]

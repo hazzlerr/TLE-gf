@@ -15,15 +15,16 @@ from tle.cogs._counting_parser import (
 class TestCouldBeCountAttempt:
     @pytest.mark.parametrize('content', [
         '1', '73.7', '+9', '-9', '(11)', '0b102', '0xzz', '1G',
-        'A', 'face', 'ABC',
+        'A', 'face', 'ABC', '17 (test)', '9 then 10',
+        'go 9', 'answer: 17', 'version2',
     ])
     def test_keeps_numeric_shapes_and_possible_letter_hex(self, content):
         assert could_be_count_attempt(content) is True
 
     @pytest.mark.parametrize('content', [
-        None, '', '   ', 'hello', 'nine', 'go 9', '9 then 10', 'A word',
+        None, '', '   ', 'hello', 'nine', 'ordinary prose', 'A word',
     ])
-    def test_filters_ordinary_or_multi_token_prose(self, content):
+    def test_filters_prose_without_a_possible_count(self, content):
         assert could_be_count_attempt(content) is False
 
 
@@ -43,6 +44,19 @@ class TestCorrectCounts:
         ('dead', 0xDEAD, 16),
         ('1', 1, 10),
         ('  9  ', 9, 10),
+        ('17 (test)', 17, 10),
+        ('10001 binary note', 17, 2),
+        ('11 hex note', 17, 16),
+        ('test 17 okay', 17, 10),
+        ('test 170', 17, 10),
+        ('prefix10001suffix', 17, 2),
+        ('.9', 9, 10),
+        ('9.', 9, 10),
+        ('09', 9, 10),
+        ('001001', 9, 2),
+        ('0b01001', 9, 2),
+        ('0x09', 9, 10),
+        ('prefix 0xa suffix', 10, 16),
     ])
     def test_accepts_canonical_decimal_binary_and_hex(
             self, content, expected, radix):
@@ -66,6 +80,19 @@ class TestCorrectCounts:
             self, content, expected, radix):
         assert classify_count_attempt(content, expected).radix == radix
 
+    @pytest.mark.parametrize('content', ['cat', 'faceplant', 'preface', 'a test'])
+    def test_letter_only_hex_requires_token_boundaries(self, content):
+        assert classify_count_attempt(content, expected=10).status == IGNORED
+
+    def test_multi_letter_hex_does_not_match_inside_a_word(self):
+        assert classify_count_attempt(
+            'preface this', expected=0xFACE).status == IGNORED
+
+    def test_bounded_letter_only_hex_can_match_inside_a_message(self):
+        result = classify_count_attempt('value: (face)!', expected=0xFACE)
+        assert (result.status, result.radix, result.value) == (
+            CORRECT, 16, 0xFACE)
+
 
 class TestBadAttempts:
     @pytest.mark.parametrize('content', [
@@ -88,8 +115,8 @@ class TestBadAttempts:
         assert (result.radix, result.value) == (radix, value)
 
     @pytest.mark.parametrize('content', [
-        '73.7', '.9', '9.',
-        '09', '001001', '0b01001', '0x09',
+        '73.7', '.8', '8.',
+        '08', '001000', '0b01000', '0x08',
         '0b102', '0b', '0xgg', '0x',
     ])
     def test_malformed_or_noncanonical_tokens_are_invalid_format(self, content):
@@ -101,7 +128,8 @@ class TestBadAttempts:
 
 class TestIgnoredMessages:
     @pytest.mark.parametrize('content', [
-        None, '', 'hello', 'the answer is 9', '9 then 10', '9\n10',
+        None, '', 'hello', 'the answer is 9', 'wrong 73 here',
+        'wrong 73.7 here',
         'face', 'b', 'abc', 'version2', 'hello2', 'user123',
         '2026-08-17', '123.png', '2nd', '42%', '1.2.3', '1/2',
         '9!', '(9)', '+9', '-9', '1g',
@@ -116,6 +144,10 @@ class TestIgnoredMessages:
     def test_letter_only_hex_is_accepted_when_it_is_expected(self):
         result = classify_count_attempt('b', expected=11)
         assert (result.status, result.radix, result.value) == (CORRECT, 16, 11)
+
+    @pytest.mark.parametrize('content', ['hello there', 'version2 text'])
+    def test_ordinary_prose_stays_ignored(self, content):
+        assert classify_count_attempt(content, expected=17).status == IGNORED
 
 
 class TestExpectedValidation:

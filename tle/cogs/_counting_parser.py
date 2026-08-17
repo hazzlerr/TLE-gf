@@ -1,14 +1,10 @@
 """Pure parsing helpers for counting-channel messages.
 
-An unprefixed token is compared with the canonical decimal, binary, and
-hexadecimal spelling of the expected count.  Binary and hexadecimal may also
-use ``0b`` and ``0x`` prefixes.  The expected value disambiguates spellings
-such as ``10``: it is binary two, decimal ten, or hexadecimal sixteen
-depending on which number is currently due.
-
-Letter-only hexadecimal is necessarily ambiguous with ordinary prose.  Such
-a token is accepted when it exactly spells the expected value (for example
-``A`` for ten), but otherwise ignored instead of marking normal chat wrong.
+A canonical decimal, binary, or hexadecimal spelling of the expected count
+may appear anywhere in a message.  Binary and hexadecimal may also use ``0b``
+and ``0x`` prefixes.  Numeric spellings use literal substring matching.
+Multi-letter bare hexadecimal requires token boundaries, while a single bare
+hex letter must be the entire message, so normal prose does not advance it.
 """
 
 import re
@@ -23,6 +19,8 @@ IGNORED = 'ignored'
 
 _HEX_TOKEN_RE = re.compile(r'^[0-9a-f]+$', re.IGNORECASE)
 _DECIMAL_SHAPE_RE = re.compile(r'^(?:[0-9]+\.[0-9]*|\.[0-9]+)$')
+_MULTI_LETTER_HEX_CANDIDATE_RE = re.compile(
+    r'(?<![0-9a-z_])[a-f]{2,}(?![0-9a-z_])', re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -53,49 +51,64 @@ class CountAttempt:
         return self.status if self.is_bad_attempt else None
 
 
-def _single_token(content):
+def _stripped_message(content):
     if not isinstance(content, str):
         return None
-    token = content.strip()
-    if not token or any(char.isspace() for char in token):
-        return None
-    return token
+    stripped = content.strip()
+    return stripped or None
 
 
 def could_be_count_attempt(content):
     """Cheap expected-independent filter for the global message listener.
 
-    A standalone token reaches the DB-backed classifier when it contains a
-    digit (including malformed numeric shapes such as ``22.3``), or when it
-    consists only of A-F and could therefore be a canonical bare hex count.
-    Ordinary prose and multi-token chat are filtered out.
+    A message reaches the DB-backed classifier when it contains a digit, an
+    all-A-F token of at least two letters, or consists solely of one A-F
+    letter.  The full classifier decides whether that text is the expected
+    value, a bad numeric attempt, or unrelated prose.
     """
-    token = _single_token(content)
-    if token is None:
+    if not isinstance(content, str) or not content.strip():
         return False
-    if any(char.isdigit() for char in token):
+    if any(char.isdigit() for char in content):
         return True
-    return all(char in 'abcdefABCDEF' for char in token)
+    stripped = content.strip()
+    if len(stripped) == 1 and stripped.lower() in 'abcdef':
+        return True
+    return _MULTI_LETTER_HEX_CANDIDATE_RE.search(content) is not None
 
 
-def _correct_radix(token, expected):
-    lowered = token.lower()
+def _correct_radix(content, expected):
+    lowered = content.lower()
+    stripped = lowered.strip()
     decimal = str(expected)
     binary = format(expected, 'b')
     hexadecimal = format(expected, 'x')
 
-    # Prefer decimal for the small values whose bare spellings overlap.
-    if lowered == decimal:
-        return 10
-    if lowered == binary:
-        return 2
-    if lowered == hexadecimal:
-        return 16
-    if lowered == '0b' + binary:
-        return 2
-    if lowered == '0x' + hexadecimal:
-        return 16
-    return None
+    # Pick the earliest representation in the message.  At the same position,
+    # an explicit prefix wins over the bare digits it contains; otherwise keep
+    # the traditional decimal, binary, hexadecimal preference.
+    representations = (
+        ('0b' + binary, 2, 0),
+        ('0x' + hexadecimal, 16, 1),
+        (decimal, 10, 2),
+        (binary, 2, 3),
+        (hexadecimal, 16, 4),
+    )
+    matches = []
+    for spelling, radix, preference in representations:
+        if spelling.isalpha():
+            if len(spelling) == 1:
+                start = 0 if stripped == spelling else -1
+            else:
+                pattern = re.compile(
+                    rf'(?<![0-9a-z_]){re.escape(spelling)}(?![0-9a-z_])')
+                match = pattern.search(lowered)
+                start = -1 if match is None else match.start()
+        else:
+            start = lowered.find(spelling)
+        if start >= 0:
+            matches.append((start, -len(spelling), preference, radix))
+
+    return min(matches)[-1] if matches else None
 
 
 def _classify_prefixed(token, prefix, radix, valid_digits, format_code):
@@ -121,47 +134,53 @@ def classify_count_attempt(content, expected):
     """Classify *content* against the non-negative integer *expected*.
 
     The result distinguishes messages the counting cog should ignore from bad
-    attempts that deserve its negative reaction.  Only canonical spellings
-    are accepted. Leading zeroes, decimal-shaped values, and malformed base
-    prefixes are invalid; unrelated punctuated or alphanumeric chat is ignored.
+    attempts that deserve its negative reaction.  The matching substring must
+    be canonical; surrounding text may be arbitrary.  When no match exists,
+    standalone leading-zero values, decimal shapes, and malformed base
+    prefixes are invalid, while unrelated alphanumeric chat is ignored.
     """
     if isinstance(expected, bool) or not isinstance(expected, int):
         raise TypeError('expected must be an integer')
     if expected < 0:
         raise ValueError('expected must be non-negative')
 
-    token = _single_token(content)
-    if token is None:
+    stripped = _stripped_message(content)
+    if stripped is None:
         return CountAttempt(IGNORED)
 
-    radix = _correct_radix(token, expected)
+    radix = _correct_radix(content, expected)
     if radix is not None:
         return CountAttempt(CORRECT, radix=radix, value=expected)
 
-    lowered = token.lower()
+    return _classify_bad_message(stripped)
+
+
+def _classify_bad_message(content):
+    """Reject only a whole non-matching message that looks numeric."""
+    lowered = content.lower()
     if lowered.startswith('0b'):
-        return _classify_prefixed(token, '0b', 2, '01', 'b')
+        return _classify_prefixed(content, '0b', 2, '01', 'b')
     if lowered.startswith('0x'):
         return _classify_prefixed(
-            token, '0x', 16, '0123456789abcdef', 'x')
+            content, '0x', 16, '0123456789abcdef', 'x')
 
     # A-F words could be either a count or ordinary chat.  Unless one matched
     # the expected canonical hex form above, leave it alone.
-    if token.isalpha():
+    if content.isalpha():
         return CountAttempt(IGNORED)
 
-    if _HEX_TOKEN_RE.fullmatch(token):
+    if _HEX_TOKEN_RE.fullmatch(content):
         canonical_somewhere = (
-            _is_canonical_bare(token, 10, '0123456789', 'd')
-            or _is_canonical_bare(token, 2, '01', 'b')
+            _is_canonical_bare(content, 10, '0123456789', 'd')
+            or _is_canonical_bare(content, 2, '01', 'b')
             or _is_canonical_bare(
-                token, 16, '0123456789abcdef', 'x')
+                content, 16, '0123456789abcdef', 'x')
         )
         return CountAttempt(
             WRONG_NUMBER if canonical_somewhere else INVALID_FORMAT)
 
     # A single decimal point still looks like a standalone numeric attempt,
     # but unrelated digit-bearing tokens (dates, filenames, ``2nd``) are chat.
-    if _DECIMAL_SHAPE_RE.fullmatch(token):
+    if _DECIMAL_SHAPE_RE.fullmatch(content):
         return CountAttempt(INVALID_FORMAT)
     return CountAttempt(IGNORED)

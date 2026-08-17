@@ -6,7 +6,11 @@ import pytest
 
 from tle.util.db.counting_db import CountingStateConflict
 from tle.util.db.user_db_conn import UserDbConn, namedtuple_factory
-from tle.util.db.user_db_upgrades import registry, upgrade_1_54_0
+from tle.util.db.user_db_upgrades import (
+    registry,
+    upgrade_1_54_0,
+    upgrade_1_55_0,
+)
 
 
 @pytest.fixture
@@ -56,7 +60,7 @@ class TestCountingSchema:
             'content', 'created_at', 'recorded_at', 'expected_value',
             'submitted_value', 'accepted', 'radix', 'reason', 'active',
         }
-        assert registry.get_current_version(db.conn) == '1.54.0'
+        assert registry.get_current_version(db.conn) == '1.55.0'
 
     def test_migration_is_idempotent(self):
         conn = sqlite3.connect(':memory:')
@@ -71,6 +75,31 @@ class TestCountingSchema:
         finally:
             conn.close()
 
+    def test_reparse_migration_clears_attempts_but_keeps_channels(self):
+        conn = sqlite3.connect(':memory:')
+        conn.row_factory = namedtuple_factory
+        try:
+            upgrade_1_54_0(conn)
+            conn.execute(
+                'INSERT INTO counting_channel VALUES '
+                "('1', '2', 1, '3', '4', 5.0, 6.0)")
+            conn.execute('''
+                INSERT INTO counting_attempt VALUES
+                    ('1', '2', '3', '4', 'Ada', '1', 5.0, 6.0,
+                     1, 1, 1, 10, 'correct', 1)
+            ''')
+
+            upgrade_1_55_0(conn)
+            upgrade_1_55_0(conn)
+
+            assert conn.execute(
+                'SELECT guild_id, channel_id FROM counting_channel'
+            ).fetchall() == [('1', '2')]
+            assert conn.execute(
+                'SELECT * FROM counting_attempt').fetchall() == []
+        finally:
+            conn.close()
+
     def test_registry_upgrades_existing_153_database(self, tmp_path):
         path = tmp_path / 'user.db'
         raw = sqlite3.connect(path)
@@ -81,7 +110,7 @@ class TestCountingSchema:
 
         database = UserDbConn(str(path))
         try:
-            assert registry.get_current_version(database.conn) == '1.54.0'
+            assert registry.get_current_version(database.conn) == '1.55.0'
             database.conn.execute(
                 'SELECT expected_value FROM counting_attempt').fetchall()
         finally:
@@ -171,7 +200,7 @@ class TestCountingLiveAttempts:
 
 
 class TestCountingHistorySync:
-    def test_sync_is_atomic_and_upserts_by_message_id(self, db):
+    def test_sync_is_atomic_and_replaces_history_snapshot(self, db):
         history = [
             _attempt(10, content='1', created_at=1.0),
             _attempt(
@@ -202,9 +231,9 @@ class TestCountingHistorySync:
         changed = db.counting_get_attempt(100, 200, 11)
         assert (changed.author_name, changed.content, changed.radix) == \
             ('Lin Renamed', '0x3', 16)
-        assert changed.recorded_at == 20.0
+        assert changed.recorded_at == 99.0
 
-    def test_resync_keeps_missing_rows_as_inactive_audit_records(self, db):
+    def test_resync_replaces_rows_missing_from_current_history(self, db):
         history = [
             _attempt(10, created_at=1.0),
             _attempt(11, content='10', created_at=2.0, expected_value=2,
@@ -215,10 +244,8 @@ class TestCountingHistorySync:
         db.counting_sync_history(1, 2, 1, 10, [history[0]])
 
         assert [row.message_id for row in db.counting_get_attempts(1, 2)] == ['10']
-        audit = db.counting_get_attempts(1, 2, include_inactive=True)
-        assert [(row.message_id, row.active) for row in audit] == [
-            ('10', 1), ('11', 0),
-        ]
+        assert [row.message_id for row in db.counting_get_attempts(
+            1, 2, include_inactive=True)] == ['10']
         assert db.counting_get_stats(1, 2).accepted_count == 1
 
     def test_invalid_sync_rolls_back_before_configuration(self, db):

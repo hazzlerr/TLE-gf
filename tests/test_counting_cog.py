@@ -69,9 +69,9 @@ class TestCountingHere:
             ('6', bot),            # must not advance history
             ('6', human),
             ('11', human),         # wrong while 7 is expected
-            ('73.7', human),       # invalid while 7 is expected
+            ('73.7', human),       # contains the expected decimal 7
             ('version2', human),   # prose-with-digit is ignored
-            ('7', human),
+            ('7', human),          # wrong now that 8 is expected
         ]
         thread.messages = [
             FakeMessage(
@@ -93,18 +93,20 @@ class TestCountingHere:
         }]
         state = db.counting_get_channel(guild.id, thread.id)
         assert (state.current_count, state.last_message_id,
-                state.configured_by) == (7, '12', '999')
+                state.configured_by) == (7, '10', '999')
 
         attempts = db.counting_get_attempts(guild.id, thread.id)
         assert [row.content for row in attempts] == [
             '1', '10', '3', '0x4', '101', '6', '11', '73.7', '7']
-        assert [row.accepted for row in attempts] == [1, 1, 1, 1, 1, 1, 0, 0, 1]
+        assert [row.accepted for row in attempts] == [
+            1, 1, 1, 1, 1, 1, 0, 1, 0,
+        ]
         assert [row.radix for row in attempts] == [
-            10, 2, 10, 16, 2, 10, None, None, 10]
+            10, 2, 10, 16, 2, 10, None, 10, None]
         assert [(row.expected_value, row.reason) for row in attempts[-3:]] == [
             (7, 'wrong_number'),
-            (7, 'invalid_format'),
             (7, 'correct'),
+            (8, 'wrong_number'),
         ]
         assert all(row.user_id != '999' for row in attempts)
 
@@ -115,7 +117,7 @@ class TestCountingHere:
         assert 'Current count: **7**' in description
         assert 'decimal `8`, binary `1000`, hex `8`' in description
 
-    def test_rescan_hides_deleted_attempt_but_keeps_its_audit_row(
+    def test_rescan_deletes_attempt_missing_from_channel_history(
             self, db, monkeypatch):
         guild = FakeGuild()
         thread = FakeThreadChannel()
@@ -137,11 +139,8 @@ class TestCountingHere:
         assert db.counting_get_channel(guild.id, thread.id).current_count == 1
         assert [row.message_id for row in db.counting_get_attempts(
             guild.id, thread.id)] == ['1']
-        audit = db.counting_get_attempts(
-            guild.id, thread.id, include_inactive=True)
-        assert [(row.message_id, row.active) for row in audit] == [
-            ('1', 1), ('2', 0),
-        ]
+        assert [row.message_id for row in db.counting_get_attempts(
+            guild.id, thread.id, include_inactive=True)] == ['1']
 
 
 class TestCountingLiveMessages:

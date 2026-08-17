@@ -16,3 +16,13 @@ def upgrade_1_54_0(db):
     create_counting_schema(db)
     db.commit()
     logger.info('1.54.0: Upgrade complete')
+
+
+@registry.register('1.55.0', 'Rebuild counting ledgers from Discord history')
+def upgrade_1_55_0(db):
+    """Clear parsed attempts while preserving configured channel IDs."""
+    logger.info('1.55.0: Clearing counting ledgers for full history reparse')
+    create_counting_schema(db)
+    db.execute('DELETE FROM counting_attempt')
+    db.commit()
+    logger.info('1.55.0: Upgrade complete')
