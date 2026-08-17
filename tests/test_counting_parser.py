@@ -48,14 +48,14 @@ class TestCorrectCounts:
         ('10001 binary note', 17, 2),
         ('11 hex note', 17, 16),
         ('test 17 okay', 17, 10),
-        ('test 170', 17, 10),
         ('prefix10001suffix', 17, 2),
-        ('.9', 9, 10),
-        ('9.', 9, 10),
-        ('09', 9, 10),
-        ('001001', 9, 2),
-        ('0b01001', 9, 2),
-        ('0x09', 9, 10),
+        ('wrong 1087, then 108!', 108, 10),
+        ('prefix108suffix', 108, 10),
+        ('the next count is 108.', 108, 10),
+        ('score+108', 108, 10),
+        ('108/7', 108, 10),
+        ('x108x', 108, 10),
+        ('version2', 2, 10),
         ('prefix 0xa suffix', 10, 16),
     ])
     def test_accepts_canonical_decimal_binary_and_hex(
@@ -115,8 +115,30 @@ class TestBadAttempts:
         assert (result.radix, result.value) == (radix, value)
 
     @pytest.mark.parametrize('content', [
-        '73.7', '.8', '8.',
+        '1087', '2108', '91089',
+        '108a', 'c108', '1101100a', '0x108',
+        '0b11011000', '0x6c7', 'a6c', '6c1',
+    ])
+    def test_does_not_match_inside_a_longer_integer(self, content):
+        result = classify_count_attempt(content, expected=108)
+        assert result.status == WRONG_NUMBER
+        assert result.is_bad_attempt is True
+
+    @pytest.mark.parametrize('content', ['0x0b1101100', '0x0x6c'])
+    def test_does_not_match_nested_base_literals(self, content):
+        assert classify_count_attempt(content, expected=108).status != CORRECT
+
+    @pytest.mark.parametrize('content', [
+        '111', '0x110', '0b100011',
+        '0x17', '0b11', '0x10001',
+    ])
+    def test_does_not_match_inside_another_base_literal(self, content):
+        assert classify_count_attempt(content, expected=17).status != CORRECT
+
+    @pytest.mark.parametrize('content', [
+        '73.7', '.8', '8.', '.108', '108.', '108.7',
         '08', '001000', '0b01000', '0x08',
+        '0108', '0b01101100', '0x06c',
         '0b102', '0b', '0xgg', '0x',
     ])
     def test_malformed_or_noncanonical_tokens_are_invalid_format(self, content):
@@ -124,6 +146,39 @@ class TestBadAttempts:
         assert result.status == INVALID_FORMAT
         assert result.is_bad_attempt is True
         assert result.reason == INVALID_FORMAT
+
+    @pytest.mark.parametrize('content', [
+        '09', '001001', '0b01001', '0x09',
+    ])
+    def test_leading_extensions_do_not_match_expected_nine(self, content):
+        assert classify_count_attempt(content, expected=9).status == \
+            INVALID_FORMAT
+
+    @pytest.mark.parametrize('content', [
+        '.108', '108.7', '7.108',
+    ])
+    def test_decimal_extensions_do_not_match_expected_108(self, content):
+        assert classify_count_attempt(content, expected=108).status == \
+            INVALID_FORMAT
+
+
+class TestBoundedOccurrences:
+    @pytest.mark.parametrize('content', [
+        '(108)', '#108!', '108, okay', '1087 then (108)',
+    ])
+    def test_accepts_a_separately_bounded_occurrence(self, content):
+        assert classify_count_attempt(content, 108).status == CORRECT
+
+    @pytest.mark.parametrize('content', [
+        '7108 and 1089', 'text 1087', '1,108', "1'108",
+        '108٧', '١108٧', '108²', '108_7',
+    ])
+    def test_rejects_or_ignores_only_extended_occurrences(self, content):
+        assert classify_count_attempt(content, 108).status != CORRECT
+
+    def test_unicode_letters_bound_bare_hex_words(self):
+        assert classify_count_attempt(
+            'éfaceé', expected=0xFACE).status == IGNORED
 
 
 class TestIgnoredMessages:

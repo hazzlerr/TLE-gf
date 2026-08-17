@@ -69,9 +69,9 @@ class TestCountingHere:
             ('6', bot),            # must not advance history
             ('6', human),
             ('11', human),         # wrong while 7 is expected
-            ('73.7', human),       # contains the expected decimal 7
+            ('73.7', human),       # invalid while 7 is expected
             ('version2', human),   # prose-with-digit is ignored
-            ('7', human),          # wrong now that 8 is expected
+            ('7', human),
         ]
         thread.messages = [
             FakeMessage(
@@ -93,20 +93,20 @@ class TestCountingHere:
         }]
         state = db.counting_get_channel(guild.id, thread.id)
         assert (state.current_count, state.last_message_id,
-                state.configured_by) == (7, '10', '999')
+                state.configured_by) == (7, '12', '999')
 
         attempts = db.counting_get_attempts(guild.id, thread.id)
         assert [row.content for row in attempts] == [
             '1', '10', '3', '0x4', '101', '6', '11', '73.7', '7']
         assert [row.accepted for row in attempts] == [
-            1, 1, 1, 1, 1, 1, 0, 1, 0,
+            1, 1, 1, 1, 1, 1, 0, 0, 1,
         ]
         assert [row.radix for row in attempts] == [
-            10, 2, 10, 16, 2, 10, None, 10, None]
+            10, 2, 10, 16, 2, 10, None, None, 10]
         assert [(row.expected_value, row.reason) for row in attempts[-3:]] == [
             (7, 'wrong_number'),
+            (7, 'invalid_format'),
             (7, 'correct'),
-            (8, 'wrong_number'),
         ]
         assert all(row.user_id != '999' for row in attempts)
 
@@ -182,6 +182,23 @@ class TestCountingLiveMessages:
             (9, 0, 'wrong_number'),
             (9, 0, 'invalid_format'),
         ]
+
+    def test_longer_number_is_rejected_before_bounded_match_advances(self, db):
+        channel = FakeThreadChannel()
+        _configured(db, current_count=107)
+        longer = _live_message(114, '1087', channel, offset=1)
+        bounded = _live_message(115, '108 (test)', channel, offset=2)
+        cog = Counting(bot=None)
+
+        _run(cog.on_message(longer))
+        _run(cog.on_message(bounded))
+
+        assert longer.reactions == [BAD]
+        assert bounded.reactions == [GOOD]
+        assert db.counting_get_channel(100, 200).current_count == 108
+        rows = db.counting_get_attempts(100, 200)
+        assert [(row.content, row.expected_value, row.accepted) for row in rows] \
+            == [('1087', 108, 0), ('108 (test)', 108, 1)]
 
     def test_random_prose_including_version2_is_ignored(self, db):
         channel = FakeThreadChannel()

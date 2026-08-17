@@ -2,9 +2,11 @@
 
 A canonical decimal, binary, or hexadecimal spelling of the expected count
 may appear anywhere in a message.  Binary and hexadecimal may also use ``0b``
-and ``0x`` prefixes.  Numeric spellings use literal substring matching.
-Multi-letter bare hexadecimal requires token boundaries, while a single bare
-hex letter must be the entire message, so normal prose does not advance it.
+and ``0x`` prefixes.  A spelling must be a complete numeric run: adjacent
+digits, hexadecimal A-F, numeric separators, and enclosing base prefixes keep
+it from matching inside a larger number.  Ordinary prose and punctuation may
+surround it.  Multi-letter bare hexadecimal requires word boundaries, while a
+single bare hex letter must be the entire message.
 """
 
 import re
@@ -20,7 +22,7 @@ IGNORED = 'ignored'
 _HEX_TOKEN_RE = re.compile(r'^[0-9a-f]+$', re.IGNORECASE)
 _DECIMAL_SHAPE_RE = re.compile(r'^(?:[0-9]+\.[0-9]*|\.[0-9]+)$')
 _MULTI_LETTER_HEX_CANDIDATE_RE = re.compile(
-    r'(?<![0-9a-z_])[a-f]{2,}(?![0-9a-z_])', re.IGNORECASE)
+    r'(?<!\w)[a-f]{2,}(?!\w)', re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,51 @@ def could_be_count_attempt(content):
     return _MULTI_LETTER_HEX_CANDIDATE_RE.search(content) is not None
 
 
+def _extends_number(char):
+    """Whether *char* can join a supported numeric-looking token."""
+    return char.isdigit() or char.lower() in 'abcdef' or char == '_'
+
+
+def _extends_word(char):
+    return char.isalnum() or char == '_'
+
+
+def _bounded_start(content, spelling, extends, *, reject_nested_prefix=False):
+    """Find the first occurrence not embedded in a larger numeric token.
+
+    A leading dot makes a fraction; a following dot only extends the number
+    when another digit follows, so normal sentence punctuation remains valid.
+    Commas and apostrophes extend only when joining two digit runs.
+    """
+    offset = 0
+    while True:
+        start = content.find(spelling, offset)
+        if start < 0:
+            return -1
+        end = start + len(spelling)
+        left_ok = start == 0 or not extends(content[start - 1])
+        right_ok = end == len(content) or not extends(content[end])
+        if start and content[start - 1] == '.':
+            left_ok = False
+        if (end < len(content) and content[end] == '.'
+                and end + 1 < len(content)
+                and content[end + 1].isdigit()):
+            right_ok = False
+        if (start >= 2 and content[start - 1] in ",'\N{RIGHT SINGLE QUOTATION MARK}"
+                and content[start - 2].isdigit()):
+            left_ok = False
+        if (end + 1 < len(content)
+                and content[end] in ",'\N{RIGHT SINGLE QUOTATION MARK}"
+                and content[end + 1].isdigit()):
+            right_ok = False
+        if (reject_nested_prefix and start >= 2
+                and content[start - 2:start] in ('0b', '0x')):
+            left_ok = False
+        if left_ok and right_ok:
+            return start
+        offset = start + 1
+
+
 def _correct_radix(content, expected):
     lowered = content.lower()
     stripped = lowered.strip()
@@ -99,12 +146,11 @@ def _correct_radix(content, expected):
             if len(spelling) == 1:
                 start = 0 if stripped == spelling else -1
             else:
-                pattern = re.compile(
-                    rf'(?<![0-9a-z_]){re.escape(spelling)}(?![0-9a-z_])')
-                match = pattern.search(lowered)
-                start = -1 if match is None else match.start()
+                start = _bounded_start(lowered, spelling, _extends_word)
         else:
-            start = lowered.find(spelling)
+            start = _bounded_start(
+                lowered, spelling, _extends_number,
+                reject_nested_prefix=True)
         if start >= 0:
             matches.append((start, -len(spelling), preference, radix))
 
