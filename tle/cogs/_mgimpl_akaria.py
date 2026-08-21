@@ -31,7 +31,8 @@ logger = logging.getLogger(__name__)
 
 
 class ImplAkariAMixin:
-    async def _cmd_akari_add(self, ctx, member, puzzle_number, result_text, time_text):
+    async def _cmd_akari_add(self, ctx, member, puzzle_number, result_text,
+                             time_text, *, display_time_text=None):
         """Mod-only: manually insert an Akari result for a (user, puzzle) pair.
 
         For backfilling missed posts or posts that landed in the wrong channel.
@@ -103,11 +104,28 @@ class ImplAkariAMixin:
 
         self._recompute_akari_ratings(ctx.guild.id)
 
+        shown_time = display_time_text or format_duration(time_seconds)
         await ctx.send(embed=discord_common.embed_success(
             f'Added {AKARI_GAME.display_name} result for '
             f'`{_safe_member_name(member)}` on puzzle `{puzzle_number}` '
             f'({puzzle_date.isoformat()}): **{result_label}** in '
-            f'**{format_duration(time_seconds)}**.'))
+            f'**{shown_time}**.'))
+
+    async def _cmd_akari_giveup(self, ctx, selector):
+        """Record the invoking user's deliberate 0% result."""
+        if selector is None:
+            raise MinigameCogError(
+                'Usage: `;akari giveup <date|#number>`.')
+        if cf_common.user_db.is_akari_banned(ctx.guild.id, ctx.author.id):
+            raise MinigameCogError(
+                f'You are banned from posting {AKARI_GAME.display_name} '
+                'results. Ask a moderator to lift the ban.')
+
+        puzzle_date = self._parse_akari_date_or_number(selector)
+        puzzle_number = _mg().expected_puzzle_number(puzzle_date)
+        await self._cmd_akari_add(
+            ctx, ctx.author, puzzle_number, '0%', '67:67:67',
+            display_time_text='67:67:67')
 
     async def _cmd_akari_ratings(self, ctx, *, excluded_ids=None,
                                   included_ids=None, include_inactive=False,

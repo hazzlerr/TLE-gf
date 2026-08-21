@@ -202,6 +202,11 @@ class AkariCmdsMixin:
                         puzzle_id: int, result: str, time: str):
         await self._cmd_akari_add(ctx, member, puzzle_id, result, time)
 
+    @akari.command(name='giveup', brief='Record a 0% Akari result',
+                   usage='<date|#number>')
+    async def akari_giveup(self, ctx, selector: str = None):
+        await self._cmd_akari_giveup(ctx, selector)
+
     @akari.group(name='import', brief='Manage imported history',
                  invoke_without_command=True)
     @akari_mod_only()
