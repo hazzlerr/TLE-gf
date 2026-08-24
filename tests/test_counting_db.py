@@ -60,7 +60,7 @@ class TestCountingSchema:
             'content', 'created_at', 'recorded_at', 'expected_value',
             'submitted_value', 'accepted', 'radix', 'reason', 'active',
         }
-        assert registry.get_current_version(db.conn) == '1.55.0'
+        assert registry.get_current_version(db.conn) == registry.latest_version
 
     def test_migration_is_idempotent(self):
         conn = sqlite3.connect(':memory:')
@@ -110,7 +110,8 @@ class TestCountingSchema:
 
         database = UserDbConn(str(path))
         try:
-            assert registry.get_current_version(database.conn) == '1.55.0'
+            assert registry.get_current_version(
+                database.conn) == registry.latest_version
             database.conn.execute(
                 'SELECT expected_value FROM counting_attempt').fetchall()
         finally:

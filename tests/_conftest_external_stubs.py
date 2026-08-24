@@ -112,6 +112,9 @@ class _StubGroupResult:
         self.__name__ = getattr(func, '__name__', 'stub')
         self.__doc__ = getattr(func, '__doc__', None)
         self.__wrapped__ = func
+        # discord.py exposes the undecorated coroutine here, which lets tests
+        # invoke a command without a Bot.
+        self.callback = func
         self.name = attrs.get('name', self.__name__)
         self.aliases = list(attrs.get('aliases', ()))
         self.brief = attrs.get('brief')

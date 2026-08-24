@@ -117,7 +117,7 @@ class TestHistoryCommand:
 
         embed = ctx.sent[0][1]['embed']
         assert embed.title == 'Great Day history — Invoker'
-        assert 'No Great Day picks have been recorded' in embed.description
+        assert 'No Great Day history has been recorded' in embed.description
 
     def test_paginates_15_per_page_newest_first(self, monkeypatch):
         db = FakeGreatDayDb()

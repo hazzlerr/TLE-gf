@@ -8,6 +8,13 @@ import discord
 from discord.ext import commands
 
 from tle import constants
+from tle.cogs._greatday_events import (
+    collapse_events,
+    merge_history,
+    record_event,
+    scan_signup_events,
+    signed_up_post_count,
+)
 from tle.cogs._greatday_helpers import (
     _BACKFILL_STOP_GAP_SECONDS,
     _GREATDAY_RE as _GREATDAY_RE,
@@ -162,6 +169,8 @@ class GreatDay(commands.Cog):
             raise GreatDayCogError('You are banned from great day.')
         added = cf_common.user_db.greatday_signup(ctx.guild.id, ctx.author.id)
         if added:
+            record_event(cf_common.user_db, ctx.guild.id, ctx.author.id,
+                         'signup', ctx.message)
             await ctx.send(embed=discord_common.embed_success(
                 'You have been signed up for great day pings!'))
         else:
@@ -172,6 +181,8 @@ class GreatDay(commands.Cog):
     async def remove(self, ctx):
         removed = cf_common.user_db.greatday_remove(ctx.guild.id, ctx.author.id)
         if removed:
+            record_event(cf_common.user_db, ctx.guild.id, ctx.author.id,
+                         'signout', ctx.message)
             await ctx.send(embed=discord_common.embed_success(
                 'You have been removed from great day pings.'))
         else:
@@ -189,6 +200,8 @@ class GreatDay(commands.Cog):
         added = cf_common.user_db.greatday_signup(ctx.guild.id, member.id)
         name = discord.utils.escape_mentions(member.display_name)
         if added:
+            record_event(cf_common.user_db, ctx.guild.id, member.id,
+                         'signup', ctx.message)
             await ctx.send(embed=discord_common.embed_success(
                 f'`{name}` has been added to great day pings.'))
         else:
@@ -202,6 +215,8 @@ class GreatDay(commands.Cog):
         removed = cf_common.user_db.greatday_remove(ctx.guild.id, member.id)
         name = discord.utils.escape_mentions(member.display_name)
         if removed:
+            record_event(cf_common.user_db, ctx.guild.id, member.id,
+                         'signout', ctx.message)
             await ctx.send(embed=discord_common.embed_success(
                 f'`{name}` has been removed from great day pings.'))
         else:
@@ -212,7 +227,14 @@ class GreatDay(commands.Cog):
                       usage='@user')
     @commands.has_role(constants.TLE_ADMIN)
     async def ban_user(self, ctx, member: discord.Member):
+        # A ban silently drops the signup, so read membership first to log the
+        # implied signout.
+        was_signed_up = cf_common.user_db.greatday_is_signed_up(
+            ctx.guild.id, member.id)
         banned = cf_common.user_db.greatday_ban(ctx.guild.id, member.id)
+        if was_signed_up:
+            record_event(cf_common.user_db, ctx.guild.id, member.id,
+                         'signout', ctx.message)
         name = discord.utils.escape_mentions(member.display_name)
         if banned:
             await ctx.send(embed=discord_common.embed_success(
@@ -334,22 +356,24 @@ class GreatDay(commands.Cog):
         target = member or ctx.author
         name = discord.utils.escape_markdown(
             discord.utils.escape_mentions(target.display_name))
-        rows = cf_common.user_db.greatday_get_pick_history(
+        picks = cf_common.user_db.greatday_get_pick_history(
             ctx.guild.id, target.id)
+        events = collapse_events(cf_common.user_db.greatday_get_signup_events(
+            ctx.guild.id, target.id))
+        entries = merge_history(picks, events)
         title = f'Great Day history — {name}'
-        if not rows:
+        if not entries:
             await ctx.send(embed=discord.Embed(
                 title=title,
-                description='No Great Day picks have been recorded for this user.',
+                description='No Great Day history has been recorded for this user.',
                 color=0x00aaff,
             ))
             return
 
-        numbered = list(enumerate(rows, start=1))
+        numbered = list(enumerate(entries, start=1))
         pages = []
         for chunk in paginator.chunkify(numbered, _HISTORY_PER_PAGE):
-            lines = [f'**{number}.** {_format_pick_time(row.picked_at)}'
-                     for number, row in chunk]
+            lines = [f'**{number}.** {entry}' for number, entry in chunk]
             pages.append((None, discord.Embed(
                 title=title,
                 description='\n'.join(lines),
@@ -362,10 +386,8 @@ class GreatDay(commands.Cog):
                       usage='[@user]')
     async def stats(self, ctx, member: discord.Member = None):
         if member is not None:
-            count = cf_common.user_db.greatday_get_count(ctx.guild.id, member.id)
-            name = discord.utils.escape_mentions(member.display_name)
             await ctx.send(embed=discord_common.embed_neutral(
-                f'`{name}` has been great-day\'d **{count}** time(s).'))
+                self._member_stats(ctx.guild, member)))
             return
 
         rows = cf_common.user_db.greatday_get_stats(ctx.guild.id)
@@ -374,7 +396,8 @@ class GreatDay(commands.Cog):
                 'No picks recorded yet. Admins can run `;greatday backfill` '
                 'to seed history from the channel.')
 
-        personal = _personal_rank_line(rows, ctx.author.id)
+        personal = (_personal_rank_line(rows, ctx.author.id) + '\n'
+                    + self._signup_stat_lines(ctx.guild, ctx.author.id))
         # Rank the whole list once with standard competition ranking so tied
         # counts share a rank (and the tie still numbers correctly across page
         # boundaries), then paginate the (rank, row) pairs.
@@ -395,6 +418,34 @@ class GreatDay(commands.Cog):
             pages.append((personal, embed))
         paginator.paginate(self.bot, ctx.channel, pages, wait_time=5 * 60,
                            set_pagenum_footers=True, author_id=ctx.author.id)
+
+    def _member_stats(self, guild, member):
+        """Render a single member's pick count, last signup and days signed up."""
+        count = cf_common.user_db.greatday_get_count(guild.id, member.id)
+        name = discord.utils.escape_mentions(member.display_name)
+        return (f'`{name}` has been great-day\'d **{count}** time(s).\n'
+                + self._signup_stat_lines(guild, member.id))
+
+    def _signup_stat_lines(self, guild, user_id):
+        """Render the last-signup and days-signed-up lines for a user."""
+        events = collapse_events(cf_common.user_db.greatday_get_signup_events(
+            guild.id, user_id))
+        signed_up = cf_common.user_db.greatday_is_signed_up(guild.id, user_id)
+        last_signup = next(
+            (row for row in events if row.action == 'signup'), None)
+        days, complete = signed_up_post_count(
+            events, cf_common.user_db.greatday_get_post_times(guild.id),
+            signed_up)
+        lines = []
+        if last_signup is None:
+            # Signups predating the event log are unknown, not absent.
+            lines.append('Last signup: not recorded'
+                         + ('' if signed_up else ' (not signed up)'))
+        else:
+            lines.append(f'Last signup: {_format_pick_time(last_signup.at)}')
+        suffix = '' if complete else ' (at least — earlier history not recorded)'
+        lines.append(f'Days signed up: **{days}**{suffix}')
+        return '\n'.join(lines)
 
     @greatday.command(name='backfill',
                       brief='Seed pick history from the greatday channel (admin)')
@@ -460,6 +511,56 @@ class GreatDay(commands.Cog):
         # message has scrolled out of view.
         await ctx.send(f'{ctx.author.mention} `;greatday backfill` finished — '
                        f'inserted **{inserted}** new pick row(s).')
+
+    @greatday.command(name='backfillsignups',
+                      brief='Seed signup/signout history from a channel (admin)',
+                      usage='[#channel]')
+    @commands.has_role(constants.TLE_ADMIN)
+    async def backfill_signups(self, ctx, channel: discord.TextChannel = None):
+        """Replay a channel and log every `;greatday` membership command the
+        bot confirmed. Idempotent — safe to re-run.
+
+        Unlike `;greatday backfill` this scans the whole channel: membership
+        commands are sporadic, so a gap heuristic would cut the scan short.
+        Bans are skipped because a ban drops a signup without announcing it,
+        so history cannot tell whether the user was signed up at the time.
+        """
+        if channel is None:
+            channel_id = cf_common.user_db.get_guild_config(
+                ctx.guild.id, 'greatday_channel')
+            channel = (ctx.guild.get_channel(int(channel_id))
+                       if channel_id else ctx.channel)
+        if channel is None:
+            raise GreatDayCogError('Configured great day channel is not accessible.')
+
+        progress = await ctx.send(embed=discord_common.embed_neutral(
+            f'Scanning {channel.mention} for signup history… '
+            '(scanned **0**, matched **0**)'))
+
+        async def report(scanned, matched):
+            try:
+                await progress.edit(embed=discord_common.embed_neutral(
+                    f'Scanning {channel.mention} for signup history… '
+                    f'scanned **{scanned}**, matched **{matched}** so far.'))
+            except discord.HTTPException:
+                # Rate-limited or message deleted — keep scanning either way.
+                pass
+
+        bot_user_id = self.bot.user.id if self.bot and self.bot.user else None
+        try:
+            scanned, events = await scan_signup_events(
+                channel, ctx.guild.id, bot_user_id, progress=report,
+                progress_interval=_BACKFILL_PROGRESS_INTERVAL)
+        except discord.Forbidden:
+            raise GreatDayCogError(
+                f'Missing permission to read {channel.mention} history.')
+        inserted = cf_common.user_db.greatday_record_signup_events(events)
+
+        await progress.edit(embed=discord_common.embed_success(
+            f'Signup backfill complete. Scanned **{scanned}** message(s), '
+            f'matched **{len(events)}**, inserted **{inserted}** new event(s).'))
+        await ctx.send(f'{ctx.author.mention} `;greatday backfillsignups` '
+                       f'finished — inserted **{inserted}** new event(s).')
 
     # ── Error handler ──────────────────────────────────────────────────
 

@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+from tle.util.db.greatday_db import create_greatday_signup_event_table
 from tle.util.db.user_db_conn import UserDbConn, namedtuple_factory
 
 
@@ -49,6 +50,7 @@ class FakeGreatDayDb:
                 PRIMARY KEY (guild_id, user_id, message_id)
             )
         ''')
+        create_greatday_signup_event_table(self.conn)
         self.conn.commit()
 
     greatday_signup = UserDbConn.greatday_signup
@@ -62,6 +64,12 @@ class FakeGreatDayDb:
     greatday_get_count = UserDbConn.greatday_get_count
     greatday_get_latest_pick = UserDbConn.greatday_get_latest_pick
     greatday_get_pick_history = UserDbConn.greatday_get_pick_history
+    greatday_get_post_times = UserDbConn.greatday_get_post_times
+    greatday_is_signed_up = UserDbConn.greatday_is_signed_up
+    greatday_record_signup_events = UserDbConn.greatday_record_signup_events
+    greatday_record_signup_event = UserDbConn.greatday_record_signup_event
+    greatday_get_signup_events = UserDbConn.greatday_get_signup_events
+    greatday_get_last_signup = UserDbConn.greatday_get_last_signup
     kvs_set = UserDbConn.kvs_set
     kvs_get = UserDbConn.kvs_get
     kvs_delete = UserDbConn.kvs_delete

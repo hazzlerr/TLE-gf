@@ -1,12 +1,36 @@
 """Great Day DB methods — extracted from user_db_conn.py.
 
-Owns the ``greatday_signup`` and ``greatday_pick`` tables. The
-``greatday_ban`` table is created by a migration only (matching the original
-fresh-DB behavior, which did not create it in ``create_tables``).
+Owns the ``greatday_signup``, ``greatday_pick``, ``greatday_ban`` and
+``greatday_signup_event`` tables.
+
+``greatday_signup`` only holds current membership, so joins and leaves are
+logged separately in ``greatday_signup_event``. Each event is keyed by the
+Discord message that caused it, which makes both live recording and history
+backfill idempotent.
 """
 import logging
 
+SIGNUP_ACTIONS = ('signup', 'signout')
+
 logger = logging.getLogger(__name__)
+
+
+def create_greatday_signup_event_table(db):
+    """Create the signup/signout event log. Shared with migration 1.56.0."""
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS greatday_signup_event (
+            guild_id    TEXT NOT NULL,
+            user_id     TEXT NOT NULL,
+            action      TEXT NOT NULL,
+            at          REAL NOT NULL,
+            message_id  TEXT NOT NULL,
+            PRIMARY KEY (guild_id, user_id, message_id)
+        )
+    ''')
+    db.execute('''
+        CREATE INDEX IF NOT EXISTS idx_greatday_signup_event_user
+            ON greatday_signup_event (guild_id, user_id, at)
+    ''')
 
 
 class GreatdayDbMixin:
@@ -35,6 +59,15 @@ class GreatdayDbMixin:
             CREATE INDEX IF NOT EXISTS idx_greatday_pick_user
                 ON greatday_pick (guild_id, user_id)
         ''')
+        # Also created by migration 1.21.0, which fresh databases skip.
+        self.conn.execute('''
+            CREATE TABLE IF NOT EXISTS greatday_ban (
+                guild_id    TEXT NOT NULL,
+                user_id     TEXT NOT NULL,
+                PRIMARY KEY (guild_id, user_id)
+            )
+        ''')
+        create_greatday_signup_event_table(self.conn)
 
     def greatday_signup(self, guild_id, user_id):
         """Add a user to the great day list. Returns True if newly added."""
@@ -57,6 +90,13 @@ class GreatdayDbMixin:
         return self.conn.execute(
             'SELECT user_id FROM greatday_signup WHERE guild_id = ?',
             (str(guild_id),)).fetchall()
+
+    def greatday_is_signed_up(self, guild_id, user_id):
+        """Check if a user is currently on the great day list."""
+        row = self.conn.execute(
+            'SELECT 1 FROM greatday_signup WHERE guild_id = ? AND user_id = ?',
+            (str(guild_id), str(user_id))).fetchone()
+        return row is not None
 
     def greatday_ban(self, guild_id, user_id):
         """Ban a user from great day. Also removes their signup. Returns True if newly banned."""
@@ -127,6 +167,70 @@ class GreatdayDbMixin:
             'message_id DESC',
             (str(guild_id), str(user_id))
         ).fetchall()
+
+    def greatday_get_post_times(self, guild_id):
+        """Return the timestamp of every recorded Great Day post, oldest first.
+
+        Picks are stored per user, so a post with several picked users
+        collapses to one timestamp.
+        """
+        return [row.picked_at for row in self.conn.execute(
+            'SELECT MIN(picked_at) AS picked_at FROM greatday_pick '
+            'WHERE guild_id = ? GROUP BY message_id ORDER BY picked_at ASC',
+            (str(guild_id),)
+        ).fetchall()]
+
+    def greatday_record_signup_events(self, events):
+        """Insert ``(guild_id, user_id, action, at, message_id)`` rows.
+
+        Idempotent on (guild, user, message), so re-running a backfill over
+        the same channel history inserts nothing. Returns the number of new
+        rows.
+        """
+        events = list(events)
+        if not events:
+            return 0
+        for _, _, action, _, _ in events:
+            if action not in SIGNUP_ACTIONS:
+                raise ValueError(f'Unknown signup event action: {action!r}')
+        cur = self.conn.executemany(
+            'INSERT OR IGNORE INTO greatday_signup_event '
+            '(guild_id, user_id, action, at, message_id) VALUES (?, ?, ?, ?, ?)',
+            [(str(guild_id), str(user_id), action, at, str(message_id))
+             for guild_id, user_id, action, at, message_id in events]
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    def greatday_record_signup_event(self, guild_id, user_id, action, at,
+                                     message_id):
+        """Record a single signup/signout event. Returns True if new."""
+        return self.greatday_record_signup_events(
+            [(guild_id, user_id, action, at, message_id)]) > 0
+
+    def greatday_get_signup_events(self, guild_id, user_id):
+        """Return a user's signup/signout events, newest first."""
+        return self.conn.execute(
+            'SELECT action, at, message_id FROM greatday_signup_event '
+            'WHERE guild_id = ? AND user_id = ? '
+            'ORDER BY at DESC, CAST(message_id AS INTEGER) DESC, '
+            'message_id DESC',
+            (str(guild_id), str(user_id))
+        ).fetchall()
+
+    def greatday_get_last_signup(self, guild_id, user_id):
+        """Return a user's newest recorded signup event, or ``None``.
+
+        Signups predating the event log are unknown rather than absent, so a
+        caller must not read ``None`` as 'never signed up'.
+        """
+        return self.conn.execute(
+            "SELECT action, at, message_id FROM greatday_signup_event "
+            "WHERE guild_id = ? AND user_id = ? AND action = 'signup' "
+            'ORDER BY at DESC, CAST(message_id AS INTEGER) DESC, '
+            'message_id DESC LIMIT 1',
+            (str(guild_id), str(user_id))
+        ).fetchone()
 
     def greatday_is_banned(self, guild_id, user_id):
         """Check if a user is banned from great day."""
