@@ -370,7 +370,9 @@ class GreatDay(commands.Cog):
             ))
             return
 
-        numbered = list(enumerate(entries, start=1))
+        # Newest first, but numbered from the oldest entry (= 0) so an
+        # entry's number never changes as new history is added.
+        numbered = list(zip(range(len(entries) - 1, -1, -1), entries))
         pages = []
         for chunk in paginator.chunkify(numbered, _HISTORY_PER_PAGE):
             lines = [f'**{number}.** {entry}' for number, entry in chunk]

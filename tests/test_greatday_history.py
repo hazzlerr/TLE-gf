@@ -139,9 +139,9 @@ class TestHistoryCommand:
         first_lines = pages[0][1].description.splitlines()
         second_lines = pages[1][1].description.splitlines()
         assert len(first_lines) == 15
-        assert first_lines[0] == '**1.** <t:1015:F> (<t:1015:R>)'
-        assert first_lines[-1] == '**15.** <t:1001:F> (<t:1001:R>)'
-        assert second_lines == ['**16.** <t:1000:F> (<t:1000:R>)']
+        assert first_lines[0] == '**15.** <t:1015:F> (<t:1015:R>)'
+        assert first_lines[-1] == '**1.** <t:1001:F> (<t:1001:R>)'
+        assert second_lines == ['**0.** <t:1000:F> (<t:1000:R>)']
         assert captured['kwargs']['author_id'] == int(USER_A)
         descriptions = '\n'.join(page[1].description for page in pages)
         assert 'message-' not in descriptions
