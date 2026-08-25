@@ -306,4 +306,4 @@ class TestStateReplay:
         asyncio.run(cog.backfill_signups.callback(cog, ctx, channel))
         assert len(db.greatday_get_signup_events(GUILD, USER_A)) == 1
         assert db.get_guild_config(
-            GUILD, 'greatday_signup_history_audit') == 'clean:123'
+            GUILD, 'greatday_signup_history_audit') == 'partial:123'

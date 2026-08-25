@@ -9,6 +9,7 @@ from tle.cogs._greatday_event_backfill import (
     parse_membership_result,
     scan_signup_events,
     scan_signup_events_audited,
+    scan_signup_events_channels_audited,
 )
 from tle.cogs._greatday_helpers import _format_pick_time
 

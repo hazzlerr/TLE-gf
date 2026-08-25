@@ -7,10 +7,12 @@ from tle.cogs._greatday_commands import (
     GreatDayCogError,
     GreatDayCommandsMixin,
 )
+from tle.cogs._greatday_event_channels import discover_guild_history_channels
 from tle.cogs._greatday_events import (
     collapse_events,
     merge_history,
     scan_signup_events_audited,
+    scan_signup_events_channels_audited,
     signed_up_post_count,
 )
 from tle.cogs._greatday_helpers import (
@@ -169,8 +171,8 @@ class GreatDayHistoryCommandsMixin:
 
     @GreatDayCommandsMixin.greatday.command(
         name='backfill',
-        brief='Seed pick history from the greatday channel (admin)')
-    @commands.has_role(constants.TLE_ADMIN)
+        brief='Seed pick history from the greatday channel (admin/mod)')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def backfill(self, ctx):
         """Walk the greatday channel's history and insert one pick row per
         matched message and mentioned user. Idempotent — safe to re-run.
@@ -236,33 +238,27 @@ class GreatDayHistoryCommandsMixin:
 
     @GreatDayCommandsMixin.greatday.command(
         name='backfillsignups',
-        brief='Seed signup/signout history from a channel (admin)',
+        brief='Seed signup/signout history server-wide (admin/mod)',
         usage='[#channel]')
-    @commands.has_role(constants.TLE_ADMIN)
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def backfill_signups(self, ctx, channel: discord.TextChannel = None):
-        """Chronologically match commands to exact bot results and replay them.
+        """Match exact command results and replay them across the whole guild.
 
-        Unlike `;greatday backfill` this scans the whole channel: membership
-        commands are sporadic, so a gap heuristic would cut the scan short.
-        The final audit compares replayed signup and ban state with SQLite.
+        Without an argument every readable message channel and discoverable
+        thread is merged chronologically. The optional channel argument keeps
+        targeted recovery available, but cannot certify complete guild history.
         """
-        if channel is None:
-            channel_id = cf_common.user_db.get_guild_config(
-                ctx.guild.id, 'greatday_channel')
-            channel = (ctx.guild.get_channel(int(channel_id))
-                       if channel_id else ctx.channel)
-        if channel is None:
-            raise GreatDayCogError(
-                'Configured great day channel is not accessible.')
+        targeted = channel is not None
+        scope_label = (channel.mention if targeted else 'all server channels')
 
         progress = await ctx.send(embed=discord_common.embed_neutral(
-            f'Scanning {channel.mention} for signup history… '
+            f'Scanning {scope_label} for signup history… '
             '(scanned **0**, matched **0**)'))
 
         async def report(scanned, matched):
             try:
                 await progress.edit(embed=discord_common.embed_neutral(
-                    f'Scanning {channel.mention} for signup history… '
+                    f'Scanning {scope_label} for signup history… '
                     f'scanned **{scanned}**, matched **{matched}** so far.'))
             except discord.HTTPException:
                 # Rate-limited or message deleted — keep scanning either way.
@@ -277,18 +273,36 @@ class GreatDayHistoryCommandsMixin:
             str(row.user_id)
             for row in cf_common.user_db.greatday_get_banned(ctx.guild.id)
         }
-        try:
-            result = await scan_signup_events_audited(
-                channel, ctx.guild.id, bot_user_id, guild=ctx.guild,
+        if targeted:
+            try:
+                result = await scan_signup_events_audited(
+                    channel, ctx.guild.id, bot_user_id, guild=ctx.guild,
+                    current_signup_ids=current_signups,
+                    current_ban_ids=current_bans, progress=report,
+                    progress_interval=_BACKFILL_PROGRESS_INTERVAL)
+            except discord.Forbidden:
+                raise GreatDayCogError(
+                    f'Missing permission to read {channel.mention} history.')
+            scan_status = ('partial' if result.audit.trustworthy
+                           else 'incomplete')
+            scope_id = channel.id
+        else:
+            scope = await discover_guild_history_channels(
+                ctx.guild, (ctx.channel,))
+            if not scope.channels:
+                raise GreatDayCogError(
+                    'No readable server channels were found to scan.')
+            result = await scan_signup_events_channels_audited(
+                scope.channels, ctx.guild.id, bot_user_id, guild=ctx.guild,
                 current_signup_ids=current_signups,
                 current_ban_ids=current_bans, progress=report,
-                progress_interval=_BACKFILL_PROGRESS_INTERVAL)
-        except discord.Forbidden:
-            raise GreatDayCogError(
-                f'Missing permission to read {channel.mention} history.')
-        scan_status = ('clean' if result.audit.trustworthy else 'incomplete')
+                progress_interval=_BACKFILL_PROGRESS_INTERVAL,
+                discovery_failures=scope.discovery_failures)
+            scan_status = ('clean' if result.audit.trustworthy
+                           else 'incomplete')
+            scope_id = 'guild'
         inserted = cf_common.user_db.greatday_record_signup_backfill(
-            result.events, ctx.guild.id, f'{scan_status}:{channel.id}')
+            result.events, ctx.guild.id, f'{scan_status}:{scope_id}')
         stored_status = cf_common.user_db.get_guild_config(
             ctx.guild.id, SIGNUP_HISTORY_AUDIT_KEY) or 'incomplete:unknown'
         status = stored_status.split(':', 1)[0]
@@ -298,8 +312,8 @@ class GreatDayHistoryCommandsMixin:
             f'inserted **{inserted}** new event(s).\n'
             + result.audit.summary())
         if status != scan_status:
-            summary += ('\nStored history remains **incomplete** because an '
-                        'earlier audit inserted inferred rows with warnings.')
+            summary += (f'\nStored history remains **{status}** because the '
+                        'existing audit status takes precedence.')
         embed_factory = (discord_common.embed_success
                          if status == 'clean'
                          else discord_common.embed_alert)

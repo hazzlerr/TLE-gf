@@ -165,9 +165,11 @@ class DiscordContext:
 
 
 class DiscordGuild:
-    def __init__(self, guild_id, members=()):
+    def __init__(self, guild_id, members=(), channels=(), threads=()):
         self.id = int(guild_id)
         self.members = list(members)
+        self.channels = list(channels)
+        self.threads = list(threads)
 
     def get_member(self, user_id):
         return next((member for member in self.members
@@ -181,14 +183,21 @@ class DiscordGuild:
 
 
 class HistoryChannel:
-    def __init__(self, messages):
+    def __init__(self, messages, *, channel_id=None, mention=None,
+                 history_error=None):
         self._messages = list(messages)
+        self.id = channel_id
+        self.mention = mention or f'<#{channel_id}>'
+        self._history_error = history_error
 
     def history(self, limit=None, oldest_first=False):
         ordered = (self._messages if oldest_first
                    else list(reversed(self._messages)))
 
         async def _gen():
+            if self._history_error is not None:
+                error = self._history_error
+                raise error() if isinstance(error, type) else error
             for message in ordered:
                 yield message
         return _gen()

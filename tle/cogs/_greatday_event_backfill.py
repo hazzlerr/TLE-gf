@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from tle.cogs._greatday_event_channels import merged_channel_history
 from tle.cogs._greatday_event_parse import (
     MembershipCommand,
     MembershipResult,
@@ -21,6 +22,9 @@ _SIGNOUT_COMMANDS = frozenset(('remove', 'kick'))
 
 @dataclass
 class SignupScanAudit:
+    channels_requested: int = 0
+    unreadable_channels: int = 0
+    discovery_failures: int = 0
     scanned: int = 0
     commands: int = 0
     bot_results: int = 0
@@ -41,6 +45,8 @@ class SignupScanAudit:
     def trustworthy(self):
         """Whether the scan found no evidence that inferred events are wrong."""
         return not any((
+            self.unreadable_channels,
+            self.discovery_failures,
             self.unmatched_results,
             self.ambiguous_matches,
             self.unresolved_targets,
@@ -54,6 +60,9 @@ class SignupScanAudit:
     def summary(self):
         """Return compact lines suitable for a Discord embed."""
         lines = [
+            f'Channels: **{self.channels_requested}**; unreadable: '
+            f'**{self.unreadable_channels}**; thread listing failures: '
+            f'**{self.discovery_failures}**',
             f'Commands: **{self.commands}**; bot results: '
             f'**{self.bot_results}**',
             f'Matched successes: **{self.matched_successes}**; '
@@ -195,15 +204,58 @@ async def scan_signup_events_audited(
         current_signup_ids=None, current_ban_ids=None, progress=None,
         progress_interval=250, window_seconds=_REPLY_WINDOW_SECONDS):
     """Match commands to exact bot results, then replay their state changes."""
-    audit = SignupScanAudit()
+    audit = SignupScanAudit(channels_requested=1)
+    history = merged_channel_history((channel,))
+    return await _scan_signup_history(
+        history, guild_id, bot_user_id, guild=guild,
+        current_signup_ids=current_signup_ids,
+        current_ban_ids=current_ban_ids, progress=progress,
+        progress_interval=progress_interval, window_seconds=window_seconds,
+        audit=audit)
+
+
+async def scan_signup_events_channels_audited(
+        channels, guild_id, bot_user_id, *, guild=None,
+        current_signup_ids=None, current_ban_ids=None, progress=None,
+        progress_interval=250, window_seconds=_REPLY_WINDOW_SECONDS,
+        discovery_failures=0):
+    """Scan all supplied channels as one chronological guild history."""
+    channels = tuple(channels)
+    audit = SignupScanAudit(
+        channels_requested=len(channels),
+        discovery_failures=discovery_failures,
+    )
+    unreadable = set()
+
+    def on_unreadable(channel_key):
+        unreadable.add(channel_key)
+        audit.unreadable_channels = len(unreadable)
+
+    history = merged_channel_history(
+        channels, tolerate_unreadable=True, on_unreadable=on_unreadable)
+    return await _scan_signup_history(
+        history, guild_id, bot_user_id, guild=guild,
+        current_signup_ids=current_signup_ids,
+        current_ban_ids=current_ban_ids, progress=progress,
+        progress_interval=progress_interval, window_seconds=window_seconds,
+        audit=audit)
+
+
+async def _scan_signup_history(
+        history, guild_id, bot_user_id, *, guild, current_signup_ids,
+        current_ban_ids, progress, progress_interval, window_seconds, audit):
+    """Match and replay one globally ordered, channel-keyed message stream."""
     events = []
-    pending = []
+    pending_by_channel = {}
     states = {}
     banned = {}
-    async for message in channel.history(limit=None, oldest_first=True):
+    async for channel_key, message in history:
         audit.scanned += 1
         now = _message_time(message)
-        pending = _expire_pending(pending, now, audit, window_seconds)
+        pending = _expire_pending(
+            pending_by_channel.get(channel_key, []), now, audit,
+            window_seconds)
+        pending_by_channel[channel_key] = pending
         result = parse_membership_result(message, bot_user_id)
         if result is not None:
             audit.bot_results += 1
@@ -236,7 +288,8 @@ async def scan_signup_events_audited(
                 pending.append(command)
         if progress is not None and audit.scanned % progress_interval == 0:
             await progress(audit.scanned, audit.matched_successes)
-    audit.commands_without_result += len(pending)
+    audit.commands_without_result += sum(
+        len(pending) for pending in pending_by_channel.values())
     _audit_final_state(
         states, banned, current_signup_ids, current_ban_ids, audit)
     return SignupScanResult(

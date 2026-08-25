@@ -250,7 +250,7 @@ class GreatdayDbMixin:
         """Atomically store inferred events and the latest audit status."""
         events = list(events)
         guild_id = str(guild_id)
-        if not audit_status.startswith(('clean:', 'incomplete:')):
+        if not audit_status.startswith(('clean:', 'incomplete:', 'partial:')):
             raise ValueError(f'Unknown signup audit status: {audit_status!r}')
         for event_guild_id, _, action, _, _ in events:
             if str(event_guild_id) != guild_id:
@@ -266,14 +266,21 @@ class GreatdayDbMixin:
                 'SELECT value FROM guild_config '
                 'WHERE guild_id = ? AND key = ?',
                 (guild_id, SIGNUP_HISTORY_AUDIT_KEY)).fetchone()
-            if previous is not None and previous.value.startswith('incomplete:'):
-                # Once uncertain inferred rows exist, a later scan cannot prove
-                # that those append-only rows were correct.
-                audit_status = previous.value
             inserted = self.conn.executemany(
                 'INSERT OR IGNORE INTO greatday_signup_event '
                 '(guild_id, user_id, action, at, message_id) '
                 'VALUES (?, ?, ?, ?, ?)', params).rowcount
+            if previous is not None and previous.value.startswith('incomplete:'):
+                # Once uncertain inferred rows exist, a later scan cannot prove
+                # that those append-only rows were correct.
+                audit_status = previous.value
+            elif (previous is not None
+                  and previous.value.startswith('clean:')
+                  and audit_status.startswith('partial:')
+                  and inserted == 0):
+                # A no-op targeted rescan does not invalidate a completed
+                # guild-wide audit. A targeted scan that finds new rows does.
+                audit_status = previous.value
             self.conn.execute(
                 'INSERT INTO guild_config (guild_id, key, value) '
                 'VALUES (?, ?, ?) '
