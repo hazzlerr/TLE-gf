@@ -4,6 +4,7 @@ import logging
 
 from tle.util.db._user_db_upgrade_registry import registry
 from tle.util.db.counting_db import create_counting_schema
+from tle.util.db.greatday_db import create_greatday_signup_event_table
 
 
 logger = logging.getLogger(__name__)
@@ -26,3 +27,12 @@ def upgrade_1_55_0(db):
     db.execute('DELETE FROM counting_attempt')
     db.commit()
     logger.info('1.55.0: Upgrade complete')
+
+
+@registry.register('1.56.0', 'Great Day signup/signout event log')
+def upgrade_1_56_0(db):
+    """Add the signup/signout ledger behind ;greatday history and stats."""
+    logger.info('1.56.0: Creating greatday_signup_event table')
+    create_greatday_signup_event_table(db)
+    db.commit()
+    logger.info('1.56.0: Upgrade complete')
