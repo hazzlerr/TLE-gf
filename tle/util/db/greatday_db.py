@@ -11,6 +11,7 @@ backfill idempotent.
 import logging
 
 SIGNUP_ACTIONS = ('signup', 'signout')
+SIGNUP_HISTORY_AUDIT_KEY = 'greatday_signup_history_audit'
 
 logger = logging.getLogger(__name__)
 
@@ -77,12 +78,38 @@ class GreatdayDbMixin:
         self.conn.commit()
         return rc > 0
 
+    def greatday_signup_with_event(self, guild_id, user_id, at, message_id):
+        """Atomically add a signup and its history event."""
+        guild_id, user_id = str(guild_id), str(user_id)
+        with self.conn:
+            rc = self.conn.execute(
+                'INSERT OR IGNORE INTO greatday_signup '
+                '(guild_id, user_id) VALUES (?, ?)',
+                (guild_id, user_id)).rowcount
+            if rc:
+                self._greatday_insert_signup_event(
+                    guild_id, user_id, 'signup', at, message_id)
+        return rc > 0
+
     def greatday_remove(self, guild_id, user_id):
         """Remove a user from the great day list. Returns True if removed."""
         rc = self.conn.execute(
             'DELETE FROM greatday_signup WHERE guild_id = ? AND user_id = ?',
             (str(guild_id), str(user_id))).rowcount
         self.conn.commit()
+        return rc > 0
+
+    def greatday_remove_with_event(self, guild_id, user_id, at, message_id):
+        """Atomically remove a signup and record its signout."""
+        guild_id, user_id = str(guild_id), str(user_id)
+        with self.conn:
+            rc = self.conn.execute(
+                'DELETE FROM greatday_signup '
+                'WHERE guild_id = ? AND user_id = ?',
+                (guild_id, user_id)).rowcount
+            if rc:
+                self._greatday_insert_signup_event(
+                    guild_id, user_id, 'signout', at, message_id)
         return rc > 0
 
     def greatday_get_signups(self, guild_id):
@@ -108,6 +135,23 @@ class GreatdayDbMixin:
             (str(guild_id), str(user_id)))
         self.conn.commit()
         return rc > 0
+
+    def greatday_ban_with_event(self, guild_id, user_id, at, message_id):
+        """Atomically ban a user, remove their signup, and log that removal."""
+        guild_id, user_id = str(guild_id), str(user_id)
+        with self.conn:
+            banned = self.conn.execute(
+                'INSERT OR IGNORE INTO greatday_ban '
+                '(guild_id, user_id) VALUES (?, ?)',
+                (guild_id, user_id)).rowcount
+            removed = self.conn.execute(
+                'DELETE FROM greatday_signup '
+                'WHERE guild_id = ? AND user_id = ?',
+                (guild_id, user_id)).rowcount
+            if removed:
+                self._greatday_insert_signup_event(
+                    guild_id, user_id, 'signout', at, message_id)
+        return banned > 0
 
     def greatday_unban(self, guild_id, user_id):
         """Unban a user from great day. Returns True if was banned."""
@@ -201,6 +245,52 @@ class GreatdayDbMixin:
         )
         self.conn.commit()
         return cur.rowcount
+
+    def greatday_record_signup_backfill(self, events, guild_id, audit_status):
+        """Atomically store inferred events and the latest audit status."""
+        events = list(events)
+        guild_id = str(guild_id)
+        if not audit_status.startswith(('clean:', 'incomplete:')):
+            raise ValueError(f'Unknown signup audit status: {audit_status!r}')
+        for event_guild_id, _, action, _, _ in events:
+            if str(event_guild_id) != guild_id:
+                raise ValueError('Backfill events must belong to the audit guild')
+            if action not in SIGNUP_ACTIONS:
+                raise ValueError(f'Unknown signup event action: {action!r}')
+        params = [
+            (str(event_guild_id), str(user_id), action, at, str(message_id))
+            for event_guild_id, user_id, action, at, message_id in events
+        ]
+        with self.conn:
+            previous = self.conn.execute(
+                'SELECT value FROM guild_config '
+                'WHERE guild_id = ? AND key = ?',
+                (guild_id, SIGNUP_HISTORY_AUDIT_KEY)).fetchone()
+            if previous is not None and previous.value.startswith('incomplete:'):
+                # Once uncertain inferred rows exist, a later scan cannot prove
+                # that those append-only rows were correct.
+                audit_status = previous.value
+            inserted = self.conn.executemany(
+                'INSERT OR IGNORE INTO greatday_signup_event '
+                '(guild_id, user_id, action, at, message_id) '
+                'VALUES (?, ?, ?, ?, ?)', params).rowcount
+            self.conn.execute(
+                'INSERT INTO guild_config (guild_id, key, value) '
+                'VALUES (?, ?, ?) '
+                'ON CONFLICT(guild_id, key) DO UPDATE SET value = excluded.value',
+                (guild_id, SIGNUP_HISTORY_AUDIT_KEY, audit_status))
+        return inserted
+
+    def _greatday_insert_signup_event(self, guild_id, user_id, action, at,
+                                      message_id):
+        """Insert one required event inside the caller's transaction."""
+        if action not in SIGNUP_ACTIONS:
+            raise ValueError(f'Unknown signup event action: {action!r}')
+        self.conn.execute(
+            'INSERT INTO greatday_signup_event '
+            '(guild_id, user_id, action, at, message_id) '
+            'VALUES (?, ?, ?, ?, ?)',
+            (str(guild_id), str(user_id), action, float(at), str(message_id)))
 
     def greatday_record_signup_event(self, guild_id, user_id, action, at,
                                      message_id):

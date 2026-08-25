@@ -10,7 +10,7 @@ from tle.cogs._greatday_commands import (
 from tle.cogs._greatday_events import (
     collapse_events,
     merge_history,
-    scan_signup_events,
+    scan_signup_events_audited,
     signed_up_post_count,
 )
 from tle.cogs._greatday_helpers import (
@@ -24,6 +24,7 @@ from tle.util import codeforces_common as cf_common
 from tle.util import discord_common
 from tle.util import paginator
 from tle.util import ranking
+from tle.util.db.greatday_db import SIGNUP_HISTORY_AUDIT_KEY
 
 
 _STATS_PER_PAGE = 15
@@ -138,14 +139,18 @@ class GreatDayHistoryCommandsMixin:
 
     def _signup_stat_lines(self, guild, user_id):
         """Render the last-signup and days-signed-up lines for a user."""
-        events = collapse_events(cf_common.user_db.greatday_get_signup_events(
-            guild.id, user_id))
+        events = cf_common.user_db.greatday_get_signup_events(
+            guild.id, user_id)
         signed_up = cf_common.user_db.greatday_is_signed_up(guild.id, user_id)
         last_signup = next(
             (row for row in events if row.action == 'signup'), None)
         days, complete = signed_up_post_count(
             events, cf_common.user_db.greatday_get_post_times(guild.id),
             signed_up)
+        audit_status = cf_common.user_db.get_guild_config(
+            guild.id, SIGNUP_HISTORY_AUDIT_KEY) or ''
+        audited = audit_status.startswith('clean:')
+        complete = complete and audited
         lines = []
         if last_signup is None:
             # Signups predating the event log are unknown, not absent.
@@ -153,7 +158,12 @@ class GreatDayHistoryCommandsMixin:
                          + ('' if signed_up else ' (not signed up)'))
         else:
             lines.append(f'Last signup: {_format_pick_time(last_signup.at)}')
-        suffix = '' if complete else ' (at least — earlier history not recorded)'
+        if complete:
+            suffix = ' (inferred from audited message history)'
+        elif audit_status.startswith('incomplete:'):
+            suffix = ' (inferred — backfill audit found warnings)'
+        else:
+            suffix = ' (at least — history incomplete or not fully audited)'
         lines.append(f'Days signed up: **{days}**{suffix}')
         return '\n'.join(lines)
 
@@ -230,13 +240,11 @@ class GreatDayHistoryCommandsMixin:
         usage='[#channel]')
     @commands.has_role(constants.TLE_ADMIN)
     async def backfill_signups(self, ctx, channel: discord.TextChannel = None):
-        """Replay a channel and log every `;greatday` membership command the
-        bot confirmed. Idempotent — safe to re-run.
+        """Chronologically match commands to exact bot results and replay them.
 
         Unlike `;greatday backfill` this scans the whole channel: membership
         commands are sporadic, so a gap heuristic would cut the scan short.
-        Bans are skipped because a ban drops a signup without announcing it,
-        so history cannot tell whether the user was signed up at the time.
+        The final audit compares replayed signup and ban state with SQLite.
         """
         if channel is None:
             channel_id = cf_common.user_db.get_guild_config(
@@ -261,17 +269,41 @@ class GreatDayHistoryCommandsMixin:
                 pass
 
         bot_user_id = self.bot.user.id if self.bot and self.bot.user else None
+        current_signups = {
+            str(row.user_id)
+            for row in cf_common.user_db.greatday_get_signups(ctx.guild.id)
+        }
+        current_bans = {
+            str(row.user_id)
+            for row in cf_common.user_db.greatday_get_banned(ctx.guild.id)
+        }
         try:
-            scanned, events = await scan_signup_events(
-                channel, ctx.guild.id, bot_user_id, progress=report,
+            result = await scan_signup_events_audited(
+                channel, ctx.guild.id, bot_user_id, guild=ctx.guild,
+                current_signup_ids=current_signups,
+                current_ban_ids=current_bans, progress=report,
                 progress_interval=_BACKFILL_PROGRESS_INTERVAL)
         except discord.Forbidden:
             raise GreatDayCogError(
                 f'Missing permission to read {channel.mention} history.')
-        inserted = cf_common.user_db.greatday_record_signup_events(events)
-
-        await progress.edit(embed=discord_common.embed_success(
-            f'Signup backfill complete. Scanned **{scanned}** message(s), '
-            f'matched **{len(events)}**, inserted **{inserted}** new event(s).'))
+        scan_status = ('clean' if result.audit.trustworthy else 'incomplete')
+        inserted = cf_common.user_db.greatday_record_signup_backfill(
+            result.events, ctx.guild.id, f'{scan_status}:{channel.id}')
+        stored_status = cf_common.user_db.get_guild_config(
+            ctx.guild.id, SIGNUP_HISTORY_AUDIT_KEY) or 'incomplete:unknown'
+        status = stored_status.split(':', 1)[0]
+        summary = (
+            f'Signup backfill complete. Scanned **{result.scanned}** '
+            f'message(s), recovered **{len(result.events)}** event(s), '
+            f'inserted **{inserted}** new event(s).\n'
+            + result.audit.summary())
+        if status != scan_status:
+            summary += ('\nStored history remains **incomplete** because an '
+                        'earlier audit inserted inferred rows with warnings.')
+        embed_factory = (discord_common.embed_success
+                         if status == 'clean'
+                         else discord_common.embed_alert)
+        await progress.edit(embed=embed_factory(summary))
         await ctx.send(f'{ctx.author.mention} `;greatday backfillsignups` '
-                       f'finished — inserted **{inserted}** new event(s).')
+                       f'finished — inserted **{inserted}** new event(s); '
+                       f'audit **{status}**.')

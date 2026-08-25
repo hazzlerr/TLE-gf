@@ -6,7 +6,6 @@ import discord
 from discord.ext import commands
 
 from tle import constants
-from tle.cogs._greatday_events import record_event
 from tle.util import codeforces_common as cf_common
 from tle.util import discord_common
 
@@ -17,6 +16,17 @@ _DEFAULT_TZ = 'US/Eastern'
 
 class GreatDayCogError(commands.CommandError):
     pass
+
+
+def _event_identity(message):
+    return message.created_at.timestamp(), message.id
+
+
+async def _send_membership_result(ctx, user_id, embed):
+    """Send a recoverable no-ping result tied to its invoking command."""
+    if hasattr(embed, 'set_footer'):
+        embed.set_footer(text=f'Great Day user ID: {user_id}')
+    await ctx.send(embed=embed, reference=ctx.message, mention_author=False)
 
 
 class GreatDayCommandsMixin:
@@ -31,27 +41,29 @@ class GreatDayCommandsMixin:
     async def signup(self, ctx):
         if cf_common.user_db.greatday_is_banned(ctx.guild.id, ctx.author.id):
             raise GreatDayCogError('You are banned from great day.')
-        added = cf_common.user_db.greatday_signup(ctx.guild.id, ctx.author.id)
+        added = cf_common.user_db.greatday_signup_with_event(
+            ctx.guild.id, ctx.author.id, *_event_identity(ctx.message))
         if added:
-            record_event(cf_common.user_db, ctx.guild.id, ctx.author.id,
-                         'signup', ctx.message)
-            await ctx.send(embed=discord_common.embed_success(
-                'You have been signed up for great day pings!'))
+            await _send_membership_result(
+                ctx, ctx.author.id, discord_common.embed_success(
+                    'You have been signed up for great day pings!'))
         else:
-            await ctx.send(embed=discord_common.embed_alert(
-                'You are already signed up.'))
+            await _send_membership_result(
+                ctx, ctx.author.id,
+                discord_common.embed_alert('You are already signed up.'))
 
     @greatday.command(name='remove', brief='Remove yourself from the list')
     async def remove(self, ctx):
-        removed = cf_common.user_db.greatday_remove(ctx.guild.id, ctx.author.id)
+        removed = cf_common.user_db.greatday_remove_with_event(
+            ctx.guild.id, ctx.author.id, *_event_identity(ctx.message))
         if removed:
-            record_event(cf_common.user_db, ctx.guild.id, ctx.author.id,
-                         'signout', ctx.message)
-            await ctx.send(embed=discord_common.embed_success(
-                'You have been removed from great day pings.'))
+            await _send_membership_result(
+                ctx, ctx.author.id, discord_common.embed_success(
+                    'You have been removed from great day pings.'))
         else:
-            await ctx.send(embed=discord_common.embed_alert(
-                'You are not signed up.'))
+            await _send_membership_result(
+                ctx, ctx.author.id,
+                discord_common.embed_alert('You are not signed up.'))
 
     @greatday.command(name='add', brief='Add a user to the list (admin)',
                       usage='@user')
@@ -61,51 +73,49 @@ class GreatDayCommandsMixin:
             name = discord.utils.escape_mentions(member.display_name)
             raise GreatDayCogError(
                 f'`{name}` is banned from great day. Unban them first.')
-        added = cf_common.user_db.greatday_signup(ctx.guild.id, member.id)
+        added = cf_common.user_db.greatday_signup_with_event(
+            ctx.guild.id, member.id, *_event_identity(ctx.message))
         name = discord.utils.escape_mentions(member.display_name)
         if added:
-            record_event(cf_common.user_db, ctx.guild.id, member.id,
-                         'signup', ctx.message)
-            await ctx.send(embed=discord_common.embed_success(
-                f'`{name}` has been added to great day pings.'))
+            await _send_membership_result(
+                ctx, member.id, discord_common.embed_success(
+                    f'`{name}` has been added to great day pings.'))
         else:
-            await ctx.send(embed=discord_common.embed_alert(
-                f'`{name}` is already signed up.'))
+            await _send_membership_result(
+                ctx, member.id, discord_common.embed_alert(
+                    f'`{name}` is already signed up.'))
 
     @greatday.command(name='kick', brief='Remove a user from the list (admin)',
                       usage='@user')
     @commands.has_role(constants.TLE_ADMIN)
     async def kick_user(self, ctx, member: discord.Member):
-        removed = cf_common.user_db.greatday_remove(ctx.guild.id, member.id)
+        removed = cf_common.user_db.greatday_remove_with_event(
+            ctx.guild.id, member.id, *_event_identity(ctx.message))
         name = discord.utils.escape_mentions(member.display_name)
         if removed:
-            record_event(cf_common.user_db, ctx.guild.id, member.id,
-                         'signout', ctx.message)
-            await ctx.send(embed=discord_common.embed_success(
-                f'`{name}` has been removed from great day pings.'))
+            await _send_membership_result(
+                ctx, member.id, discord_common.embed_success(
+                    f'`{name}` has been removed from great day pings.'))
         else:
-            await ctx.send(embed=discord_common.embed_alert(
-                f'`{name}` is not signed up.'))
+            await _send_membership_result(
+                ctx, member.id, discord_common.embed_alert(
+                    f'`{name}` is not signed up.'))
 
     @greatday.command(name='ban', brief='Ban a user from great day (admin)',
                       usage='@user')
     @commands.has_role(constants.TLE_ADMIN)
     async def ban_user(self, ctx, member: discord.Member):
-        # A ban silently drops the signup, so read membership first to log the
-        # implied signout.
-        was_signed_up = cf_common.user_db.greatday_is_signed_up(
-            ctx.guild.id, member.id)
-        banned = cf_common.user_db.greatday_ban(ctx.guild.id, member.id)
-        if was_signed_up:
-            record_event(cf_common.user_db, ctx.guild.id, member.id,
-                         'signout', ctx.message)
+        banned = cf_common.user_db.greatday_ban_with_event(
+            ctx.guild.id, member.id, *_event_identity(ctx.message))
         name = discord.utils.escape_mentions(member.display_name)
         if banned:
-            await ctx.send(embed=discord_common.embed_success(
-                f'`{name}` has been banned from great day.'))
+            await _send_membership_result(
+                ctx, member.id, discord_common.embed_success(
+                    f'`{name}` has been banned from great day.'))
         else:
-            await ctx.send(embed=discord_common.embed_alert(
-                f'`{name}` is already banned.'))
+            await _send_membership_result(
+                ctx, member.id, discord_common.embed_alert(
+                    f'`{name}` is already banned.'))
 
     @greatday.command(name='unban', brief='Unban a user from great day (admin)',
                       usage='@user')
@@ -114,11 +124,13 @@ class GreatDayCommandsMixin:
         unbanned = cf_common.user_db.greatday_unban(ctx.guild.id, member.id)
         name = discord.utils.escape_mentions(member.display_name)
         if unbanned:
-            await ctx.send(embed=discord_common.embed_success(
-                f'`{name}` has been unbanned from great day.'))
+            await _send_membership_result(
+                ctx, member.id, discord_common.embed_success(
+                    f'`{name}` has been unbanned from great day.'))
         else:
-            await ctx.send(embed=discord_common.embed_alert(
-                f'`{name}` is not banned.'))
+            await _send_membership_result(
+                ctx, member.id, discord_common.embed_alert(
+                    f'`{name}` is not banned.'))
 
     @greatday.command(name='banlist', brief='Show users banned from great day')
     async def banlist(self, ctx):
