@@ -4,6 +4,7 @@ import asyncio
 import datetime as dt
 import math
 from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 
 from tle.util.akari_weekly import (
     compute_weekly_ratings,
@@ -13,6 +14,10 @@ from tle.util.akari_weekly import (
     score_week,
 )
 from tle.cogs._minigame_tables import _akari_weekly_table_rows
+from tle.cogs._mgimpl_akari_weekly import (
+    _akari_weekly_period_dates,
+    _parse_akari_weekly_post_time,
+)
 from tests.minigames_test_utils import db
 from tests.minigames_test_utils import _FakeDiscordMember, _FakeGuild
 
@@ -131,6 +136,36 @@ class TestWeeklyRatings:
         assert current[0].user_id == 'b'
 
 
+class TestWeeklyCutoff:
+    def test_time_parser_normalizes_and_rejects_invalid_values(self):
+        normalized, parsed = _parse_akari_weekly_post_time('09:05')
+        assert normalized == '09:05'
+        assert parsed == dt.time(9, 5)
+
+        for invalid in ('9:05', '24:00', 'noon'):
+            try:
+                _parse_akari_weekly_post_time(invalid)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f'{invalid!r} should be rejected')
+
+    def test_current_week_rolls_over_at_configured_monday_time(self):
+        zone = ZoneInfo('America/New_York')
+        monday = dt.date(2026, 6, 15)
+        before = dt.datetime(2026, 6, 15, 9, 29, tzinfo=zone)
+        after = dt.datetime(2026, 6, 15, 9, 30, tzinfo=zone)
+
+        assert _akari_weekly_period_dates(before, '09:30') == (
+            monday - dt.timedelta(days=1),
+            monday - dt.timedelta(days=7),
+        )
+        assert _akari_weekly_period_dates(after, '09:30') == (
+            monday,
+            monday,
+        )
+
+
 class TestDifficultyCacheDb:
     def test_upsert_and_read(self, db):
         assert db.get_akari_puzzle_difficulties([526]) == {}
@@ -145,6 +180,30 @@ class TestDifficultyCacheDb:
 
 
 class TestWeeklyCommand:
+    def test_weekly_post_thread_and_time_are_saved(self, db, monkeypatch):
+        from tle.cogs import minigames as minigames_module
+        from tle.cogs._mgimpl_akari_weekly import (
+            _AKARI_WEEKLY_POST_CHANNEL_KEY,
+            _AKARI_WEEKLY_POST_TIME_KEY,
+        )
+        from tle.util import codeforces_common as cf_common
+
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        cog = minigames_module.Minigames(bot=None)
+        sent = []
+
+        async def send(**kwargs):
+            sent.append(kwargs)
+
+        ctx = SimpleNamespace(
+            guild=_FakeGuild(1), channel=SimpleNamespace(id=777), send=send)
+        asyncio.run(cog._cmd_akari_weekly_post_here(ctx))
+        asyncio.run(cog._cmd_akari_weekly_post_time(ctx, '09:30'))
+
+        assert db.get_guild_config(1, _AKARI_WEEKLY_POST_CHANNEL_KEY) == '777'
+        assert db.get_guild_config(1, _AKARI_WEEKLY_POST_TIME_KEY) == '09:30'
+        assert len(sent) == 2
+
     def test_weekly_flag_sends_only_completed_week_ratings(
             self, db, monkeypatch):
         from tle.cogs import minigames as minigames_module

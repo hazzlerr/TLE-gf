@@ -56,10 +56,25 @@ class AkariCmdsMixin:
         await self._cmd_akari_weekly_post_here(ctx)
 
     @akari_weeklypost.command(
+        name='thread', brief='Set the weekly result channel/thread',
+        usage='channel_or_thread')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def akari_weeklypost_thread(
+            self, ctx, channel: ChannelOrThread):
+        await self._cmd_akari_weekly_post_here(ctx, channel)
+
+    @akari_weeklypost.command(
         name='clear', brief='Disable automatic weekly result posts')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_weeklypost_clear(self, ctx):
         await self._cmd_akari_weekly_post_clear(ctx)
+
+    @akari_weeklypost.command(
+        name='time', brief='Set the weekly cutoff/post time (24-hour HH:MM)',
+        usage='HH:MM')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def akari_weeklypost_time(self, ctx, value: str):
+        await self._cmd_akari_weekly_post_time(ctx, value)
 
     @akari.command(name='register', brief='Restore Daily Akari rating visibility',
                    usage='[@user (mods only)]')

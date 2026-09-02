@@ -3,6 +3,7 @@
 import asyncio
 import datetime as dt
 import logging
+import re
 import time
 from zoneinfo import ZoneInfo
 
@@ -21,21 +22,62 @@ logger = logging.getLogger(__name__)
 
 _AKARI_DIFFICULTY_FETCH_TIMEOUT = 30
 _AKARI_WEEKLY_POST_CHANNEL_KEY = 'akari_weekly_post_channel'
+_AKARI_WEEKLY_POST_TIME_KEY = 'akari_weekly_post_time'
 _AKARI_WEEKLY_POST_LAST_PREFIX = 'akari_weekly_post_last:'
 _AKARI_WEEKLY_POST_CHECK_INTERVAL = 5 * 60
 _AKARI_WEEKLY_POST_TZ = 'America/New_York'
+_AKARI_WEEKLY_POST_DEFAULT_TIME = '00:00'
+
+
+def _parse_akari_weekly_post_time(value):
+    """Validate HH:MM and return a normalized value plus ``datetime.time``."""
+    value = str(value)
+    if re.fullmatch(r'\d{2}:\d{2}', value) is None:
+        raise ValueError('Time must use 24-hour `HH:MM` format.')
+    try:
+        parsed = dt.datetime.strptime(value, '%H:%M').time()
+    except (TypeError, ValueError) as exc:
+        raise ValueError('Time must use 24-hour `HH:MM` format.') from exc
+    return parsed.strftime('%H:%M'), parsed
+
+
+def _akari_weekly_period_dates(now, post_time):
+    """Return rating-as-of and current-standings dates for this cutoff."""
+    _normalized, cutoff_time = _parse_akari_weekly_post_time(post_time)
+    monday = week_start(now.date())
+    cutoff = dt.datetime.combine(monday, cutoff_time, tzinfo=now.tzinfo)
+    if now < cutoff:
+        # Until the configured Monday cutoff, Sunday still belongs to the
+        # in-progress weekly contest and must not appear in full ratings.
+        return monday - dt.timedelta(days=1), monday - dt.timedelta(days=7)
+    return monday, monday
 
 
 class ImplAkariWeeklyMixin:
+    @staticmethod
+    def _akari_weekly_post_time(guild_id):
+        value = cf_common.user_db.get_guild_config(
+            guild_id, _AKARI_WEEKLY_POST_TIME_KEY)
+        return value or _AKARI_WEEKLY_POST_DEFAULT_TIME
+
+    def _akari_weekly_display_dates(self, guild_id):
+        now = dt.datetime.now(ZoneInfo(_AKARI_WEEKLY_POST_TZ))
+        return _akari_weekly_period_dates(
+            now, self._akari_weekly_post_time(guild_id))
+
     async def _cmd_akari_weekly_ratings(
             self, ctx, *, excluded_ids=None, included_ids=None,
             include_inactive=False, show_all=False):
         """Render ratings produced by completed Monday-Sunday weeks."""
         self._require_enabled(ctx.guild.id, AKARI_GAME)
+        as_of_date, standings_date = self._akari_weekly_display_dates(
+            ctx.guild.id)
         rows, _standings = await self._akari_weekly_snapshot(
             ctx.guild.id,
             excluded_ids=excluded_ids,
             included_ids=included_ids,
+            as_of_date=as_of_date,
+            standings_date=standings_date,
         )
         if not rows:
             raise MinigameCogError(
@@ -71,10 +113,14 @@ class ImplAkariWeeklyMixin:
             show_all=False):
         """Render only the provisional standings for the current week."""
         self._require_enabled(ctx.guild.id, AKARI_GAME)
+        as_of_date, standings_date = self._akari_weekly_display_dates(
+            ctx.guild.id)
         _rows, standings = await self._akari_weekly_snapshot(
             ctx.guild.id,
             excluded_ids=excluded_ids,
             included_ids=included_ids,
+            as_of_date=as_of_date,
+            standings_date=standings_date,
         )
         if not show_all:
             registrants = cf_common.user_db.get_akari_registrants(ctx.guild.id)
@@ -136,21 +182,37 @@ class ImplAkariWeeklyMixin:
         channel_id = cf_common.user_db.get_guild_config(
             ctx.guild.id, _AKARI_WEEKLY_POST_CHANNEL_KEY)
         target = f'<#{channel_id}>' if channel_id else 'not set'
+        post_time = self._akari_weekly_post_time(ctx.guild.id)
         await ctx.send(embed=discord_common.embed_neutral(
-            f'Weekly Akari result thread/channel: {target}'))
+            f'Weekly Akari result thread/channel: {target}\n'
+            f'Weekly cutoff/post time: `{post_time}` '
+            f'({_AKARI_WEEKLY_POST_TZ})'))
 
-    async def _cmd_akari_weekly_post_here(self, ctx):
+    async def _cmd_akari_weekly_post_here(self, ctx, channel=None):
+        channel = channel or ctx.channel
         cf_common.user_db.set_guild_config(
             ctx.guild.id, _AKARI_WEEKLY_POST_CHANNEL_KEY,
-            str(ctx.channel.id))
+            str(channel.id))
         await ctx.send(embed=discord_common.embed_success(
-            'Weekly Akari results will be posted here after each week ends.'))
+            f'Weekly Akari results will be posted in <#{channel.id}> '
+            'after each week ends.'))
 
     async def _cmd_akari_weekly_post_clear(self, ctx):
         cf_common.user_db.delete_guild_config(
             ctx.guild.id, _AKARI_WEEKLY_POST_CHANNEL_KEY)
         await ctx.send(embed=discord_common.embed_success(
             'Automatic weekly Akari result posting disabled.'))
+
+    async def _cmd_akari_weekly_post_time(self, ctx, value):
+        try:
+            normalized, _parsed = _parse_akari_weekly_post_time(value)
+        except ValueError as exc:
+            raise MinigameCogError(str(exc)) from exc
+        cf_common.user_db.set_guild_config(
+            ctx.guild.id, _AKARI_WEEKLY_POST_TIME_KEY, normalized)
+        await ctx.send(embed=discord_common.embed_success(
+            f'Weekly Akari cutoff and post time set to `{normalized}` '
+            f'({_AKARI_WEEKLY_POST_TZ}).'))
 
     @tasks.task_spec(
         name='AkariWeeklyAnnouncementCheck',
@@ -160,9 +222,11 @@ class ImplAkariWeeklyMixin:
         if cf_common.user_db is None:
             return
         now = dt.datetime.now(ZoneInfo(_AKARI_WEEKLY_POST_TZ))
-        completed_start = week_start(now.date()) - dt.timedelta(days=7)
         for guild in self.bot.guilds:
             try:
+                _as_of_date, current_start = _akari_weekly_period_dates(
+                    now, self._akari_weekly_post_time(guild.id))
+                completed_start = current_start - dt.timedelta(days=7)
                 await self._check_akari_weekly_announcement_guild(
                     guild, completed_start)
             except Exception:
