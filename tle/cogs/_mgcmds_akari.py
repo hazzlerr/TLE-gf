@@ -52,6 +52,12 @@ class AkariCmdsMixin:
     async def akari_show(self, ctx):
         await self._cmd_show(ctx, AKARI_GAME)
 
+    @akari.command(name='weeklypost', brief='(Mod) Configure weekly posts',
+                   usage='[here|thread CHANNEL|time HH:MM|clear]')
+    @akari_mod_only()
+    async def akari_weeklypost(self, ctx, *args):
+        await self._cmd_akari_weekly_post(ctx, args)
+
     @akari.command(name='register', brief='Restore Daily Akari rating visibility',
                    usage='[@user (mods only)]')
     async def akari_register(self, ctx, member: CaseInsensitiveMember = None):
@@ -257,23 +263,28 @@ class AkariCmdsMixin:
         await self._cmd_akari_diff(ctx, AKARI_GAME)
 
     @akari.group(name='ratings', brief='Show Akari rating leaderboard',
-                 usage='[+weekly] [+beta] [+time] [+test] [+inactive] [+exclude=…] [+include=…] [+dow=…] [d>=date] [d<date]',
+                 usage='[+weekly|+current] [+beta] [+time] [+test] [+inactive] [+exclude=…] [+include=…] [+dow=…] [d>=date] [d<date]',
                  invoke_without_command=True)
     async def akari_ratings(self, ctx, *args):
         args, beta = _split_queens_improved_filter(args)
         args, time_only = _split_akari_time_filter(args)
         weekly = '+weekly' in args
-        args = tuple(arg for arg in args if arg != '+weekly')
+        current = '+current' in args
+        if weekly and current:
+            raise MinigameCogError('Choose either `+weekly` or `+current`.')
+        args = tuple(arg for arg in args if arg not in ('+weekly', '+current'))
         (_remaining, include_decay, excluded_ids, included_ids,
          include_inactive, test_decay, weekdays, date_bounds,
          _recalculate) = await self._extract_akari_extended_filters(ctx, args)
         self._validate_akari_beta(
             beta, include_decay=include_decay,
-            test_decay=test_decay, weekly=weekly, time_only=time_only)
+            test_decay=test_decay, weekly=weekly or current,
+            time_only=time_only)
         await self._cmd_akari_ratings(
             ctx, excluded_ids=excluded_ids, included_ids=included_ids,
             include_inactive=include_inactive, test_decay=test_decay,
-            weekly=weekly, weekdays=weekdays, date_bounds=date_bounds,
+            weekly=weekly, current=current, weekdays=weekdays,
+            date_bounds=date_bounds,
             beta=beta, time_only=time_only)
 
     @akari.group(name='rating',
@@ -412,23 +423,28 @@ class AkariCmdsMixin:
 
     @akari_ratings.command(name='debug', aliases=['all'],
                            brief='(Mod) Leaderboard incl. shadow-rated (unopted-in) users',
-                           usage='[+weekly] [+beta] [+time] [+test] [+inactive] [+exclude=…] [+include=…] [+dow=…] [d>=date] [d<date]')
+                           usage='[+weekly|+current] [+beta] [+time] [+test] [+inactive] [+exclude=…] [+include=…] [+dow=…] [d>=date] [d<date]')
     @akari_mod_only()
     async def akari_ratings_debug(self, ctx, *args):
         args, beta = _split_queens_improved_filter(args)
         args, time_only = _split_akari_time_filter(args)
         weekly = '+weekly' in args
-        args = tuple(arg for arg in args if arg != '+weekly')
+        current = '+current' in args
+        if weekly and current:
+            raise MinigameCogError('Choose either `+weekly` or `+current`.')
+        args = tuple(arg for arg in args if arg not in ('+weekly', '+current'))
         (_remaining, include_decay, excluded_ids, included_ids,
          include_inactive, test_decay, weekdays, date_bounds,
          _recalculate) = await self._extract_akari_extended_filters(ctx, args)
         self._validate_akari_beta(
             beta, include_decay=include_decay,
-            test_decay=test_decay, weekly=weekly, time_only=time_only)
+            test_decay=test_decay, weekly=weekly or current,
+            time_only=time_only)
         await self._cmd_akari_ratings_debug(
             ctx, excluded_ids=excluded_ids, included_ids=included_ids,
             include_inactive=include_inactive, test_decay=test_decay,
-            weekly=weekly, weekdays=weekdays, date_bounds=date_bounds,
+            weekly=weekly, current=current, weekdays=weekdays,
+            date_bounds=date_bounds,
             beta=beta, time_only=time_only)
 
     # ── Delegated-admin tier, bulk deletion, per-date results ───────────
