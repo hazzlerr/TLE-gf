@@ -2,6 +2,7 @@
 
 import asyncio
 import datetime as dt
+import inspect
 import json
 import logging
 from zoneinfo import ZoneInfo
@@ -51,6 +52,12 @@ class ImplCoreMixin:
                     self.minigames.all_commands[key] = group
 
     async def cog_unload(self):
+        for background_task in (
+                self._queens_daily_update_check,
+                self._akari_weekly_announcement_check):
+            stopped = background_task.stop()
+            if inspect.isawaitable(stopped):
+                await stopped
         import_tasks = list(self._import_tasks.values())
         for task in import_tasks:
             task.cancel()
@@ -71,6 +78,7 @@ class ImplCoreMixin:
     @discord_common.once
     async def on_ready(self):
         self._queens_daily_update_check.start()
+        self._akari_weekly_announcement_check.start()
 
     # ── Helpers ─────────────────────────────────────────────────────────
 

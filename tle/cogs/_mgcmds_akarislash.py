@@ -171,13 +171,18 @@ class AkariSlashMixin:
 
     @akari_slash.command(name='ratings', description='Show Akari rating leaderboard')
     @app_commands.describe(
-        weekly='Preview weekly-contest ratings and this week\'s scores')
+        weekly='Show ratings from completed weekly contests',
+        current='Show only this week\'s in-progress standings')
     async def slash_akari_ratings(self, interaction: discord.Interaction,
-                                  weekly: bool = False):
+                                  weekly: bool = False,
+                                  current: bool = False):
         await interaction.response.defer()
         try:
+            if weekly and current:
+                raise MinigameCogError(
+                    'Choose either `weekly` or `current`, not both.')
             await self._cmd_akari_ratings(
-                _SlashCtx(interaction), weekly=weekly)
+                _SlashCtx(interaction), weekly=weekly, current=current)
         except Exception as _slash_exc:
             await self._slash_handle_error(interaction, _slash_exc)
 

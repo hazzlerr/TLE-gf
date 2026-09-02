@@ -53,8 +53,10 @@ from tle.cogs._minigame_tables import (  # noqa: F401
     _get_akari_puzzle_table_image_file, _queens_results_table_rows,
     _get_queens_results_table_image_file, _akari_rating_table_rows,
     _akari_row_text_color, _get_akari_rating_table_image_file,
-    _akari_weekly_table_rows, _get_akari_weekly_table_image_file,
     _AKARI_HISTORY_PER_PAGE,
+)
+from tle.cogs._minigame_weekly_tables import (  # noqa: F401
+    _akari_weekly_table_rows, _get_akari_weekly_table_image_file,
 )
 from tle.cogs._minigame_stats import (  # noqa: F401
     plot_akari_performance, plot_akari_rating,
@@ -116,6 +118,7 @@ from tle.cogs._mgimpl_import import ImplImportMixin
 from tle.cogs._mgimpl_sharedcmd import ImplSharedCmdMixin
 from tle.cogs._mgimpl_akaria import ImplAkariAMixin
 from tle.cogs._mgimpl_akarib import ImplAkariBMixin
+from tle.cogs._mgimpl_akari_weekly import ImplAkariWeeklyMixin
 from tle.cogs._mgimpl_stats import ImplStatsMixin
 from tle.cogs._mgimpl_export import ImplExportMixin
 
@@ -153,6 +156,7 @@ class Minigames(
     ImplSharedCmdMixin,
     ImplAkariAMixin,
     ImplAkariBMixin,
+    ImplAkariWeeklyMixin,
     ImplStatsMixin,
     ImplExportMixin,
     commands.Cog,

@@ -145,7 +145,7 @@ class TestDifficultyCacheDb:
 
 
 class TestWeeklyCommand:
-    def test_weekly_flag_sends_rating_and_current_score_tables(
+    def test_weekly_flag_sends_only_completed_week_ratings(
             self, db, monkeypatch):
         from tle.cogs import minigames as minigames_module
         from tle.cogs._minigame_akari import expected_puzzle_number
@@ -189,8 +189,107 @@ class TestWeeklyCommand:
         ctx = SimpleNamespace(guild=_FakeGuild(1), send=send)
         asyncio.run(cog._cmd_akari_ratings(ctx, weekly=True))
 
-        assert len(sent) == 2
+        assert len(sent) == 1
         assert sent[0]['file'][0] == 'ratings'
-        assert 'weekly preview' in sent[0]['file'][1]
-        assert sent[1]['file'][0] == 'weekly'
-        assert sent[1]['file'][2] == ['20', '10']
+        assert sent[0]['file'][1] == 'Daily Akari Weekly Ratings'
+
+    def test_current_flag_sends_only_current_week_standings(
+            self, db, monkeypatch):
+        from tle.cogs import minigames as minigames_module
+        from tle.cogs._minigame_akari import expected_puzzle_number
+        from tle.util import codeforces_common as cf_common
+
+        db.set_guild_config(1, 'akari', '1')
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        today = dt.date.today()
+        monday = today - dt.timedelta(days=today.weekday())
+
+        for message, user, seconds in ((1, 10, 120), (2, 20, 60)):
+            db.save_minigame_result(
+                message, 1, 'akari', 10, user,
+                expected_puzzle_number(monday), monday.isoformat(),
+                100, seconds, True, 'raw')
+
+        cog = minigames_module.Minigames(bot=None)
+
+        async def no_fetch(_numbers):
+            return {}
+
+        monkeypatch.setattr(cog, '_akari_difficulty_map', no_fetch)
+        monkeypatch.setattr(
+            minigames_module, '_get_akari_weekly_table_image_file',
+            lambda _guild, standings, *, title:
+                ('current', title, [s.user_id for s in standings]))
+        sent = []
+
+        async def send(**kwargs):
+            sent.append(kwargs)
+
+        ctx = SimpleNamespace(guild=_FakeGuild(1), send=send)
+        asyncio.run(cog._cmd_akari_ratings(ctx, current=True))
+
+        assert len(sent) == 1
+        assert sent[0]['file'][0] == 'current'
+        assert sent[0]['file'][2] == ['20', '10']
+        assert 'Current Weekly Ratings' in sent[0]['file'][1]
+
+    def test_scheduled_post_targets_configured_thread_once(
+            self, db, monkeypatch):
+        from tle.cogs import minigames as minigames_module
+        from tle.cogs._mgimpl_akari_weekly import (
+            _AKARI_WEEKLY_POST_CHANNEL_KEY,
+        )
+        from tle.cogs._minigame_akari import expected_puzzle_number
+        from tle.util import codeforces_common as cf_common
+
+        db.set_guild_config(1, 'akari', '1')
+        db.set_guild_config(1, _AKARI_WEEKLY_POST_CHANNEL_KEY, '777')
+        monkeypatch.setattr(cf_common, 'user_db', db)
+        today = dt.date.today()
+        monday = today - dt.timedelta(days=today.weekday())
+        previous = monday - dt.timedelta(days=7)
+        for message, user, seconds in (
+                (1, 10, 60), (2, 20, 90), (3, 30, 120), (4, 40, 180)):
+            db.save_minigame_result(
+                message, 1, 'akari', 10, user,
+                expected_puzzle_number(previous), previous.isoformat(),
+                100, seconds, True, 'raw')
+
+        sent = []
+
+        class Channel:
+            async def send(self, content, **kwargs):
+                sent.append((content, kwargs))
+
+        cog = minigames_module.Minigames(bot=SimpleNamespace(guilds=[]))
+
+        async def no_fetch(_numbers):
+            return {}
+
+        async def resolve(channel_id):
+            assert channel_id == 777
+            return Channel()
+
+        monkeypatch.setattr(cog, '_akari_difficulty_map', no_fetch)
+        monkeypatch.setattr(cog, '_resolve_channel', resolve)
+        monkeypatch.setattr(
+            minigames_module, '_get_akari_weekly_table_image_file',
+            lambda _guild, standings, *, title:
+                ('top', title, [s.user_id for s in standings]))
+        monkeypatch.setattr(
+            minigames_module, '_get_akari_rating_table_image_file',
+            lambda *args, **kwargs: ('ratings', kwargs['title']))
+
+        guild = _FakeGuild(1)
+        first = asyncio.run(
+            cog._check_akari_weekly_announcement_guild(guild, previous))
+        second = asyncio.run(
+            cog._check_akari_weekly_announcement_guild(guild, previous))
+
+        assert first is True
+        assert second is False
+        assert len(sent) == 1
+        files = sent[0][1]['files']
+        assert files[0][0] == 'top'
+        assert files[0][2] == ['10', '20', '30']
+        assert files[1] == ('ratings', 'Daily Akari Weekly Ratings')

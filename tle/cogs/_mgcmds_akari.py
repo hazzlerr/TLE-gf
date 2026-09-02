@@ -41,6 +41,26 @@ class AkariCmdsMixin:
     async def akari_show(self, ctx):
         await self._cmd_show(ctx, AKARI_GAME)
 
+    @akari.group(
+        name='weeklypost', aliases=['weekly-post'],
+        brief='Configure automatic weekly result posts',
+        invoke_without_command=True,
+    )
+    async def akari_weeklypost(self, ctx):
+        await self._cmd_akari_weekly_post_show(ctx)
+
+    @akari_weeklypost.command(
+        name='here', brief='Post weekly results in this channel/thread')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def akari_weeklypost_here(self, ctx):
+        await self._cmd_akari_weekly_post_here(ctx)
+
+    @akari_weeklypost.command(
+        name='clear', brief='Disable automatic weekly result posts')
+    @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
+    async def akari_weeklypost_clear(self, ctx):
+        await self._cmd_akari_weekly_post_clear(ctx)
+
     @akari.command(name='register', brief='Restore Daily Akari rating visibility',
                    usage='[@user (mods only)]')
     async def akari_register(self, ctx, member: CaseInsensitiveMember = None):
@@ -233,18 +253,24 @@ class AkariCmdsMixin:
         await self._cmd_akari_diff(ctx, AKARI_GAME)
 
     @akari.group(name='ratings', brief='Show Akari rating leaderboard',
-                 usage='[+weekly] [+test] [+inactive] [+exclude=…] [+include=…]',
+                 usage='[+weekly|+current] [+test] [+inactive] '
+                       '[+exclude=…] [+include=…]',
                  invoke_without_command=True)
     async def akari_ratings(self, ctx, *args):
         weekly = '+weekly' in args
-        args = tuple(arg for arg in args if arg != '+weekly')
+        current = '+current' in args
+        if weekly and current:
+            raise MinigameCogError(
+                'Choose either `+weekly` or `+current`, not both.')
+        args = tuple(
+            arg for arg in args if arg not in ('+weekly', '+current'))
         (_remaining, _include_decay, excluded_ids, included_ids,
          include_inactive, test_decay) = await self._extract_akari_filters(
             ctx, args)
         await self._cmd_akari_ratings(
             ctx, excluded_ids=excluded_ids, included_ids=included_ids,
             include_inactive=include_inactive, test_decay=test_decay,
-            weekly=weekly)
+            weekly=weekly, current=current)
 
     @akari.group(name='rating',
                  brief='Show registered users\' Akari rating graph',
@@ -340,15 +366,21 @@ class AkariCmdsMixin:
 
     @akari_ratings.command(name='debug', aliases=['all'],
                            brief='(Mod) Leaderboard incl. shadow-rated (unopted-in) users',
-                           usage='[+weekly] [+test] [+inactive] [+exclude=…] [+include=…]')
+                           usage='[+weekly|+current] [+test] [+inactive] '
+                                 '[+exclude=…] [+include=…]')
     @commands.has_any_role(constants.TLE_ADMIN, constants.TLE_MODERATOR)
     async def akari_ratings_debug(self, ctx, *args):
         weekly = '+weekly' in args
-        args = tuple(arg for arg in args if arg != '+weekly')
+        current = '+current' in args
+        if weekly and current:
+            raise MinigameCogError(
+                'Choose either `+weekly` or `+current`, not both.')
+        args = tuple(
+            arg for arg in args if arg not in ('+weekly', '+current'))
         (_remaining, _include_decay, excluded_ids, included_ids,
          include_inactive, test_decay) = await self._extract_akari_filters(
             ctx, args)
         await self._cmd_akari_ratings_debug(
             ctx, excluded_ids=excluded_ids, included_ids=included_ids,
             include_inactive=include_inactive, test_decay=test_decay,
-            weekly=weekly)
+            weekly=weekly, current=current)
