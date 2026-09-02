@@ -11,7 +11,7 @@ import discord
 from discord import app_commands
 
 from tle.cogs._minigame_akari import AKARI_GAME
-from tle.cogs._minigame_helpers import _SlashCtx
+from tle.cogs._minigame_helpers import MinigameCogError, _SlashCtx
 from tle.cogs._minigame_slash_consts import _TIMEFRAME_CHOICES, _MODE_CHOICES
 
 logger = logging.getLogger(__name__)
@@ -161,21 +161,27 @@ class AkariSlashMixin:
 
     @akari_slash.command(name='ratings', description='Show Akari rating leaderboard')
     @app_commands.describe(
-        weekly='Preview weekly-contest ratings and this week\'s scores',
+        weekly='Show ratings from completed weekly contests',
+        current='Show only this week\'s in-progress standings',
         weekdays='Days: mon,wed, weekday, or weekend',
         date_filter='Date filter, e.g. d>=01062026 d<08062026',
         beta='Use the beta testing rating system',
         time_only='Ignore accuracy and rate only by completion time')
     async def slash_akari_ratings(self, interaction: discord.Interaction,
                                   weekly: bool = False,
+                                  current: bool = False,
                                   weekdays: Optional[str] = None,
                                   date_filter: Optional[str] = None,
                                   beta: bool = False,
                                   time_only: bool = False):
         await interaction.response.defer()
         try:
+            if weekly and current:
+                raise MinigameCogError(
+                    'Choose either `weekly` or `current`.')
             await self._cmd_akari_ratings(
-                _SlashCtx(interaction), weekly=weekly, beta=beta,
+                _SlashCtx(interaction), weekly=weekly, current=current,
+                beta=beta,
                 time_only=time_only,
                 weekdays=self._slash_queens_weekdays(weekdays),
                 date_bounds=self._slash_queens_date_bounds(date_filter))

@@ -42,6 +42,7 @@ class ImplCoreMixin:
                     self.minigames.all_commands[key] = group
 
     async def cog_unload(self):
+        await self._stop_akari_weekly_announcement()
         import_tasks = list(self._import_tasks.values())
         for task in import_tasks:
             task.cancel()

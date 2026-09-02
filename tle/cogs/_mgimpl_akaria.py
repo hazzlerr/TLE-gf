@@ -131,7 +131,7 @@ class ImplAkariAMixin:
                                   included_ids=None, include_inactive=False,
                                   test_decay=False, weekly=False,
                                   weekdays=None, date_bounds=None, beta=False,
-                                  time_only=False):
+                                  time_only=False, current=False):
         """Guild leaderboard — registered, recently-active players only.
 
         ``excluded_ids`` / ``included_ids`` run an ad-hoc replay with the
@@ -147,8 +147,17 @@ class ImplAkariAMixin:
         """
         self._require_enabled(ctx.guild.id, AKARI_GAME)
         self._validate_akari_beta(
-            beta, test_decay=test_decay, weekly=weekly,
+            beta, test_decay=test_decay, weekly=weekly or current,
             time_only=time_only)
+        if weekly:
+            return await self._cmd_akari_completed_weekly_ratings(
+                ctx, excluded_ids=excluded_ids, included_ids=included_ids,
+                include_inactive=include_inactive, weekdays=weekdays,
+                date_bounds=date_bounds)
+        if current:
+            return await self._cmd_akari_current_week_ratings(
+                ctx, excluded_ids=excluded_ids, included_ids=included_ids,
+                weekdays=weekdays, date_bounds=date_bounds)
         registrants = cf_common.user_db.get_akari_registrants(ctx.guild.id)
         # Banned players stay rated (forward-only ban) but are hidden from
         # public boards at display time, like Queens'; debug shows them.
@@ -157,18 +166,7 @@ class ImplAkariAMixin:
         filtered = bool(excluded_ids or included_ids or test_decay or beta
                         or time_only
                         or weekdays is not None or date_bounds is not None)
-        if weekly:
-            rows, standings = await self._akari_weekly_preview(
-                ctx.guild.id,
-                excluded_ids=excluded_ids,
-                included_ids=included_ids,
-                weekdays=weekdays, date_bounds=date_bounds,
-            )
-            # The public board honours the rating opt-out: unregistered
-            # players are dropped from the provisional scores table too, not
-            # just from the rating table (the debug command shows everyone).
-            standings = [s for s in standings if s.user_id in visible]
-        elif filtered:
+        if filtered:
             rows = self._akari_filtered_rating_rows(
                 ctx.guild.id, excluded_ids=excluded_ids,
                 included_ids=included_ids, test_decay=test_decay,
@@ -176,18 +174,18 @@ class ImplAkariAMixin:
                 time_only=time_only)
         else:
             rows = cf_common.user_db.get_akari_ratings(ctx.guild.id)
-        if not rows and not (weekly and standings):
+        if not rows:
             raise MinigameCogError(
                 f'No {AKARI_GAME.display_name} ratings yet. They appear once '
                 f'players post results.')
         registered = [r for r in rows if r.user_id in visible]
-        if not registered and not (weekly and standings):
+        if not registered:
             raise MinigameCogError(
                 f'No registered {AKARI_GAME.display_name} players yet. '
                 f'Players opt in with `;mg akari register`.')
         shown = self._active_ranking_rows(
             registered, include_inactive=include_inactive)
-        if not shown and not (weekly and standings):
+        if not shown:
             if include_inactive:
                 raise MinigameCogError(
                     f'No registered {AKARI_GAME.display_name} players yet.')
@@ -198,23 +196,16 @@ class ImplAkariAMixin:
         # All shown users are registered, so the ✓ marker is redundant noise.
         title = ('Daily Akari Ratings (incl. inactive)'
                  if include_inactive else 'Daily Akari Ratings')
-        if test_decay and not weekly:
+        if test_decay:
             title += ' [test decay]'
-        if weekly:
-            title += ' [weekly preview]'
         title += _queens_improved_title_suffix(beta)
         title += ' [time only]' if time_only else ''
         title += _queens_filter_suffix(
             weekdays=weekdays, date_bounds=date_bounds)
-        if shown:
-            table_kwargs = {'games_label': 'Weeks'} if weekly else {}
-            discord_file = _mg()._get_akari_rating_table_image_file(
-                ctx.guild, shown, registrants, title=title,
-                mark_registered=False,
-                **table_kwargs)
-            await ctx.send(file=discord_file)
-        if weekly:
-            await self._send_akari_weekly_scores(ctx, standings)
+        discord_file = _mg()._get_akari_rating_table_image_file(
+            ctx.guild, shown, registrants, title=title,
+            mark_registered=False)
+        await ctx.send(file=discord_file)
 
     @staticmethod
     def _akari_banned_user_ids(guild_id):
@@ -235,7 +226,7 @@ class ImplAkariAMixin:
         start = standings[0].week_start
         end = standings[0].week_end
         score_title = (
-            f'Daily Akari Weekly Scores · {start:%b %d}–{end:%b %d} '
+            f'Daily Akari Current Weekly Ratings · {start:%b %d}–{end:%b %d} '
             f'(in progress)')
         score_file = _mg()._get_akari_weekly_table_image_file(
             ctx.guild, standings, title=score_title)
@@ -243,7 +234,8 @@ class ImplAkariAMixin:
 
     async def _akari_weekly_preview(self, guild_id, *, excluded_ids=None,
                                     included_ids=None, weekdays=None,
-                                    date_bounds=None):
+                                    date_bounds=None, as_of_date=None,
+                                    standings_date=None):
         """Build weekly ratings plus provisional current-week standings."""
         result_rows = cf_common.user_db.get_minigame_results_for_guild(
             guild_id, AKARI_GAME.name)
@@ -252,7 +244,8 @@ class ImplAkariAMixin:
             included_ids=included_ids)
         result_rows = _filter_queens_weekday_rows(result_rows, weekdays)
         result_rows = _filter_queens_rating_date_rows(result_rows, date_bounds)
-        today = dt.date.today()
+        today = as_of_date or dt.date.today()
+        standings_date = standings_date or today
         current_puzzle = _mg().expected_puzzle_number(today)
         wanted = set()
         for row in result_rows:
@@ -271,7 +264,7 @@ class ImplAkariAMixin:
         rating_rows = sorted(
             states.values(), key=lambda s: (-s.rating, -s.games, int(s.user_id)))
         standings = current_week_standings(
-            result_rows, difficulties, as_of_date=today)
+            result_rows, difficulties, as_of_date=standings_date)
         return rating_rows, standings
 
     @staticmethod
