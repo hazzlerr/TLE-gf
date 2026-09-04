@@ -238,7 +238,8 @@ def _get_queens_results_table_image_file(guild, rows, title,
                                          name_fn=None,
                                          sort_key_fn=None,
                                          rank_key_fn=None,
-                                         unrated_keys=None):
+                                         unrated_keys=None,
+                                         filename='queens-results.png'):
     if sort_key_fn is None:
         sort_key_fn = _queens_result_sort_key
     rows = _sort_akari_puzzle_results(rows, sort_key_fn=sort_key_fn)
@@ -272,7 +273,7 @@ def _get_queens_results_table_image_file(guild, rows, title,
         header=header, cols=cols,
         right_align_cols=right_align_cols, row_colors=row_colors,
         cell_colors=cell_colors,
-        filename='queens-results.png')
+        filename=filename)
 
 
 def _akari_rating_table_rows(guild, rating_rows, registrants, *,

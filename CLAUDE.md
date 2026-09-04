@@ -87,6 +87,16 @@ This uses the **native** Gemini endpoint, not Google's OpenAI-compatibility shim
 
 The Gemini system instruction advertises **only** URL reading, never web search. Told it can search, the model narrates searches it never ran — which is exactly the fabrication the "never claim to have read a page" rule exists to prevent. Grok is explicitly told it cannot fetch URLs. If `google_search` is ever added to `tools`, that paragraph has to change with it.
 
+### LinkedIn games: Queens and Tango share one identity layer
+
+LinkedIn's daily puzzles (Queens, Tango) all publish the same two artefacts — a share message headed `<Game> #<n> | m:ss` (the time sometimes wraps to the next line) and a copy-pasteable leaderboard of display names — and roll over at midnight Pacific. So the whole "LinkedIn identity" subsystem that was written for Queens (leaderboard import, `register`/`unregister`, anonymous linking, per-result opt-out, backfill, the source→projection sync) is driven by one capability on `GameDef`: `linkedin: Optional[LinkedInDef]` (`_minigame_common.py`). `game.linkedin_identity` is the boolean every generic code path checks; Akari and GuessThe.Game leave it unset and credit the Discord author.
+
+`LinkedInDef` carries only what differs per game: the calendar anchor (`Queens #769 = 2026-06-08`, `Tango #697 = 2026-09-04`), the delegated-admin `guild_config` key, and whether legacy `date.toordinal()` puzzle numbers must still be recognised (Queens only). Parsing lives once in `_minigame_linkedin.py` (`make_share_parser`, `parse_linkedin_leaderboard`, time-only ranking/sort keys); `_minigame_queens.py` and `_minigame_tango.py` are thin definitions on top of it, and `_minigame_queens.py` re-exports the historical `queens_*` names.
+
+**The player link is shared.** `minigame_player_link` rows for every LinkedIn game live under the namespace `game.link_key == 'linkedin'` (migration 1.57.0 moved Queens' rows there), because a person has one LinkedIn profile. `;queens register` and `;tango register` write the same row, and `_save_queens_registration_link` / `_cmd_queens_unregister` loop over `self._linkedin_games()` so a registration claims stored results and recomputes ratings in *every* LinkedIn game. Everything else stays per game and keyed by `game.name`: results, `minigame_unresolved_result` source rows, opt-outs, bans, the extra-admin list, and the synthetic projected message id (`_linkedin_result_message_id` includes the game name so one user's Queens and Tango rows for a date never collide; Queens' ids are unchanged from before Tango).
+
+The impl mixins keep their historical `_queens_*` method names (tests import ~250 of them by name) but every one that touches game data takes `game` as a required positional after `ctx`/`guild_id`. That parameter is required rather than defaulted on purpose: a missed site is a `TypeError` in tests, whereas a `QUEENS_GAME` default would silently read or write Queens data from the Tango path. `on_raw_message_delete` gets only a message id, so it probes every LinkedIn game for a source row and recomputes whichever matched. The Tango command mixins (`_mgcmds_tango*.py`) are mechanical mirrors of the Queens ones passing `TANGO_GAME`; a follow-up may fold both into a factory. `tango` is a `_KNOWN_FEATURES` flag enabled with `;meta config enable tango`. One Discord channel may serve both games: `_game_for_channel` collects every enabled game configured for the channel and picks the one whose parser accepts the message, falling back to a game that already stored that message (so an edit that breaks a share cleans up under the right game) and then to the first configured game.
+
 ## Key files
 
 | File | What it does |
@@ -96,6 +106,12 @@ The Gemini system instruction advertises **only** URL reading, never web search.
 | `tle/util/db/user_db_conn.py` | All DB methods (starboard, guild config, leaderboards) |
 | `tle/cogs/starboard.py` | Starboard cog (reactions, commands, backfill) |
 | `tle/cogs/meta.py` | Meta cog (guild config commands) |
+| `tle/cogs/_minigame_common.py` | `GameDef`, `LinkedInDef`, `linkedin_current_puzzle_date` (Pacific rollover), shared scoring |
+| `tle/cogs/_minigame_linkedin.py` | Share/leaderboard parsing and time-only scoring shared by every LinkedIn game |
+| `tle/cogs/_minigame_queens.py`, `_minigame_tango.py` | Per-game LinkedIn definitions (header word, calendar anchor, rating knobs) |
+| `tle/cogs/_minigame_queens_cog.py` | Cog-side LinkedIn helpers: date/number parsing, projected message ids, anonymous-register modal |
+| `tle/cogs/_mgimpl_queens*.py` | LinkedIn-game impl mixins (registration, sync, import, backfill, privacy, commands) — take `game` |
+| `tle/cogs/_mgcmds_queens*.py`, `_mgcmds_tango*.py` | Prefix/slash command groups per LinkedIn game |
 | `tle/cogs/llm.py` | `;llm` cog lifecycle, process-only keys, privacy policy, literal provider listeners |
 | `tle/cogs/_llm_ask.py` | Shared guarded Gemini/Grok request flow |
 | `tle/cogs/_llm_limits.py` | Persistent per-guild regular-user Grok allowance |

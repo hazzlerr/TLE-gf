@@ -94,6 +94,13 @@ QUEENS_DECAY_BASE = 0.04
 QUEENS_DECAY_MAX = 0.08
 QUEENS_DECAY_GRACE = 0
 
+# ── LinkedIn Tango minigame (tle/cogs/_minigame_tango.py) ──────────────────
+# Same ladder shape as Queens.  Separate constants so the two LinkedIn games
+# can be tuned independently.
+TANGO_DECAY_BASE = 0.04
+TANGO_DECAY_MAX = 0.08
+TANGO_DECAY_GRACE = 0
+
 # ── Soccer betting minigame (tle/cogs/betting.py) ──────────────────────────
 # Live 1X2 odds and final scores come from The Odds API (the-odds-api.com).
 # Set ODDS_API_KEY to a free-tier key to enable `;bet matches`/`;bet open` and

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tle.cogs._minigame_queens import QUEENS_GAME
 from tle.cogs import _mgimpl_queenscmd as queens_cmd_module
 from tle.cogs import minigames as minigames_module
 from tle.cogs._minigame_queens import normalize_queens_name
@@ -44,7 +45,7 @@ class TestQueensSkipsCommand(_QueensCommandsBase):
         db.set_guild_config(_GUILD, 'queens', '1')
         alice = _FakeDiscordMember(_USER, 'alice', 'Alice')
         db.set_minigame_player_link(
-            _GUILD, 'queens', alice.id, _NAME, _NORMALIZED_NAME,
+            _GUILD, 'linkedin', alice.id, _NAME, _NORMALIZED_NAME,
             None, 1.0, alice.id)
         guild = _FakeGuild(_GUILD, members=[alice])
         return Minigames(bot=object()), self._make_ctx(guild, alice), alice
@@ -122,7 +123,7 @@ class TestQueensSkipsCommand(_QueensCommandsBase):
             100, 80, True, 'legacy')
         captured = self._capture_pages(monkeypatch)
 
-        asyncio.run(cog._cmd_queens_skips(ctx, alice))
+        asyncio.run(cog._cmd_queens_skips(ctx, QUEENS_GAME, alice))
 
         description = captured['pages'][0][1].description
         assert '**#770**' in description
@@ -139,7 +140,7 @@ class TestQueensSkipsCommand(_QueensCommandsBase):
         self._save_source(db, '2026-06-08')
         captured = self._capture_pages(monkeypatch)
 
-        asyncio.run(cog._cmd_queens_skips(ctx, alice))
+        asyncio.run(cog._cmd_queens_skips(ctx, QUEENS_GAME, alice))
 
         pages = captured['pages']
         assert len(pages) == 2
@@ -161,7 +162,7 @@ class TestQueensSkipsCommand(_QueensCommandsBase):
             lambda *_args, **_kwargs: pytest.fail(
                 'An empty skip history should not open the paginator.'))
 
-        asyncio.run(cog._cmd_queens_skips(ctx, alice))
+        asyncio.run(cog._cmd_queens_skips(ctx, QUEENS_GAME, alice))
 
         description = ctx.sent['embed'].description
         assert 'has no skipped LinkedIn Queens days' in description
@@ -173,24 +174,24 @@ class TestQueensSkipsCommand(_QueensCommandsBase):
         cog, ctx, alice = self._setup(db, monkeypatch)
         with pytest.raises(
                 MinigameCogError, match='No LinkedIn Queens results'):
-            asyncio.run(cog._cmd_queens_skips(ctx, alice))
+            asyncio.run(cog._cmd_queens_skips(ctx, QUEENS_GAME, alice))
 
-        db.delete_minigame_player_link(_GUILD, 'queens', alice.id)
+        db.delete_minigame_player_link(_GUILD, 'linkedin', alice.id)
         with pytest.raises(MinigameCogError, match='is not registered'):
-            asyncio.run(cog._cmd_queens_skips(ctx, alice))
+            asyncio.run(cog._cmd_queens_skips(ctx, QUEENS_GAME, alice))
 
         db.set_minigame_player_link(
-            _GUILD, 'queens', alice.id, _NAME, _NORMALIZED_NAME,
+            _GUILD, 'linkedin', alice.id, _NAME, _NORMALIZED_NAME,
             None, 1.0, alice.id)
         self._save_source(db, '2026-06-08')
         db.ban_minigame_user(
             _GUILD, 'queens', alice.id, 2.0, 999, 'test')
         with pytest.raises(MinigameCogError, match='is banned'):
-            asyncio.run(cog._cmd_queens_skips(ctx, alice))
+            asyncio.run(cog._cmd_queens_skips(ctx, QUEENS_GAME, alice))
 
         db.set_guild_config(_GUILD, 'queens', '0')
         with pytest.raises(MinigameCogError, match='is not enabled'):
-            asyncio.run(cog._cmd_queens_skips(ctx, alice))
+            asyncio.run(cog._cmd_queens_skips(ctx, QUEENS_GAME, alice))
 
 
 def test_queens_date_number_round_trip_for_skip_rendering():

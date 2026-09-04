@@ -43,7 +43,7 @@ def _cog(monkeypatch, rows, *, today=_MONDAY):
     monkeypatch.setattr(cog, '_filter_minigame_banned_rows',
                         lambda gid, game, rows: rows)
     monkeypatch.setattr(cog, '_filter_queens_registered_result_rows',
-                        lambda gid, rows, **kw: rows)
+                        lambda gid, game, rows, **kw: rows)
     monkeypatch.setattr(cog, '_minigame_public_user_name',
                         lambda guild, game, uid: f'u{uid}')
 

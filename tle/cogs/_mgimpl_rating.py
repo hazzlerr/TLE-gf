@@ -14,9 +14,6 @@ from tle.util.queens_improved_rating import compute_queens_improved_ratings
 from tle.cogs._minigame_akari import (
     AKARI_GAME,
 )
-from tle.cogs._minigame_queens import (
-    QUEENS_GAME,
-)
 from tle.cogs._minigame_helpers import (
     _mg,
 )
@@ -52,12 +49,12 @@ class ImplRatingMixin:
     def _recompute_game_ratings(self, guild_id, game):
         if game.rating is None:
             return
-        if game.name == QUEENS_GAME.name:
+        if game.linkedin_identity:
             # Channel shares/history imports start in the generic result
             # tables. Canonicalize them under the LinkedIn identity before
             # replay so an active opt-out can become durable per-result state.
             self._sync_queens_materialized_results(
-                guild_id, migrate_legacy=True)
+                guild_id, game, migrate_legacy=True)
             self._recompute_minigame_ratings(
                 guild_id, game, sync_results=False)
             return
@@ -74,14 +71,15 @@ class ImplRatingMixin:
             rating = game.rating
             if rating is None:
                 return
-            if game.name == QUEENS_GAME.name and sync_results:
+            if game.linkedin_identity and sync_results:
                 self._sync_queens_materialized_results(
-                    guild_id, migrate_legacy=False)
+                    guild_id, game, migrate_legacy=False)
             rows = cf_common.user_db.get_minigame_results_for_guild(
                 guild_id, game.name)
             rows = self._filter_minigame_banned_rows(guild_id, game, rows)
-            if game.name == QUEENS_GAME.name:
-                rows = self._filter_queens_registered_result_rows(guild_id, rows)
+            if game.linkedin_identity:
+                rows = self._filter_queens_registered_result_rows(
+                    guild_id, game, rows)
             kwargs = self._rating_compute_kwargs(game)
             states = compute_ratings(rows, **kwargs)
             if game.name == AKARI_GAME.name:
@@ -129,8 +127,9 @@ class ImplRatingMixin:
         rows = cf_common.user_db.get_minigame_results_for_guild(
             guild_id, game.name)
         rows = self._filter_minigame_banned_rows(guild_id, game, rows)
-        if game.name == QUEENS_GAME.name:
-            rows = self._filter_queens_registered_result_rows(guild_id, rows)
+        if game.linkedin_identity:
+            rows = self._filter_queens_registered_result_rows(
+                guild_id, game, rows)
         rows = _filter_queens_weekday_rows(rows, weekdays)
         rows = _filter_queens_rating_date_rows(rows, date_bounds)
         return self._filter_akari_rows(
@@ -150,7 +149,7 @@ class ImplRatingMixin:
     def _minigame_rating_engine(game, improved):
         if not improved:
             return compute_ratings
-        if game.name == QUEENS_GAME.name:
+        if game.linkedin_identity:
             return compute_queens_improved_ratings
         if game.name == AKARI_GAME.name:
             return compute_akari_beta_ratings

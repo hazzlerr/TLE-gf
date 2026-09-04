@@ -36,3 +36,27 @@ def upgrade_1_56_0(db):
     create_greatday_signup_event_table(db)
     db.commit()
     logger.info('1.56.0: Upgrade complete')
+
+
+@registry.register('1.57.0', 'Share LinkedIn player links between Queens and Tango')
+def upgrade_1_57_0(db):
+    """Move Queens' LinkedIn links into the ``linkedin`` namespace.
+
+    LinkedIn Tango resolves players through the same LinkedIn profile as
+    Queens, so ``minigame_player_link`` rows now live under the shared game
+    key ``linkedin`` (``GameDef.link_key``) and one registration serves both
+    games.  Results, opt-outs, and bans stay per game.  No ``linkedin`` rows
+    can exist before this upgrade, so the PK/UNIQUE constraints cannot clash.
+    """
+    logger.info('1.57.0: Moving queens player links to the shared linkedin namespace')
+    # A DB that predates the minigame tables has nothing to move; the table
+    # is created (empty) by ``create_tables`` after the upgrade chain runs.
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+        "AND name = 'minigame_player_link'").fetchone()
+    if exists:
+        db.execute(
+            "UPDATE minigame_player_link SET game = 'linkedin' "
+            "WHERE game = 'queens'")
+    db.commit()
+    logger.info('1.57.0: Upgrade complete')

@@ -10,7 +10,7 @@ import datetime as dt
 from tle.util import codeforces_common as cf_common
 from tle.cogs._minigame_akari import AKARI_GAME
 from tle.cogs._minigame_queens import (
-    QUEENS_GAME, queens_weekly_difficulty_map,
+    queens_weekly_difficulty_map,
 )
 from tle.cogs._minigame_queens_cog import _queens_current_puzzle_date
 from tle.cogs._minigame_helpers import MinigameCogError
@@ -46,7 +46,7 @@ class ImplWeeklyMixin:
     async def _cmd_week(self, ctx, game, *args):
         self._require_enabled(ctx.guild.id, game)
         self._sync_minigame_results_for_read(ctx.guild.id, game)
-        queens = game.name == QUEENS_GAME.name
+        queens = game.linkedin_identity
         today = _queens_current_puzzle_date() if queens else dt.date.today()
         anchor = _parse_week_anchor(args, today)
         if anchor > today:
@@ -58,7 +58,8 @@ class ImplWeeklyMixin:
             ctx.guild.id, game.name)
         rows = self._filter_minigame_banned_rows(ctx.guild.id, game, rows)
         if queens:
-            rows = self._filter_queens_registered_result_rows(ctx.guild.id, rows)
+            rows = self._filter_queens_registered_result_rows(
+                ctx.guild.id, game, rows)
         if not rows:
             raise MinigameCogError(
                 f'No {game.display_name} results have been posted yet.')
@@ -120,7 +121,7 @@ class ImplWeeklyMixin:
 
     async def _week_rating_inputs(self, game, rows, anchor):
         """Rows and difficulty weights for the game's weekly rating contest."""
-        if game.name == QUEENS_GAME.name:
+        if game.linkedin_identity:
             # Queens' weekly contest is time-only: share messages do not carry
             # hint/mistake badges, so accuracy would depend on ingestion path.
             scoring_rows = [

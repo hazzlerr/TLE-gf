@@ -28,7 +28,8 @@ def _run_top(monkeypatch, winners, *args):
 
     scoring = SimpleNamespace(is_eligible_winner=None, best_result_sort_key=None,
                               winner_result_sort_key=None, result_group_key=None)
-    game = SimpleNamespace(name='akari', display_name='Akari')
+    game = SimpleNamespace(name='akari', display_name='Akari',
+                           linkedin_identity=False)
     monkeypatch.setattr(shared, 'resolve_scoring',
                         lambda g, args: (list(args), None, scoring))
     monkeypatch.setattr(shared, 'compute_top_breakdown',

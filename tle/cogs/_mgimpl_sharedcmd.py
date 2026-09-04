@@ -19,9 +19,6 @@ from tle.cogs._minigame_akari import (
     AKARI_GAME,
 )
 from tle.cogs._minigame_guessgame import GUESSGAME_GAME
-from tle.cogs._minigame_queens import (
-    QUEENS_GAME,
-)
 from tle.cogs._minigame_queens_cog import _queens_current_puzzle_date
 from tle.cogs._minigame_helpers import (
     MinigameCogError, _safe_member_name, _safe_user_name,
@@ -364,7 +361,7 @@ class ImplSharedCmdMixin:
             args, weekdays = _split_queens_weekday_filter(args)
             reference_date = (
                 _queens_current_puzzle_date()
-                if game.name == QUEENS_GAME.name else None)
+                if game.linkedin_identity else None)
             dlo, dhi, plo, phi = parse_date_args(
                 args, reference_date=reference_date)
         except ValueError as e:
@@ -373,8 +370,9 @@ class ImplSharedCmdMixin:
         rows = cf_common.user_db.get_minigame_results_for_guild(
             ctx.guild.id, game.name, dlo, dhi, plo, phi)
         rows = self._filter_minigame_banned_rows(ctx.guild.id, game, rows)
-        if game.name == QUEENS_GAME.name:
-            rows = self._filter_queens_registered_result_rows(ctx.guild.id, rows)
+        if game.linkedin_identity:
+            rows = self._filter_queens_registered_result_rows(
+                ctx.guild.id, game, rows)
         rows = _filter_queens_weekday_rows(rows, weekdays)
         winners = compute_top_breakdown(
             rows,
@@ -382,7 +380,7 @@ class ImplSharedCmdMixin:
             best_result_sort_key_fn=scoring.best_result_sort_key,
             winner_result_sort_key_fn=scoring.winner_result_sort_key,
             group_key_fn=scoring.result_group_key,
-            min_participants=(2 if game.name == QUEENS_GAME.name else 1),
+            min_participants=(2 if game.linkedin_identity else 1),
         )
         if not show_ties:
             # Outright wins only; a player who never won a puzzle alone drops off.

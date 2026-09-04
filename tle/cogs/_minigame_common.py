@@ -91,6 +91,25 @@ class GameDef:
     scoring_variants: Dict[str, ScoringDef] = field(default_factory=dict)
     manual_ingest_only: bool = False
     rating: Optional[RatingDef] = None
+    # Set for LinkedIn games.  Results then identify players by LinkedIn
+    # display name rather than Discord author, which is what enables
+    # registration, leaderboard import, anonymous linking, per-result opt-out,
+    # and the rated-only-if-registered cut.  Akari and GuessThe.Game leave it
+    # unset and credit the message author directly.
+    # ``_minigame_linkedin.LinkedInDef``; a forward reference keeps this
+    # module free of the parsing layer that imports it.
+    linkedin: Optional['LinkedInDef'] = None
+
+    @property
+    def linkedin_identity(self):
+        return self.linkedin is not None
+
+    @property
+    def link_key(self):
+        """The ``game`` key under which this game's player links are stored."""
+        if self.linkedin is not None:
+            return self.linkedin.link_namespace
+        return self.name
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
