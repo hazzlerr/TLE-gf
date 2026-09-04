@@ -32,7 +32,7 @@ A one-time background task runs on startup to populate `author_id` and `star_cou
 
 ### Guild Config System
 
-Key-value config per guild (`guild_config` table). Used for feature gating (e.g., `starboard_leaderboard`). Managed via `;meta config`.
+Key-value config per guild (`guild_config` table). Used for feature gating (e.g., `starboard_leaderboard`). Managed via `;meta config`, which the Admin or Moderator role can use; commands behind a flag that can do damage keep their own Admin-only check.
 
 ### `;llm` — Gemini plus Grok
 
